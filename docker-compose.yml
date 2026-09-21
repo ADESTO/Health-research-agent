@@ -1,0 +1,42 @@
+# Local development AND the recommended single-server deployment (same file).
+#   docker compose up -d db                 # just the database, run Python from your venv
+#   docker compose up -d                    # database + API
+#   docker compose run --rm api python -m research_agent.cli ingest --limit 2000
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: research
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-research}
+      POSTGRES_DB: research
+    command: >
+      postgres -c shared_buffers=1GB -c maintenance_work_mem=1GB -c effective_cache_size=3GB
+               -c max_parallel_maintenance_workers=2
+    ports:
+      - "127.0.0.1:5432:5432"   # only reachable from this machine
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U research"]
+      interval: 5s
+      retries: 20
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://research:${POSTGRES_PASSWORD:-research}@db:5432/research
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      - ./data:/app/data              # optional local parquet downloads
+      - fastembed-cache:/root/.cache  # embedding model downloaded once
+
+volumes:
+  pgdata:
+  fastembed-cache:

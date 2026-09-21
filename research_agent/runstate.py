@@ -1,0 +1,120 @@
+"""Shared run workspace. Agents never pass big payloads to each other directly; they read and write
+this shared state (Postgres), and hand each other short summaries."""
+from __future__ import annotations
+
+import json
+import uuid
+from dataclasses import dataclass, field
+from typing import Any, Callable
+
+from research_agent.config import settings
+from research_agent.db import connect
+from research_agent.llm import LLMClient, get_llm
+
+
+def _dumps(obj: Any) -> str:
+    return json.dumps(obj, default=str, ensure_ascii=False)
+
+
+@dataclass
+class RunContext:
+    run_id: str
+    question: str
+    llm_factory: Callable[..., LLMClient]
+    pg: Any = None
+    on_event: Callable[[str, str, dict], None] | None = None
+    clients: list = field(default_factory=list)   # every LLM client created in this run (for token totals)
+    _llm: LLMClient | None = field(default=None, repr=False)
+
+    # --- lifecycle -------------------------------------------------------------------------
+    @classmethod
+    def create(cls, question: str, provider: str | None = None, llm_factory=None, on_event=None,
+               run_id: str | None = None) -> "RunContext":
+        base = llm_factory or (lambda strong=False: get_llm(provider, strong=strong))
+        clients: list = []
+
+        def factory(strong: bool = False):
+            client = base(strong=strong)
+            clients.append(client)
+            return client
+
+        ctx = cls(run_id=run_id or str(uuid.uuid4()), question=question, llm_factory=factory,
+                  pg=connect(), on_event=on_event, clients=clients)
+        llm = ctx.llm
+        ctx.pg.execute(
+            "INSERT INTO runs (run_id, question, status, provider, model) VALUES (%s,%s,'running',%s,%s) "
+            "ON CONFLICT (run_id) DO UPDATE SET status='running', provider=EXCLUDED.provider, model=EXCLUDED.model",
+            (ctx.run_id, question, llm.provider, llm.model),
+        )
+        ctx._prepare_session()
+        return ctx
+
+    def child(self) -> "RunContext":
+        """Same run, separate DB connection + LLM client — lets sub-agents run in parallel threads."""
+        c = RunContext(self.run_id, self.question, self.llm_factory, connect(), self.on_event, self.clients)
+        c._prepare_session()
+        return c
+
+    def _prepare_session(self) -> None:
+        # HNSW + WHERE filters: widen the candidate pool, and on pgvector >= 0.8 keep scanning
+        # the index until enough rows pass the filter (iterative scans). Older versions ignore it.
+        for stmt in ("SET hnsw.ef_search = 200", "SET hnsw.iterative_scan = relaxed_order"):
+            try:
+                self.pg.execute(stmt)
+            except Exception:
+                pass
+
+    def close(self) -> None:
+        if self.pg is not None:
+            self.pg.close()
+
+    @property
+    def llm(self) -> LLMClient:
+        if self._llm is None:
+            self._llm = self.llm_factory()
+        return self._llm
+
+    # --- events / notes --------------------------------------------------------------------
+    def emit(self, agent: str, kind: str, payload: dict | None = None) -> None:
+        payload = payload or {}
+        self.pg.execute("INSERT INTO run_events (run_id, agent, kind, payload) VALUES (%s,%s,%s,%s::jsonb)",
+                        (self.run_id, agent, kind, _dumps(payload)))
+        if self.on_event:
+            self.on_event(agent, kind, payload)
+
+    def save_note(self, agent: str, content: dict) -> None:
+        self.pg.execute(
+            "INSERT INTO run_notes (run_id, agent, content) VALUES (%s,%s,%s::jsonb) "
+            "ON CONFLICT (run_id, agent) DO UPDATE SET content = EXCLUDED.content, ts = now()",
+            (self.run_id, agent, _dumps(content)),
+        )
+
+    def notes(self) -> dict[str, dict]:
+        rows = self.pg.execute("SELECT agent, content FROM run_notes WHERE run_id=%s ORDER BY ts",
+                               (self.run_id,)).fetchall()
+        return {r["agent"]: r["content"] for r in rows}
+
+    # --- shortlist -------------------------------------------------------------------------
+    def shortlist_ids(self) -> list[str]:
+        return [r["paper_id"] for r in self.pg.execute(
+            "SELECT paper_id FROM run_papers WHERE run_id=%s ORDER BY score DESC NULLS LAST, paper_id",
+            (self.run_id,)).fetchall()]
+
+    def token_usage(self) -> dict:
+        return {"input_tokens": sum(c.usage.input_tokens for c in self.clients),
+                "cached_input_tokens": sum(c.usage.cached_input_tokens for c in self.clients),
+                "output_tokens": sum(c.usage.output_tokens for c in self.clients),
+                "llm_calls": sum(c.usage.calls for c in self.clients)}
+
+    def finish(self, report_md: str | None, error: str | None = None) -> None:
+        u = self.token_usage()
+        self.pg.execute(
+            "UPDATE runs SET status=%s, report_md=%s, error=%s, finished_at=now(), "
+            "input_tokens=%s, output_tokens=%s, llm_calls=%s WHERE run_id=%s",
+            ("failed" if error else "done", report_md, error,
+             u["input_tokens"], u["output_tokens"], u["llm_calls"], self.run_id),
+        )
+
+    @property
+    def extraction_version(self) -> str:
+        return settings.extraction_schema_version

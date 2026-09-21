@@ -1,0 +1,117 @@
+-- Health Research Intelligence schema. {dim} is replaced with the embedding dimension.
+CREATE EXTENSION IF NOT EXISTS vector;
+
+-- ---------------------------------------------------------------- corpus
+CREATE TABLE IF NOT EXISTS papers (
+    paper_id            text PRIMARY KEY,
+    title               text NOT NULL,
+    abstract            text NOT NULL,
+    authors             text,
+    categories          text[] NOT NULL,
+    primary_category    text,
+    year                int NOT NULL,
+    first_version_date  timestamptz,
+    doi                 text,
+    journal_ref         text,
+    license             text,
+    health_reason       text NOT NULL,          -- 'category:<cat>' or 'keyword:<term>' — why it is in the health subset
+    tsv                 tsvector GENERATED ALWAYS AS (
+                           setweight(to_tsvector('english', coalesce(title, '')), 'A') ||
+                           setweight(to_tsvector('english', coalesce(abstract, '')), 'B')
+                        ) STORED,
+    embedding           vector({dim})
+);
+CREATE INDEX IF NOT EXISTS papers_tsv_idx   ON papers USING gin (tsv);
+CREATE INDEX IF NOT EXISTS papers_year_idx  ON papers (year);
+CREATE INDEX IF NOT EXISTS papers_cats_idx  ON papers USING gin (categories);
+-- HNSW index is created after bulk load (much faster) — see ingestion.load.build_indexes
+
+-- Denominators for trend normalisation: ALL arXiv papers per year and primary category
+CREATE TABLE IF NOT EXISTS corpus_year_stats (
+    year             int  NOT NULL,
+    primary_category text NOT NULL,
+    n_papers         int  NOT NULL,
+    PRIMARY KEY (year, primary_category)
+);
+
+-- Cleaned full text, fetched lazily for shortlisted papers only
+CREATE TABLE IF NOT EXISTS paper_fulltext (
+    paper_id     text PRIMARY KEY REFERENCES papers(paper_id) ON DELETE CASCADE,
+    status       text NOT NULL,                 -- ok | missing | stub | template_suspect
+    clean_text   text,
+    sections     jsonb,                          -- [{"heading": ..., "text": ...}]
+    resolution   text,
+    n_chars      int,
+    fetched_at   timestamptz DEFAULT now()
+);
+
+-- Structured extraction per paper, cached across runs (keyed by schema version)
+CREATE TABLE IF NOT EXISTS extractions (
+    paper_id        text NOT NULL REFERENCES papers(paper_id) ON DELETE CASCADE,
+    schema_version  text NOT NULL,
+    source          text NOT NULL,              -- abstract | fulltext
+    data            jsonb NOT NULL,
+    model           text,
+    created_at      timestamptz DEFAULT now(),
+    PRIMARY KEY (paper_id, schema_version)
+);
+
+-- ---------------------------------------------------------------- runs (shared agent workspace)
+CREATE TABLE IF NOT EXISTS runs (
+    run_id       uuid PRIMARY KEY,
+    question     text NOT NULL,
+    status       text NOT NULL DEFAULT 'queued', -- queued | running | done | failed
+    provider     text,
+    model        text,
+    report_md    text,
+    error        text,
+    input_tokens  bigint DEFAULT 0,
+    output_tokens bigint DEFAULT 0,
+    llm_calls     int DEFAULT 0,
+    created_at   timestamptz DEFAULT now(),
+    finished_at  timestamptz
+);
+
+CREATE TABLE IF NOT EXISTS run_papers (
+    run_id    uuid NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    paper_id  text NOT NULL REFERENCES papers(paper_id),
+    added_by  text NOT NULL,
+    reason    text,
+    score     real,
+    PRIMARY KEY (run_id, paper_id)
+);
+
+-- Agent outputs ("notes") that other agents can read
+CREATE TABLE IF NOT EXISTS run_notes (
+    run_id   uuid NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    agent    text NOT NULL,
+    content  jsonb NOT NULL,
+    ts       timestamptz DEFAULT now(),
+    PRIMARY KEY (run_id, agent)
+);
+
+-- Every agent turn / tool call, for the UI timeline and debugging
+CREATE TABLE IF NOT EXISTS run_events (
+    id       bigserial PRIMARY KEY,
+    run_id   uuid NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    agent    text NOT NULL,
+    kind     text NOT NULL,                      -- start | tool_call | tool_result | message | finish | error
+    payload  jsonb,
+    ts       timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS run_events_run_idx ON run_events (run_id, id);
+
+-- Claims proposed by analysis agents; verified deterministically by the Evidence layer
+CREATE TABLE IF NOT EXISTS claims (
+    id          bigserial PRIMARY KEY,
+    run_id      uuid NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    agent       text NOT NULL,
+    text        text NOT NULL,
+    claim_type  text NOT NULL,                   -- prevalence | trend
+    predicate   jsonb NOT NULL,
+    status      text NOT NULL DEFAULT 'pending', -- pending | supported | unsupported | rejected
+    result      jsonb,
+    review_note text,
+    created_at  timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS claims_run_idx ON claims (run_id);
