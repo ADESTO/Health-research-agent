@@ -64,6 +64,8 @@ class Settings:
     # Groq counts max_tokens towards that) see the "Groq free tier" block in .env.example.
     agent_max_tokens: int = int(os.getenv("AGENT_MAX_TOKENS", "4096"))
     report_max_tokens: int = int(os.getenv("REPORT_MAX_TOKENS", "4096"))
+    # after the report is written, an agent backs, corrects or removes numbers code could not trace
+    number_check: bool = os.getenv("NUMBER_CHECK", "1") != "0"
     # agents whose final answer is a long structured list (map protocol, gap reasoning, designs)
     long_output_max_tokens: int = int(os.getenv("LONG_OUTPUT_MAX_TOKENS", "8192"))
     # evidence quotes make extractions longer; a cut-off extraction now fails loudly instead of saving blanks

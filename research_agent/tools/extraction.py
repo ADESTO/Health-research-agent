@@ -315,8 +315,7 @@ def value_counts(ctx, field: str, top: int = 30) -> dict:
     rows = _rows(ctx)
     counts: dict[str, dict] = {}
     for r in rows:
-        for v in _values(r["data"], field):
-            k = v.lower()
+        for k, v in {v.lower(): v for v in _values(r["data"], field)}.items():   # a paper counts once per value
             c = counts.setdefault(k, {"value": v, "n": 0, "paper_ids": []})
             c["n"] += 1
             c["paper_ids"].append(r["paper_id"])
@@ -324,6 +323,8 @@ def value_counts(ctx, field: str, top: int = 30) -> dict:
     ranked = sorted(counts.values(), key=lambda c: -c["n"])[: max(1, min(int(top), 80))]
     for c in ranked:
         c["paper_ids"] = c["paper_ids"][:8]
+    # Not recorded as evidence for the report audit: with dozens of values, almost every small "n of N"
+    # would match one of them by coincidence. Numbers a report quotes are measured with test_claim instead.
     return {"field": field, "n_papers": len(rows), "n_stated": stated, "n_not_stated": len(rows) - stated,
             "values": ranked}
 

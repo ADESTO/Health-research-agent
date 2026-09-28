@@ -196,14 +196,13 @@ def audit_numbers(body: str, allowed: set[tuple[int, int]]) -> tuple[str, int]:
     return _N_OF_M.sub(repl, body), flagged
 
 
-def finalize_report(ctx, body: str) -> tuple[str, dict]:
-    """Validate citations and numbers, then append code-generated run facts, evidence table and references."""
-    body = normalise_citations(body)
-    shortlist = set(ctx.shortlist_ids())
-    claims = {c["id"]: c for c in ctx.pg.execute(
-        "SELECT id, text, status, claim_type, result FROM claims WHERE run_id=%s ORDER BY id",
-        (ctx.run_id,)).fetchall()}
-    facts = run_facts(ctx)
+def allowed_counts(ctx, claims: dict | None = None, facts: dict | None = None) -> set[tuple[int, int]]:
+    """Every "n of N" that code has computed in this run: run facts, claim counts and counting-tool results."""
+    if claims is None:
+        claims = {c["id"]: c for c in ctx.pg.execute(
+            "SELECT id, text, status, claim_type, result FROM claims WHERE run_id=%s ORDER BY id",
+            (ctx.run_id,)).fetchall()}
+    facts = facts or run_facts(ctx)
     allowed = {(facts["fulltext"], facts["shortlist"]), (facts["abstract_only"], facts["shortlist"]),
                (facts["extracted"], facts["shortlist"]), (facts["fulltext"], facts["extracted"]),
                (facts["abstract_only"], facts["extracted"])}
@@ -219,7 +218,19 @@ def finalize_report(ctx, body: str) -> tuple[str, dict]:
         allowed.add((statuses.count(st), len(statuses)))
     for e in ctx.pg.execute("SELECT payload FROM run_events WHERE run_id=%s AND kind='count'",
                             (ctx.run_id,)).fetchall():
-        allowed.add((int(e["payload"]["n"]), int(e["payload"]["total"])))  # corpus_count results
+        allowed.add((int(e["payload"]["n"]), int(e["payload"]["total"])))  # corpus_count, value_counts, test_claim
+    return allowed
+
+
+def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[str, dict]:
+    """Validate citations and numbers, then append code-generated run facts, evidence table and references."""
+    body = normalise_citations(body)
+    shortlist = set(ctx.shortlist_ids())
+    claims = {c["id"]: c for c in ctx.pg.execute(
+        "SELECT id, text, status, claim_type, result FROM claims WHERE run_id=%s ORDER BY id",
+        (ctx.run_id,)).fetchall()}
+    facts = run_facts(ctx)
+    allowed = allowed_counts(ctx, claims, facts)
 
     body, citation_fixes = align_claim_citations(body, claims)
     bad_papers = sorted({pid for pid in _cited_ids(body) if pid not in shortlist})
@@ -248,6 +259,11 @@ def finalize_report(ctx, body: str) -> tuple[str, dict]:
                                                           sorted(facts["shortlist_by_corpus"].items())) or "n/a"),
              f"- Numbers marked [unverified] in the text above: {unverified_numbers} "
              "(not backed by a supported claim or these facts)",
+             *([f"- Numbers checked after writing: {number_check.get('backed', 0)} backed by a new count, "
+                f"{number_check.get('corrected', 0)} corrected to the measured count, "
+                f"{number_check.get('removed', 0)} removed because they could not be measured"
+                + (f" ({number_check['refused']} proposed fixes refused by the checks)"
+                   if number_check.get("refused") else "")] if number_check else []),
              "", "## Evidence table", "",
              "| Claim | Statement | Verdict | Evidence |", "|---|---|---|---|"]
     for cid, c in claims.items():

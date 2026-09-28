@@ -192,6 +192,7 @@ def test_claim(ctx, claim_type: str, predicate: dict) -> dict:
         return {"error": "no extractions yet for this run; run literature first"}
     r = m["result"]
     if claim_type == "prevalence":
+        ctx.emit("test_claim", "count", {"n": r["n_matching"], "total": r["denominator"]})
         return {"n_matching": r["n_matching"], "denominator": r["denominator"], "share": r["share"],
                 "over": r["over"], "bounds_pass": r["supported"], "matched_values": r["matched_values"][:15],
                 "caveat": r["caveat"],

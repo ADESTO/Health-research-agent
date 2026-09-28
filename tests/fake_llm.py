@@ -120,7 +120,8 @@ class FakeLLM:
                           ("Research Manager", "orchestrator"), ("Discovery agent", "discovery"),
                           ("Literature Analyst", "literature"), ("Methods agent", "methods"),
                           ("Trend agent", "trends"), ("Research Gap agent", "gaps"),
-                          ("Evidence agent", "evidence"), ("Synthesis agent", "synthesis")):
+                          ("Evidence agent", "evidence"), ("Synthesis agent", "synthesis"),
+                          ("Number Check agent", "number_check")):
             if key in system:
                 return name
         raise AssertionError("unknown agent prompt")
@@ -233,10 +234,26 @@ class FakeLLM:
         first = brief["papers"][0]["paper_id"]
         supported = [c["claim"] for c in brief["claims"] if c["status"] == "supported"]
         unsupported = [c["claim"] for c in brief["claims"] if c["status"] != "supported"]
+        n = len(brief["papers"])
         body = (f"## Summary\n- Malaria forecasting relies on climate covariates [arXiv:{first}] "
                 f"[{supported[0] if supported else 'C0'}].\n- A fake citation [arXiv:9999.99999] and an "
-                f"unverified one [{unsupported[0] if unsupported else 'C0'}].\n")
+                f"unverified one [{unsupported[0] if unsupported else 'C0'}].\n"
+                f"- Satellite-derived inputs appear in {n - 1} of {n} papers.\n"
+                f"- Point metrics are reported by 3 of {n} papers (a hand-made sum).\n")
         return [_call("finish", report_markdown=body)]
+
+    def _number_check(self, step, last, messages):
+        """Measures the first untraced number with a claim, drops the second, keeps the rest."""
+        items = json.loads(messages[0]["content"][0]["text"].split("Resolve these numbers:\n", 1)[1].split("\n\n")[0])
+        if step == 0:
+            return [_call("propose_claim", text="Satellite-derived inputs are used by some shortlisted papers.",
+                          claim_type="prevalence",
+                          predicate={"field": "data_modalities", "any_of": ["satellite"], "min_count": 1})]
+        fixes = [{"item": items[0]["item"], "action": "measure", "claim_id": last[0].get("claim_id")}]
+        if len(items) > 1:
+            fixes.append({"item": items[1]["item"], "action": "drop",
+                          "sentence": "Point metrics are reported by some papers (count not measured)."})
+        return [_call("finish", fixes=fixes)]
 
     # ------------------------------------------------------------------ opportunity map agents
     def _protocol(self, step, last, messages):

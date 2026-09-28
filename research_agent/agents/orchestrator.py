@@ -62,7 +62,15 @@ def run_specialist(ctx: RunContext, agent_name: str, task: str) -> dict:
                 body = ("## Summary\n\n_The synthesis agent returned no report text (usually its output was cut "
                         "off by the token limit). Raise REPORT_MAX_TOKENS and rerun with `--redo synthesis`. "
                         "The code-checked sections below are still valid._")
-            report, audit = finalize_report(child, body)
+            number_check = None
+            if settings.number_check:
+                try:
+                    from research_agent.agents.number_check import resolve_numbers
+
+                    body, number_check = resolve_numbers(child, body)
+                except Exception as exc:   # the check improves a report; it must never lose one
+                    child.emit("number_check", "error", {"error": str(exc)[:300]})
+            report, audit = finalize_report(child, body, number_check)
             child.pg.execute("UPDATE runs SET report_md=%s WHERE run_id=%s", (report, ctx.run_id))
             child.emit("synthesis", "report", audit)
             return {"report_written": True, "chars": len(report), "citation_audit": audit}

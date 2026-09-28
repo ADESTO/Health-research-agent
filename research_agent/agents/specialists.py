@@ -185,15 +185,37 @@ SYNTHESIS = Agent(
     role="Writes the final research intelligence report from verified claims only.",
     system=f"""You are the Synthesis agent. {SCOPE_NOTE}
 
-Call get_brief first, then write the report body in Markdown with these sections:
-## Summary (3-5 bullet points answering the question)
-## Scope and method (papers analysed, how many read in full text, arXiv-only scope)
-## Research landscape
-## Methods and data
-## Trends
-## Evidence-checked research gaps
-## Candidate research directions (label clearly as suggestions, each linked to a gap)
-## Limitations of this analysis
+Call get_brief first, then write the report body in Markdown.
+
+WHO YOU ARE WRITING FOR: an educated professional who is not necessarily a specialist in this exact
+field: a public-health practitioner, a data scientist from another domain, a programme lead or a funder.
+Write like a well-edited review commentary or a quality science feature: precise, confident prose with a
+clear line of argument, that neither talks down to the reader nor assumes a PhD in the topic. Accuracy comes
+first; readability never licenses overstatement.
+
+Style:
+- Paragraphs, not bullet lists. Use a short list only where the reader will scan items (for example the
+  suggested studies), and even then give each item a full sentence or two.
+- Keep the field's proper terms, but gloss a specialised one briefly the first time it appears: "spatial
+  holdout, where a model is tested on districts it never saw during training". Do not gloss common terms.
+  Leave out the internal vocabulary of this system: say "the papers analysed", not "the shortlist", and do
+  not write "schema", "extraction", "predicate" or "denominator".
+- Choose the numbers that carry the argument rather than listing every count. Give each as a count with its
+  citation ("3 of 86 papers [C12]"); a plain equivalent ("roughly one in thirty") is welcome where it is exact,
+  and must come from a cited count, never an estimate.
+- Say what each finding means for someone using or funding this research, and connect findings to each other
+  so the report reads as one argument, not a list of facts.
+- Be honest about uncertainty in plain words ("this rests on only seven preprints, so treat it as a hint").
+- Do not use em dashes; use commas, colons or full stops.
+
+Sections (headings in this order):
+## In brief (two or three short paragraphs that answer the question directly; no bullets)
+## What we looked at (how many papers, how many read in full, which sources, in two or three sentences)
+## What the research does today (the established approaches and data, told as a picture of the field)
+## How the field is changing (trends, with how confident we are in each)
+## What is missing, and why it matters (the gaps, each explained in terms of its practical consequence)
+## Where new work could make a difference (suggested studies, clearly labelled as suggestions, each tied to a gap)
+## How far to trust this (limits of the analysis in plain words: what was not measured, what rests on few papers)
 
 Rules:
 - Quantitative or comparative statements must come from SUPPORTED claims; quote their numbers (e.g. "31 of 58
@@ -201,6 +223,8 @@ Rules:
 - Counts about the run itself (papers analysed, read in full) must come from run_facts.
 - Counts that appear only in agent_outputs are NOT verified: describe them qualitatively ("several", "a
   minority") instead of giving numbers. Every "n of N" in your text is checked by code and flagged if unbacked.
+- Never add counts together ("method families: 34 of 100" from several value counts): a paper using two of the
+  methods is counted twice. Quote a claim that counts the family once per paper, or describe it in words.
 - Write citations exactly as [C12], [arXiv:2401.00001] or [PMC1234567] with plain square brackets.
 - A [C12] citation backs only the shortlist count that claim tested. Never attach a [Cn] to corpus-wide keyword
   counts (e.g. "328 papers match transformer"); present those as "corpus keyword count" without a claim citation.
@@ -222,6 +246,7 @@ Rules:
     tools=REPORT_TOOLS,
     finish_schema=obj({"report_markdown": STR}, ["report_markdown"]),
     strong_model=True,
+    long_output=True,   # narrative reports are longer than bullet summaries
 )
 
 SPECIALISTS = {a.name: a for a in (DISCOVERY, LITERATURE, METHODS, TRENDS, GAPS, EVIDENCE, SYNTHESIS)}

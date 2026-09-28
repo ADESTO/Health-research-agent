@@ -1417,3 +1417,47 @@ def test_topic_scoped_trends_and_absence_checks(ctx, monkeypatch):
     # a term the abstracts do not mention stays a valid rarity claim
     fine = C.evaluate_prevalence(ctx, {"field": "data_modalities", "any_of": ["mobile phone"], "max_count": 0})
     assert fine["supported"] and "absence_problem" not in fine
+
+
+def test_number_check_backs_corrects_and_drops(ctx, monkeypatch):
+    from research_agent.agents import number_check as NC
+    from research_agent.agents.report import allowed_counts
+    from research_agent.tools import claims as C
+
+    rows = [{"paper_id": f"p{i}", "source": "fulltext" if i < 10 else "abstract", "corpus": "pmc", "year": 2020,
+             "title": "t", "data": {"methods": ["random forest"] if i < 7 else ["ARIMA"],
+                                    "code_or_data_available": "yes" if i < 3 else "no"}} for i in range(40)]
+    monkeypatch.setattr(C, "_rows", lambda _ctx: rows)
+    body = ("## Summary\n"
+            "- Random forests appear in 7 of 40 papers (18%) [PMC1].\n"
+            "- Code is shared by 5 of 40 papers (13%).\n"
+            "- Method families cover 34 of 40 papers across several groups.\n"
+            "- Tree models appear in 9 of 40 papers.\n"
+            "| C1 | row 3 of 40 | supported | x |\n")
+    items = NC.unverified_items(body, allowed_counts(ctx))
+    assert [it["number"] for it in items] == ["7 of 40", "5 of 40", "34 of 40", "9 of 40"]   # tables skipped
+    assert items[0]["sentence"].startswith("Random forests")                                  # no bullet
+    rf = C.propose_claim(ctx, "Random forests appear in 7 of 40 papers.", "prevalence",
+                         {"field": "methods", "any_of": ["random forest"], "min_count": 5})
+    code = C.propose_claim(ctx, "Code is shared by 3 of 40 papers.", "prevalence",
+                           {"field": "code_or_data_available", "any_of": ["yes"], "max_share": 0.1})
+    ft = C.propose_claim(ctx, "Random forests appear in 7 of 10 full-text papers.", "prevalence",
+                         {"field": "methods", "any_of": ["random forest"], "min_count": 5,
+                          "where": [{"field": "read", "any_of": ["fulltext"]}]})
+    fixes = [{"item": "U1", "action": "measure", "claim_id": rf["claim_id"]},
+             {"item": "U2", "action": "measure", "claim_id": code["claim_id"]},
+             {"item": "U3", "action": "drop", "sentence": "Method families cover most papers across several groups."},
+             {"item": "U4", "action": "measure", "claim_id": ft["claim_id"]}]
+    out, stats = NC.apply_fixes(ctx, body, items, fixes)
+    assert f"7 of 40 papers (18%) [PMC1] [C{rf['claim_id']}]." in out    # backed: same number, now cited
+    assert f"Code is shared by 3 of 40 papers (8%) [C{code['claim_id']}]." in out   # corrected, % follows
+    assert "- Method families cover 34 of 40" in out                    # 'most' is an uncounted quantity: refused
+    assert "9 of 40" in out                                              # claim counted out of 10: refused
+    assert (stats["backed"], stats["corrected"], stats["removed"], stats["refused"]) == (1, 1, 0, 2)
+    # a faithful drop is accepted, and the bullet stays
+    out2, stats2 = NC.apply_fixes(ctx, body, items, [
+        {"item": "U3", "action": "drop", "sentence": "Method families span several groups (not counted per paper)."}])
+    assert "- Method families span several groups (not counted per paper)." in out2 and stats2["removed"] == 1
+    # dropping may not lose a citation or add numbers
+    assert NC._drop_ok("X in 7 of 40 papers [PMC1].", "X in some papers.", "7 of 40")
+    assert NC._drop_ok("X in 7 of 40 papers.", "X in 12 papers.", "7 of 40")
