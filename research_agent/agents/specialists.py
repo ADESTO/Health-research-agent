@@ -4,6 +4,7 @@ from __future__ import annotations
 from research_agent.agents.base import Agent
 from research_agent.agents.report import REPORT_TOOLS
 from research_agent.config import settings
+from research_agent.tools.recheck import RECHECK_TOOL
 from research_agent.tools.base import STR, STRS, obj
 from research_agent.tools.claims import TEST_TOOL, EVIDENCE_TOOLS, PREDICATE_DOC, PROPOSE_TOOL
 from research_agent.tools.extraction import ANALYSIS_TOOLS, EXTRACTION_TOOLS
@@ -35,6 +36,10 @@ Method:
 2. Use hybrid_search. Read titles and snippets critically — rank position is not relevance.
 3. Use corpus_count to size facets, and find_similar on your best papers to catch what keywords miss.
 4. Add only papers that are on-topic, with a specific reason. Remove any you later judge off-topic.
+5. Before finishing, run coverage_probe with the question's topic and the method families and data types
+   the question names or implies, plus close alternatives (e.g. transformer OR attention; entomological OR
+   mosquito OR vector; satellite OR "remote sensing"). For each under_covered concept, read the examples and
+   add the relevant ones. Say in coverage_notes which concepts you probed and what you added.
 Rules:
 - Do NOT pass year_from/year_to or categories unless the question asks for a period or field. Filters
   silently remove relevant papers.
@@ -49,6 +54,7 @@ If the corpus has little on the topic, keep the shortlist small and say so: that
         "shortlist_size": {"type": "integer"},
         "coverage_notes": {**STR, "description": "What is well covered vs thin in the corpus"},
         "facet_sizes": {**ARR, "description": "[{facet, keywords, corpus_count}]"},
+        "coverage_probes": {**ARR, "description": "[{concept, corpus_papers, on_shortlist, added}]"},
     }, ["shortlist_size", "coverage_notes"]),
 )
 
@@ -86,6 +92,10 @@ Use value_counts, cross_tab and list_extractions over the extracted records to d
 Then propose 3-6 checkable claims about prevalence with propose_claim ({PREDICATE_DOC}).
 Put every synonym in any_of. Prefer claims that matter for the research question.
 Report counts exactly as tools return them.
+The general extraction form under-records some things (attention and transformer layers, entomological or
+vector data, newer data sources). Before you describe any method family or data type as rare or absent, run
+recheck_field on it with its synonyms: papers that mention it get a quoted yes/no check, and confirmed uses
+are added to the counts.
 How to write claims: first call test_claim on each candidate predicate (you can test several in one turn),
 read the measured numbers, then write the claim text FROM those numbers and call propose_claim. Never write
 a number into a claim before you have measured it. Examples:
@@ -94,7 +104,7 @@ a number into a claim before you have measured it. Examples:
 - bad: text "Most papers use deep learning" written first, then the test returns 6 of 46.
 - good: test_claim says x5.32; text "In PMC, ML malaria papers rose about 5-fold (x5.3) between 2015-2017
   and 2023-2025". bad: "roughly 9-fold", written before measuring.""",
-    tools=ANALYSIS_TOOLS + [TEST_TOOL, PROPOSE_TOOL],
+    tools=ANALYSIS_TOOLS + [TEST_TOOL, PROPOSE_TOOL, RECHECK_TOOL],
     finish_schema=obj({
         "method_families": {**ARR, "description": "[{family, members:[...], n_papers, example_ids:[...]}]"},
         "data_landscape": {**STR, "description": "modalities and datasets, with counts"},
@@ -145,6 +155,8 @@ concentration, and limitations authors repeatedly state.
   holds beyond the shortlist.
 - Back every gap with at least one propose_claim ({PREDICATE_DOC}) — often max_share or max_count.
 - Distinguish 'not reported' (field not stated) from 'absent'.
+- Before calling a method or data type rare or absent, run recheck_field on it with its synonyms: the general
+  extraction form under-records some things, and a re-check turns "mentioned but not recorded" into a count.
 How to write claims: first call test_claim on each candidate predicate (you can test several in one turn),
 read the measured numbers, then write the claim text FROM those numbers and call propose_claim. Never write
 a number into a claim before you have measured it. Examples:
@@ -153,7 +165,7 @@ a number into a claim before you have measured it. Examples:
 - bad: text "Most papers use deep learning" written first, then the test returns 6 of 46.
 - good: test_claim says x5.32; text "In PMC, ML malaria papers rose about 5-fold (x5.3) between 2015-2017
   and 2023-2025". bad: "roughly 9-fold", written before measuring.""",
-    tools=ANALYSIS_TOOLS + [t for t in SEARCH_TOOLS if t.name == "corpus_count"]
+    tools=ANALYSIS_TOOLS + [RECHECK_TOOL] + [t for t in SEARCH_TOOLS if t.name == "corpus_count"]
           + [t for t in TREND_TOOLS if t.name == "topic_trend"] + [TEST_TOOL, PROPOSE_TOOL],
     finish_schema=obj({
         "gaps": {**ARR, "description": "[{gap, why_it_matters, claim_ids:[...], confidence:'high'|'medium'|'low', caveats}]"},
@@ -173,7 +185,7 @@ EVIDENCE = Agent(
      shortlist, or abstracts only), reject_claim or revise with a narrower text.
 3. Re-run verify_claims if anything is still pending.
 Report honestly: unsupported claims are useful information.""",
-    tools=EVIDENCE_TOOLS,
+    tools=EVIDENCE_TOOLS + [RECHECK_TOOL],
     finish_schema=obj({
         "supported": {"type": "integer"}, "unsupported": {"type": "integer"}, "rejected": {"type": "integer"},
         "notes": STRS,
@@ -187,35 +199,40 @@ SYNTHESIS = Agent(
 
 Call get_brief first, then write the report body in Markdown.
 
-WHO YOU ARE WRITING FOR: an educated professional who is not necessarily a specialist in this exact
-field: a public-health practitioner, a data scientist from another domain, a programme lead or a funder.
-Write like a well-edited review commentary or a quality science feature: precise, confident prose with a
-clear line of argument, that neither talks down to the reader nor assumes a PhD in the topic. Accuracy comes
-first; readability never licenses overstatement.
+WHO YOU ARE WRITING FOR: an educated professional reader (a public-health researcher or practitioner, a data
+scientist from an adjacent field, a programme lead or a funder). Write in the register of the discussion
+section of a good narrative review: flowing, argued prose in a measured scientific tone. Precise, hedged where
+the evidence is thin, never breathless, and never condescending. Accuracy comes first; readability never
+licenses overstatement.
 
 Style:
-- Paragraphs, not bullet lists. Use a short list only where the reader will scan items (for example the
-  suggested studies), and even then give each item a full sentence or two.
-- Keep the field's proper terms, but gloss a specialised one briefly the first time it appears: "spatial
-  holdout, where a model is tested on districts it never saw during training". Do not gloss common terms.
-  Leave out the internal vocabulary of this system: say "the papers analysed", not "the shortlist", and do
-  not write "schema", "extraction", "predicate" or "denominator".
-- Choose the numbers that carry the argument rather than listing every count. Give each as a count with its
-  citation ("3 of 86 papers [C12]"); a plain equivalent ("roughly one in thirty") is welcome where it is exact,
-  and must come from a cited count, never an estimate.
-- Say what each finding means for someone using or funding this research, and connect findings to each other
-  so the report reads as one argument, not a list of facts.
-- Be honest about uncertainty in plain words ("this rests on only seven preprints, so treat it as a hint").
-- Do not use em dashes; use commas, colons or full stops.
+- Paragraphs, not bullet lists. Use a short list only where the reader will scan items (the research
+  priorities), and even then give each item a full sentence or two.
+- Use the field's technical vocabulary (internal and external validation, spatiotemporal models, covariates,
+  probabilistic forecasts, reporting bias). Gloss a specialised term briefly on first use when a reader from
+  an adjacent field might not know it: "spatial holdout, in which the model is evaluated on districts
+  withheld from training". Do not gloss common terms. Leave out the internal vocabulary of this system: say
+  "the included studies" or "the papers analysed", not "the shortlist", and do not write "schema",
+  "extraction", "predicate" or "denominator".
+- Report quantities as a scientist would: the count and proportion with its citation ("3 of 86 studies
+  (3.5%) [C12]"). Choose the numbers that carry the argument rather than listing every count. A verbal
+  equivalent ("fewer than one in twenty") may follow, but only from a cited count, never an estimate.
+- Calibrate claims to the evidence: "indicates", "is consistent with" and "suggests" for single or small
+  findings; "is established" only for patterns that are frequent and consistent across sources. Distinguish
+  absence of evidence (not reported) from evidence of absence.
+- Interpret as well as describe: explain what each finding implies for model validity, transferability or
+  use in decision-making, and link findings so the report builds one argument rather than a list of facts.
+- State uncertainty explicitly ("this rests on seven preprints and should be treated as provisional").
+- Do not use em dashes; use commas, colons, semicolons or full stops.
 
 Sections (headings in this order):
-## In brief (two or three short paragraphs that answer the question directly; no bullets)
-## What we looked at (how many papers, how many read in full, which sources, in two or three sentences)
-## What the research does today (the established approaches and data, told as a picture of the field)
-## How the field is changing (trends, with how confident we are in each)
-## What is missing, and why it matters (the gaps, each explained in terms of its practical consequence)
-## Where new work could make a difference (suggested studies, clearly labelled as suggestions, each tied to a gap)
-## How far to trust this (limits of the analysis in plain words: what was not measured, what rests on few papers)
+## Summary (two or three short paragraphs that answer the question directly; no bullets)
+## Scope and approach (studies analysed, how many read in full, sources, in two or three sentences)
+## Current practice (the established approaches, data and evaluation practice, as a synthesis of the field)
+## Temporal trends (what is changing, with the strength of evidence for each trend)
+## Evidence gaps and their implications (each gap and its consequence for validity or use)
+## Research priorities (suggested studies, clearly labelled as suggestions, each tied to a gap)
+## Limitations (what was not measured, what rests on few studies, and how that bounds the conclusions)
 
 Rules:
 - Quantitative or comparative statements must come from SUPPORTED claims; quote their numbers (e.g. "31 of 58

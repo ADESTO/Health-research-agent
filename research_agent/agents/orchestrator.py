@@ -48,7 +48,11 @@ def run_specialist(ctx: RunContext, agent_name: str, task: str) -> dict:
         if agent_name == "synthesis":
             # Report may only be written from verified claims: verify anything still pending.
             verify_claims(child)
+        if agent_name == "discovery":
+            task += _probe_hint(child)
         out = agent.run(child, task)
+        if agent_name == "literature" and "error" not in out:
+            _extract_question_fields(child)
         if agent_name == "discovery" and not child.shortlist_ids():
             # Common model failure: it searches, sees results, then finishes without shortlisting.
             # Give it one explicit second chance before concluding the corpus has nothing.
@@ -80,6 +84,33 @@ def run_specialist(ctx: RunContext, agent_name: str, task: str) -> dict:
         return {"error": f"{agent_name} failed: {exc}"}
     finally:
         child.close()
+
+
+def _probe_hint(ctx: RunContext) -> str:
+    """Point discovery at the protocol's concepts, so coverage_probe checks what the question cares about."""
+    from research_agent.opportunity.protocol import probe_concepts
+    from research_agent.tools.extraction import protocol_of
+
+    protocol = protocol_of(ctx)
+    probes = probe_concepts(protocol)
+    if not probes or not protocol.get("topic_query"):
+        return ""
+    return (f"\n\nBefore finishing, run coverage_probe with topic '{protocol['topic_query']}' and these "
+            f"concepts: {probes}. Add the relevant papers it shows are missing.")
+
+
+def _extract_question_fields(ctx: RunContext) -> None:
+    """After the literature agent, extract the protocol's question-specific fields for every paper."""
+    from research_agent.opportunity.protocol import extract_protocol_fields
+    from research_agent.tools.extraction import protocol_of
+
+    protocol = protocol_of(ctx)
+    if not protocol or not protocol.get("fields"):
+        return
+    ctx.emit("protocol_extraction", "start", {"task": "extract question-specific fields"})
+    stats = extract_protocol_fields(ctx, protocol)
+    ctx.save_note("protocol_extraction", stats)
+    ctx.emit("protocol_extraction", "finish", {"output": stats})
 
 
 def _delegate_tool(name: str) -> Tool:
@@ -164,6 +195,9 @@ def _already_done(ctx: RunContext, name: str) -> bool:
 def run_research(question: str | None = None, mode: str = "orchestrated", provider: str | None = None,
                  llm_factory=None, on_event=None, run_id: str | None = None,
                  resume: str | None = None) -> dict:
+    from research_agent.db import init_schema
+
+    init_schema()   # older databases lack newer tables and indexes; this only adds what is missing
     if resume:
         ctx = RunContext.resume(resume, provider=provider, llm_factory=llm_factory, on_event=on_event)
     else:
@@ -173,6 +207,15 @@ def run_research(question: str | None = None, mode: str = "orchestrated", provid
     if on_event:
         on_event("system", "run", {"run_id": ctx.run_id, "resumed": bool(resume)})
     try:
+        if settings.ask_protocol:
+            # Question-specific fields: the general extraction form cannot anticipate every concept a
+            # question turns on (vector data, attention models...). A failed protocol never stops the run.
+            try:
+                from research_agent.opportunity.protocol import ensure_protocol
+
+                ensure_protocol(ctx, question)
+            except Exception as exc:
+                ctx.emit("protocol", "error", {"error": str(exc)[:300]})
         if mode == "pipeline":
             for name in ORDER:
                 if name != "discovery" and not ctx.shortlist_ids():
@@ -191,7 +234,8 @@ def run_research(question: str | None = None, mode: str = "orchestrated", provid
             ORCHESTRATOR.run(ctx, task)
         report = _ensure_report(ctx)
         ctx.finish(report, None if report else "no report produced")
-        return {"run_id": ctx.run_id, "report": report, "usage": ctx.token_usage()}
+        return {"run_id": ctx.run_id, "report": report, "usage": ctx.token_usage(),
+                "usage_by_step": ctx.usage_by_step()}
     except Exception as exc:
         ctx.emit("system", "error", {"error": str(exc), "trace": traceback.format_exc()[-2000:]})
         ctx.finish(None, str(exc))

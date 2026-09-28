@@ -145,3 +145,23 @@ BEGIN
         ALTER TABLE corpus_year_stats ADD PRIMARY KEY (source, year, primary_category);
     END IF;
 END $$;
+
+-- Full texts are searchable too (methods sections name models and data that abstracts leave out).
+-- Generated from clean_text, so rows fetched before this column existed are indexed on migration.
+ALTER TABLE paper_fulltext ADD COLUMN IF NOT EXISTS tsv tsvector
+    GENERATED ALWAYS AS (to_tsvector('english', left(coalesce(clean_text, ''), 400000))) STORED;
+CREATE INDEX IF NOT EXISTS paper_fulltext_tsv_idx ON paper_fulltext USING gin (tsv);
+
+-- Focused re-checks of papers the extraction may have missed: one quoted yes/no answer per paper and
+-- concept. Confirmed ('yes' with a verified quote) values are merged into the paper's extracted field.
+CREATE TABLE IF NOT EXISTS rechecks (
+    run_id   uuid NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    paper_id text NOT NULL,
+    field    text NOT NULL,
+    concept  text NOT NULL,              -- normalised, sorted terms joined by '|'
+    verdict  text NOT NULL,              -- yes | no | unclear
+    value    text,
+    quote    text,
+    ts       timestamptz DEFAULT now(),
+    PRIMARY KEY (run_id, paper_id, field, concept)
+);

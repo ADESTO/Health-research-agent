@@ -16,6 +16,15 @@ def _dumps(obj: Any) -> str:
     return json.dumps(obj, default=str, ensure_ascii=False)
 
 
+def usage_cost(u: dict) -> float | None:
+    """USD cost from token counts, using PRICE_* settings (per million tokens). None when prices are unset."""
+    pi, pc, po = settings.price_input_per_m, settings.price_cached_input_per_m, settings.price_output_per_m
+    if not (pi or po):
+        return None
+    fresh = u["input_tokens"] - u["cached_input_tokens"]
+    return round((fresh * pi + u["cached_input_tokens"] * (pc if pc else pi) + u["output_tokens"] * po) / 1e6, 4)
+
+
 @dataclass
 class RunContext:
     run_id: str
@@ -114,13 +123,37 @@ class RunContext:
             (self.run_id,)).fetchall()]
 
     def token_usage(self) -> dict:
-        return {"input_tokens": sum(c.usage.input_tokens for c in self.clients),
-                "cached_input_tokens": sum(c.usage.cached_input_tokens for c in self.clients),
-                "output_tokens": sum(c.usage.output_tokens for c in self.clients),
-                "llm_calls": sum(c.usage.calls for c in self.clients)}
+        out = {"input_tokens": sum(c.usage.input_tokens for c in self.clients),
+               "cached_input_tokens": sum(c.usage.cached_input_tokens for c in self.clients),
+               "output_tokens": sum(c.usage.output_tokens for c in self.clients),
+               "llm_calls": sum(c.usage.calls for c in self.clients)}
+        cost = usage_cost(out)
+        if cost is not None:
+            out["cost_usd"] = cost
+        return out
+
+    def usage_by_step(self) -> dict:
+        """Tokens (and cost, when prices are set) per step: each agent, extraction, protocol fields, re-checks."""
+        steps: dict[str, dict] = {}
+        for c in self.clients:
+            s = steps.setdefault(getattr(c, "_step", "other"),
+                                 {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0, "llm_calls": 0})
+            s["input_tokens"] += c.usage.input_tokens
+            s["cached_input_tokens"] += c.usage.cached_input_tokens
+            s["output_tokens"] += c.usage.output_tokens
+            s["llm_calls"] += c.usage.calls
+        for s in steps.values():
+            cost = usage_cost(s)
+            if cost is not None:
+                s["cost_usd"] = cost
+        return dict(sorted(steps.items(), key=lambda kv: -(kv[1].get("cost_usd") or kv[1]["input_tokens"])))
 
     def finish(self, report_md: str | None, error: str | None = None) -> None:
         u = self.token_usage()
+        try:
+            self.save_note("usage", {"total": u, "by_step": self.usage_by_step()})
+        except Exception:
+            pass
         self.pg.execute(
             "UPDATE runs SET status=%s, report_md=%s, error=%s, finished_at=now(), "
             "input_tokens=%s, output_tokens=%s, llm_calls=%s WHERE run_id=%s",

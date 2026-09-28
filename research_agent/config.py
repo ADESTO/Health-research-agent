@@ -57,6 +57,10 @@ class Settings:
     max_shortlist: int = int(os.getenv("MAX_SHORTLIST", "60"))
     max_fulltext: int = int(os.getenv("MAX_FULLTEXT", "20"))
     extraction_workers: int = int(os.getenv("EXTRACTION_WORKERS", "4"))
+    # characters of each full text given to the reader (methods, data, results and limitations first)
+    fulltext_read_chars: int = int(os.getenv("FULLTEXT_READ_CHARS", "14000"))
+    # abstract-only papers read per call (1 = one call per paper)
+    abstract_batch: int = int(os.getenv("ABSTRACT_BATCH", "5"))
     agent_max_turns: int = int(os.getenv("AGENT_MAX_TURNS", "14"))
     orchestrator_max_turns: int = int(os.getenv("ORCHESTRATOR_MAX_TURNS", "16"))
 
@@ -64,6 +68,15 @@ class Settings:
     # Groq counts max_tokens towards that) see the "Groq free tier" block in .env.example.
     agent_max_tokens: int = int(os.getenv("AGENT_MAX_TOKENS", "4096"))
     report_max_tokens: int = int(os.getenv("REPORT_MAX_TOKENS", "4096"))
+    # Model prices in USD per million tokens, to show what each run and step costs (leave 0 to hide).
+    # Take them from your provider's pricing page; cached input is usually billed at a fraction.
+    price_input_per_m: float = float(os.getenv("PRICE_INPUT_PER_M", "0") or 0)
+    price_cached_input_per_m: float = float(os.getenv("PRICE_CACHED_INPUT_PER_M", "0") or 0)
+    price_output_per_m: float = float(os.getenv("PRICE_OUTPUT_PER_M", "0") or 0)
+    # ask runs also get question-specific fields (the map's protocol step)
+    ask_protocol: bool = os.getenv("ASK_PROTOCOL", "1") != "0"
+    # focused quoted re-checks when a rarity count is contradicted by the papers' own text
+    recheck: bool = os.getenv("RECHECK", "1") != "0"
     # after the report is written, an agent backs, corrects or removes numbers code could not trace
     number_check: bool = os.getenv("NUMBER_CHECK", "1") != "0"
     # agents whose final answer is a long structured list (map protocol, gap reasoning, designs)

@@ -201,8 +201,7 @@ function showReport(markdown, run) {
   reportText = markdown;
   $("#report").innerHTML = md(markdown);
   $("#reportCard").hidden = false;
-  const tok = run && run.input_tokens ? ` · ${run.input_tokens.toLocaleString()} in / ${run.output_tokens.toLocaleString()} out tokens` : "";
-  $("#reportMeta").textContent = `${(run && run.provider) || ""} ${(run && run.model) || ""}${tok}`;
+  $("#reportMeta").textContent = `${(run && run.provider) || ""} ${(run && run.model) || ""}`;
   $("#reportCard").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 

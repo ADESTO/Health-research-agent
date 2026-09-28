@@ -14,6 +14,7 @@ from research_agent.agents.base import Agent
 from research_agent.tools.base import STR, STRS, Tool, obj
 from research_agent.tools.claims import PREDICATE_DOC, TEST_TOOL, _measure, _norm, _validate
 from research_agent.tools.extraction import ANALYSIS_TOOLS, _rows, _values, known_fields
+from research_agent.tools.recheck import RECHECK_TOOL
 from research_agent.tools.search import SEARCH_TOOLS
 
 MIN_TESTABLE = 5   # a subgroup smaller than this cannot support or refute anything
@@ -178,7 +179,8 @@ Rules:
 - Reasoning you cannot test may go in `speculation`, clearly labelled.
 - Cite papers only by ids that tools returned.
 Start with get_map. Aim for 2-4 tested hypotheses per high or moderate confidence gap.""",
-    tools=MAP_TOOLS + [TEST_TOOL, HYPOTHESIS_TOOL, PASSAGE_TOOL] + _analysis("value_counts", "cross_tab", "field_by_year")
+    tools=MAP_TOOLS + [TEST_TOOL, HYPOTHESIS_TOOL, PASSAGE_TOOL, RECHECK_TOOL]
+    + _analysis("value_counts", "cross_tab", "field_by_year")
           + [t for t in SEARCH_TOOLS if t.name == "corpus_count"],
     finish_schema=obj({
         "gaps": {"type": "array", "items": {"type": "object", "properties": {

@@ -71,18 +71,6 @@ EXTRACTION_TOOL = {
     },
 }
 
-EXTRACTION_SYSTEM = """You extract structured facts from health research papers for a literature database.
-Rules:
-- Record only what the text states. If something is not stated, use an empty list, '' or 'not_stated'.
-  Never guess — an empty value is correct and useful.
-- Keep list items short (1-5 words), canonical names (e.g. 'vision transformer', not 'our ViT-based model').
-- geography = where the data was collected, not where authors work.
-- evidence: for methods, datasets, data_modalities, geography, validation_level and code_or_data_available,
-  copy the exact words from the text that show each value. Do not paraphrase. If you cannot point to words
-  in the text, the value is a guess: leave it out.
-- You are reading {source}. {source_note}"""
-
-
 # ---------------------------------------------------------------- run protocol (question-specific fields)
 SPECIAL_FIELDS = {"corpus", "read", "year"}   # usable in `where` filters: paper source, read depth, year
 
@@ -116,25 +104,6 @@ def _needs(existing: dict | None, depth: str) -> bool:
     if existing is None:
         return True
     return depth == "fulltext" and existing["source"] == "abstract"
-
-
-def _extract_one(llm, paper: dict, fulltext: str | None) -> tuple[str, dict]:
-    source = "fulltext" if fulltext else "abstract"
-    note = ("Sections from the full paper follow the abstract." if fulltext else
-            "Only the title and abstract are available, so many fields may be not stated.")
-    user = f"Title: {paper['title']}\n\nAbstract: {paper['abstract']}"
-    if fulltext:
-        user += f"\n\nSelected full-text sections:\n{fulltext}"
-    resp = llm.chat(EXTRACTION_SYSTEM.format(source=source, source_note=note),
-                    [{"role": "user", "content": [{"type": "text", "text": user}]}],
-                    tools=[EXTRACTION_TOOL], force_tool="record_extraction",
-                    max_tokens=settings.extraction_max_tokens)
-    if not resp.tool_calls:
-        raise ValueError("model returned no extraction")
-    args = resp.tool_calls[0].input or {}
-    if "_raw_arguments" in args:  # cut off mid-JSON: fail loudly rather than save an empty record
-        raise ValueError("extraction was cut off by the output limit; raise EXTRACTION_MAX_TOKENS")
-    return source, check_evidence(normalise(args), args.get("evidence"), user)
 
 
 _WORD = re.compile(r"[a-z0-9]+")
@@ -225,30 +194,31 @@ def extract_papers(ctx, paper_ids: list[str] | None = None, depth: str = "abstra
         ft_status = fetch_fulltext(ctx.pg, todo)
         rows = ctx.pg.execute("SELECT paper_id, sections FROM paper_fulltext WHERE paper_id = ANY(%s) "
                               "AND status='ok'", (todo,)).fetchall()
-        fulltexts = {r["paper_id"]: select_for_reading(r["sections"] or []) for r in rows}
+        fulltexts = {r["paper_id"]: select_for_reading(r["sections"] or [], budget=settings.fulltext_read_chars) for r in rows}
 
-    done, failed = 0, []
-    llm = ctx.llm_factory()  # one client shared by the worker threads (SDK clients are thread-safe)
+    # One read per paper covers the general fields and, when the run has a protocol, its question-specific
+    # fields too. Abstract-only papers are read in batches.
+    from research_agent.tools.reading import read_papers
 
-    def work(pid: str):
-        source, data = _extract_one(llm, papers[pid], fulltexts.get(pid))
-        conn = connect()
-        try:
+    protocol = protocol_of(ctx)
+    items = [{**papers[pid], "fulltext": fulltexts.get(pid)} for pid in todo if pid in papers]
+    results, failed, model = read_papers(ctx, items, protocol, include_base=True, step="extraction")
+    conn = connect()
+    try:
+        for pid, res in results.items():
             conn.execute(
                 "INSERT INTO extractions (paper_id, schema_version, source, data, model) "
                 "VALUES (%s,%s,%s,%s::jsonb,%s) ON CONFLICT (paper_id, schema_version) DO UPDATE "
                 "SET source=EXCLUDED.source, data=EXCLUDED.data, model=EXCLUDED.model, created_at=now()",
-                (pid, ctx.extraction_version, source, json.dumps(data), llm.model))
-        finally:
-            conn.close()
-
-    with ThreadPoolExecutor(max_workers=settings.extraction_workers) as pool:
-        futures = {pool.submit(work, pid): pid for pid in todo if pid in papers}
-        for fut in as_completed(futures):
-            try:
-                fut.result(); done += 1
-            except Exception as exc:  # one bad paper must not sink the run
-                failed.append({"paper_id": futures[fut], "error": str(exc)[:200]})
+                (pid, ctx.extraction_version, res["source"], json.dumps(res["base"]), model))
+            if res.get("protocol") is not None:
+                conn.execute(
+                    "INSERT INTO protocol_extractions (run_id, paper_id, source, data) VALUES (%s,%s,%s,%s::jsonb) "
+                    "ON CONFLICT (run_id, paper_id) DO UPDATE SET source=EXCLUDED.source, data=EXCLUDED.data",
+                    (ctx.run_id, pid, res["source"], json.dumps(res["protocol"])))
+    finally:
+        conn.close()
+    done = len(results)
 
     dropped: dict[str, int] = {}
     for r in ctx.pg.execute("SELECT data FROM extractions WHERE schema_version=%s AND paper_id = ANY(%s)",
@@ -282,7 +252,30 @@ def _rows(ctx) -> list[dict]:
             if extra.get("_unverified"):
                 data["_unverified"] = {**(data.get("_unverified") or {}), **extra["_unverified"]}
         out.append({**r, "data": data})
+    _merge_rechecks(ctx, out)
     return out
+
+
+def _merge_rechecks(ctx, rows: list[dict]) -> None:
+    """Add values confirmed by a focused re-check (each with a verified quote) to the extracted fields."""
+    from research_agent.tools.recheck import confirmed_values
+
+    try:
+        confirmed = confirmed_values(ctx.pg, ctx.run_id)
+    except Exception:   # a database from before re-checks existed: nothing to merge
+        return
+    for r in rows:
+        for field, found in confirmed.get(r["paper_id"], {}).items():
+            vals = list(r["data"].get(field) or []) if not isinstance(r["data"].get(field), str) else []
+            have = {v.lower() for v in vals}
+            added = [v for v, _ in found if v and v.lower() not in have]
+            if not added:
+                continue
+            r["data"][field] = vals + added
+            ev = dict(r["data"].get("evidence") or {})
+            ev[field] = list(ev.get(field) or []) + [q for _, q in found if q][:2]
+            r["data"]["evidence"] = ev
+            r["data"].setdefault("_rechecked", {})[field] = added
 
 
 def _values(data: dict, field: str) -> list[str]:

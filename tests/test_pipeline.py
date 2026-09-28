@@ -142,7 +142,13 @@ def test_end_to_end_run(loaded_db, mode):
         n_ft = pg.execute("""SELECT count(*) n FROM run_papers rp JOIN extractions e USING (paper_id)
                              WHERE rp.run_id=%s AND e.source='fulltext'""", (res["run_id"],)).fetchone()["n"]
         stub = pg.execute("SELECT count(*) n FROM paper_fulltext WHERE status='stub'").fetchone()["n"]
+        n_q = pg.execute("SELECT count(*) n FROM protocol_extractions WHERE run_id=%s", (res["run_id"],)).fetchone()["n"]
+        n_ex = pg.execute("""SELECT count(*) n FROM run_papers rp JOIN extractions e USING (paper_id)
+                             WHERE rp.run_id=%s""", (res["run_id"],)).fetchone()["n"]
     assert run["status"] == "done" and run["llm_calls"] > 10
+    # ask runs get question-specific fields, extracted for every analysed paper after the literature step
+    assert n_q == n_ex > 0 and ("protocol", "finish") in events
+    assert "Numbers checked after writing" in report
 
     # Deterministic evidence verdicts
     assert claims["Most studies use data from East Africa."]["status"] == "supported"
@@ -1075,18 +1081,21 @@ def test_extraction_evidence_is_checked_against_the_text():
 
 def test_cut_off_extraction_fails_loudly():
     from research_agent.llm.base import LLMResponse, ToolCall
-    from research_agent.tools.extraction import _extract_one
+    from research_agent.tools.reading import _read_one
 
     class CutOff:
         model = "x"
 
         def chat(self, *a, **k):
-            tc = ToolCall("1", "record_extraction", {"_raw_arguments": '{"problem": "malaria", "meth'})
+            tc = ToolCall("1", "record_reading", {"_raw_arguments": '{"problem": "malaria", "meth'})
             return LLMResponse("", [tc], [], "length", {})
+
+    class Ctx:
+        question = "q"
 
     import pytest as _pytest
     with _pytest.raises(ValueError, match="cut off"):
-        _extract_one(CutOff(), {"title": "t", "abstract": "a"}, None)
+        _read_one(CutOff(), Ctx(), {"paper_id": "p", "title": "t", "abstract": "a"}, None, True)
 
 
 def test_claims_are_measured_before_they_are_written(ctx, monkeypatch):
@@ -1411,6 +1420,9 @@ def test_topic_scoped_trends_and_absence_checks(ctx, monkeypatch):
     monkeypatch.setattr(C, "_rows", lambda _ctx: rows)
     absent = C.evaluate_prevalence(ctx, {"field": "data_modalities", "any_of": ["rainfall"], "max_count": 0})
     assert absent["n_matching"] == 0 and not absent["supported"] and "not established" in absent["absence_problem"]
+    # with re-checks off, proposing the absence is refused outright
+    import dataclasses
+    monkeypatch.setattr(C, "settings", dataclasses.replace(C.settings, recheck=False))
     refused = C.propose_claim(ctx, "No paper uses rainfall data (0 of %d)." % len(ids), "prevalence",
                               {"field": "data_modalities", "any_of": ["rainfall"], "max_count": 0})
     assert "not established" in refused["error"]
@@ -1461,3 +1473,212 @@ def test_number_check_backs_corrects_and_drops(ctx, monkeypatch):
     # dropping may not lose a citation or add numbers
     assert NC._drop_ok("X in 7 of 40 papers [PMC1].", "X in some papers.", "7 of 40")
     assert NC._drop_ok("X in 7 of 40 papers.", "X in 12 papers.", "7 of 40")
+
+
+def test_recheck_confirms_uses_the_extraction_missed(ctx, monkeypatch):
+    from research_agent.tools import claims as C
+    from research_agent.tools import extraction as X
+    from research_agent.tools import recheck as R
+
+    ids = [r["paper_id"] for r in ctx.pg.execute(
+        "SELECT paper_id FROM papers WHERE tsv @@ plainto_tsquery('english', 'malaria rainfall') LIMIT 8").fetchall()]
+    base = [{"paper_id": pid, "source": "abstract", "corpus": "arxiv", "year": 2020, "title": "t",
+             "data": {"data_modalities": ["surveillance counts"]}} for pid in ids]
+
+    def rows(_ctx):   # the real merge of confirmed re-checks, on these rows
+        out = [{**r, "data": dict(r["data"])} for r in base]
+        X._merge_rechecks(_ctx, out)
+        return out
+    monkeypatch.setattr(C, "_rows", rows)
+    before = C.evaluate_prevalence(ctx, {"field": "data_modalities", "any_of": ["rainfall"], "max_count": 0})
+    assert before["n_matching"] == 0 and before.get("absence_problem")
+    # proposing "no paper uses rainfall" triggers the re-check, which finds every paper does
+    res = C.propose_claim(ctx, "No paper uses rainfall data (0 of %d)." % len(ids), "prevalence",
+                          {"field": "data_modalities", "any_of": ["rainfall"], "max_count": 0})
+    assert f"{len(ids)} of {len(ids)}" in (res.get("measured") or res.get("measured_now"))
+    if "claim_id" in res:     # accepted as pending, it fails verification: its bound (none) is not met
+        C.verify_claims(ctx, [res["claim_id"]])
+        assert ctx.pg.execute("SELECT status FROM claims WHERE id=%s", (res["claim_id"],)).fetchone()["status"] \
+            == "unsupported"
+    stored = ctx.pg.execute("SELECT verdict, quote FROM rechecks WHERE run_id=%s", (ctx.run_id,)).fetchall()
+    assert len(stored) == len(ids) and all(s["verdict"] == "yes" and "rainfall" in s["quote"] for s in stored)
+    after = C.evaluate_prevalence(ctx, {"field": "data_modalities", "any_of": ["rainfall"], "min_count": 1})
+    assert after["n_matching"] == len(ids) and after["supported"] and "absence_problem" not in after
+    assert all("rainfall" in r["data"]["_rechecked"]["data_modalities"] for r in rows(ctx))
+    # a second call re-checks nobody: answers are cached per paper and concept
+    assert R.recheck(ctx, "data_modalities", ["rainfall"])["checked_now"] == 0
+    assert "list fields" in R.recheck(ctx, "validation_level", ["external"])["error"]
+
+
+def test_recheck_answers_need_a_real_quote():
+    from research_agent.llm.base import LLMResponse, ToolCall
+    from research_agent.tools.recheck import _ask
+
+    text = ("Title: Forecasting malaria\n\nAbstract: Earlier studies used transformer models. We fit an "
+            "ARIMA model to monthly case counts.")
+
+    class Stub:
+        def __init__(self, args):
+            self.args = args
+
+        def chat(self, *a, **k):
+            tc = ToolCall("1", "record_check", self.args)
+            return LLMResponse("", [tc], [], "tool_use", {})
+
+    terms = ["transformer"]
+    invented = _ask(Stub({"uses": "yes", "which": "transformer", "quote": "we train a transformer network"}),
+                    "transformers", terms, {}, text)
+    assert invented["verdict"] == "unclear" and not invented["quote"]      # quote is not in the paper
+    real = _ask(Stub({"uses": "yes", "which": "transformer",
+                      "quote": "Earlier studies used transformer models."}), "transformers", terms, {}, text)
+    assert real["verdict"] == "yes"
+    assert _ask(Stub({"uses": "maybe"}), "transformers", terms, {}, text)["verdict"] == "unclear"
+
+
+def test_coverage_probe_finds_what_discovery_missed(ctx):
+    from research_agent.tools.search import add_to_shortlist, coverage_probe
+
+    malaria = [r["paper_id"] for r in ctx.pg.execute(
+        "SELECT paper_id FROM papers WHERE tsv @@ plainto_tsquery('english', 'malaria') ORDER BY paper_id").fetchall()]
+    add_to_shortlist(ctx, malaria[:1], "seed")
+    res = coverage_probe(ctx, "malaria", ["rainfall", "(sepsis)"])
+    rain, sepsis = res["probes"]
+    assert res["topic_papers_in_corpus"] >= rain["corpus_papers"] > 1
+    assert rain["on_shortlist"] <= 1 and rain["under_covered"] == (rain["corpus_papers"] >= 5)
+    assert all(p["paper_id"] not in malaria[:1] for p in rain["not_shortlisted_examples"])
+    assert sepsis["corpus_papers"] == 0 and not sepsis["under_covered"]
+    # the corpus counts are recorded, so a report may quote them
+    assert ctx.pg.execute("SELECT count(*) n FROM run_events WHERE run_id=%s AND agent='coverage_probe' "
+                          "AND kind='count'", (ctx.run_id,)).fetchone()["n"] == 2
+
+
+def test_trimming_is_done_once_and_kept():
+    from research_agent.agents.base import _msg_chars, compact
+
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "q"}]}]
+    for i in range(12):
+        msgs.append({"role": "assistant", "content": [{"type": "text", "text": "call"}]})
+        msgs.append({"role": "user", "content": [{"type": "tool_result", "tool_use_id": str(i), "content": "x" * 3000}]})
+    budget = 20000
+    trimmed = compact(msgs, int(budget * 0.6))
+    assert _msg_chars(trimmed) <= budget * 0.6
+    # adding one more turn keeps it under budget, so the trimmed start (the cached prefix) is not touched again
+    trimmed.append({"role": "assistant", "content": [{"type": "text", "text": "next"}]})
+    assert _msg_chars(trimmed) <= budget and compact(trimmed, budget) is trimmed
+
+
+def test_usage_is_broken_down_by_step(loaded_db, monkeypatch):
+    import dataclasses
+
+    from research_agent import runstate
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.cli import format_usage
+
+    monkeypatch.setattr(runstate, "settings", dataclasses.replace(
+        runstate.settings, price_input_per_m=1.0, price_cached_input_per_m=0.1, price_output_per_m=2.0))
+    res = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())
+    steps = res["usage_by_step"]
+    assert {"discovery", "extraction", "synthesis", "protocol_fields"} <= set(steps)
+    assert sum(s["llm_calls"] for s in steps.values()) == res["usage"]["llm_calls"]
+    assert abs(sum(s["cost_usd"] for s in steps.values()) - res["usage"]["cost_usd"]) < 0.01
+    assert "cost $" in format_usage(steps, res["usage"])
+
+
+def _reading_stub(script):
+    from research_agent.llm.base import LLMResponse, ToolCall
+
+    class Stub:
+        model = "stub"
+        calls = []
+
+        def chat(self, system, messages, tools=None, force_tool=None, max_tokens=0, temperature=0.0):
+            Stub.calls.append(force_tool)
+            args = script(force_tool, messages[0]["content"][0]["text"], tools)
+            return LLMResponse("", [ToolCall(str(len(Stub.calls)), force_tool, args)], [], "tool_use", {})
+    return Stub
+
+
+def test_one_read_per_paper_and_batched_abstracts(ctx, monkeypatch):
+    import dataclasses
+
+    from research_agent.tools import reading as RD
+    from tests.fake_llm import fake_reading
+
+    protocol = {"fields": [{"name": "q_probabilistic", "type": "enum", "values": ["yes", "no", "not_stated"],
+                            "definition": "Gives intervals.", "desirable": ["yes"]}]}
+    papers = [{"paper_id": f"f{i}", "title": f"Paper f{i}", "abstract": "We forecast monthly malaria cases using "
+               "an LSTM driven by rainfall.", "fulltext": "## Methods\nWe used surveillance counts from Kenya."}
+              for i in range(3)]
+    papers += [{"paper_id": f"a{i}", "title": f"Paper a{i}", "abstract": "We forecast monthly malaria cases "
+                "using ARIMA in Uganda.", "fulltext": None} for i in range(7)]
+
+    def script(tool, text, tools):
+        if tool == "record_readings":
+            blocks = re.split(r"^=== Paper (\S+) ===\n", text, flags=re.M)[1:]
+            return {"records": [{"paper_id": pid, **fake_reading(body, tools)} for pid, body in zip(blocks[::2], blocks[1::2])]}
+        return fake_reading(text, tools)
+    Stub = _reading_stub(script)
+    monkeypatch.setattr(RD, "settings", dataclasses.replace(RD.settings, abstract_batch=5))
+    ctx.llm_factory = lambda strong=False: Stub()
+    results, failed, _ = RD.read_papers(ctx, papers, protocol)
+    # 3 full-text papers alone + 7 abstracts in batches of 5 and 2 = 5 calls, each covering BOTH sets of fields
+    assert sorted(Stub.calls) == ["record_reading"] * 3 + ["record_readings"] * 2 and not failed
+    assert set(results) == {p["paper_id"] for p in papers}
+    assert all(r["base"] is not None and r["protocol"] is not None for r in results.values())
+    assert results["f0"]["source"] == "fulltext" and results["a0"]["source"] == "abstract"
+    assert "Kenya" in results["f0"]["base"]["geography"]            # read from the full-text section
+    assert "Uganda" in results["a3"]["base"]["geography"]
+
+
+def test_batched_reads_cannot_borrow_quotes_and_recover_missing_papers(ctx):
+    import re as _re
+
+    from research_agent.tools import reading as RD
+
+    papers = [{"paper_id": "a1", "title": "One", "abstract": "We used ARIMA models on clinic data from Ghana.",
+               "fulltext": None},
+              {"paper_id": "a2", "title": "Two", "abstract": "A survey of bed net use in Malawi households.",
+               "fulltext": None},
+              {"paper_id": "a3", "title": "Three", "abstract": "Rainfall predicted cases in Zambia districts.",
+               "fulltext": None}]
+
+    def script(tool, text, tools):
+        if tool == "record_readings":
+            # a2's record borrows a1's sentence as evidence; a3 is left out altogether
+            return {"records": [
+                {"paper_id": "a1", "methods": ["ARIMA"], "geography": ["Ghana"],
+                 "evidence": {"methods": ["We used ARIMA models on clinic data"], "geography": ["clinic data from Ghana"]}},
+                {"paper_id": "a2", "methods": ["ARIMA"], "geography": ["Malawi"],
+                 "evidence": {"methods": ["We used ARIMA models on clinic data"],
+                              "geography": ["bed net use in Malawi households"]}}]}
+        assert "Zambia" in text and "Ghana" not in text                  # the fallback reads a3 alone
+        return {"geography": ["Zambia"], "evidence": {"geography": ["Rainfall predicted cases in Zambia districts"]}}
+    Stub = _reading_stub(script)
+    ctx.llm_factory = lambda strong=False: Stub()
+    results, failed, _ = RD.read_papers(ctx, papers, None)
+    assert results["a1"]["base"]["methods"] == ["ARIMA"]
+    assert results["a2"]["base"]["methods"] == [] and results["a2"]["base"]["geography"] == ["Malawi"]
+    assert results["a3"]["base"]["geography"] == ["Zambia"] and Stub.calls.count("record_reading") == 1
+    _ = _re
+
+
+def test_cut_off_batch_keeps_finished_records(ctx):
+    import json as _json
+
+    from research_agent.tools import reading as RD
+
+    papers = [{"paper_id": f"b{i}", "title": f"T{i}", "abstract": f"Study {i} used ARIMA in Ghana.", "fulltext": None}
+              for i in range(3)]
+    done = {"paper_id": "b0", "methods": ["ARIMA"], "evidence": {"methods": ["Study 0 used ARIMA in Ghana"]}}
+
+    def script(tool, text, tools):
+        if tool == "record_readings":
+            raw = _json.dumps({"records": [done]})[:-2] + ', {"paper_id": "b1", "meth'
+            return {"_raw_arguments": raw}
+        return {"methods": [], "evidence": {}}
+    Stub = _reading_stub(script)
+    ctx.llm_factory = lambda strong=False: Stub()
+    results, failed, _ = RD.read_papers(ctx, papers, None)
+    assert results["b0"]["base"]["methods"] == ["ARIMA"]                 # kept from the cut-off batch
+    assert Stub.calls.count("record_reading") == 2 and set(results) == {"b0", "b1", "b2"}

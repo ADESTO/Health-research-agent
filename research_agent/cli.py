@@ -34,6 +34,27 @@ def _print_event(agent: str, kind: str, payload: dict) -> None:
         print(f"↷ {agent} skipped: {payload.get('reason')}")
 
 
+
+def format_usage(by_step: dict, total: dict | None = None) -> str:
+    """A small table: where a run's tokens (and money, when PRICE_* is set) went."""
+    if not by_step:
+        return ""
+    rows = [(k, v) for k, v in by_step.items() if v["llm_calls"]]
+    has_cost = any("cost_usd" in v for _, v in rows)
+    tot_in = sum(v["input_tokens"] for _, v in rows) or 1
+    lines = ["", f"{'step':<20}{'calls':>7}{'input':>11}{'cached':>9}{'output':>9}{'share':>8}"
+             + (f"{'cost $':>9}" if has_cost else "")]
+    for k, v in rows:
+        cached = f"{round(100 * v['cached_input_tokens'] / v['input_tokens'])}%" if v["input_tokens"] else "-"
+        lines.append(f"{k:<20}{v['llm_calls']:>7}{v['input_tokens']:>11,}{cached:>9}{v['output_tokens']:>9,}"
+                     f"{round(100 * v['input_tokens'] / tot_in):>7}%"
+                     + (f"{v.get('cost_usd', 0):>9.4f}" if has_cost else ""))
+    if total and "cost_usd" in total:
+        lines.append(f"{'total':<20}{'':>7}{'':>11}{'':>9}{'':>9}{'':>8}{total['cost_usd']:>9.4f}")
+    if not has_cost:
+        lines.append("(set PRICE_INPUT_PER_M, PRICE_CACHED_INPUT_PER_M and PRICE_OUTPUT_PER_M in .env to see cost)")
+    return "\n".join(lines)
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="research_agent")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -69,6 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     p_map.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
     p_map.add_argument("--out", help="write the map to this .md file")
     p_rep = sub.add_parser("report"); p_rep.add_argument("run_id")
+    p_use = sub.add_parser("usage", help="tokens (and cost) per step for a finished run")
+    p_use.add_argument("run_id")
     sub.add_parser("runs", help="list recent runs (to find a run_id to resume)")
     args = ap.parse_args(argv)
 
@@ -141,7 +164,7 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("\n" + "=" * 80 + "\n")
         print(res["report"] or "(no report)")
-        print(f"\nrun_id={res['run_id']}  tokens={res['usage']}")
+        print(f"\nrun_id={res['run_id']}  (token use: python -m research_agent.cli usage {res['run_id']})")
         if args.out and res["report"]:
             Path(args.out).write_text(res["report"]); print(f"saved to {args.out}")
     elif args.cmd == "map":
@@ -159,9 +182,18 @@ def main(argv: list[str] | None = None) -> int:
             return 1
         print("\n" + "=" * 80 + "\n")
         print(res["report"])
-        print(f"\nrun_id={res['run_id']}  tokens={res['usage']}")
+        print(f"\nrun_id={res['run_id']}  (token use: python -m research_agent.cli usage {res['run_id']})")
         if args.out:
             Path(args.out).write_text(res["report"]); print(f"saved to {args.out}")
+    elif args.cmd == "usage":
+        from research_agent.db import get_conn
+
+        with get_conn() as pg:
+            row = pg.execute("SELECT content FROM run_notes WHERE run_id=%s AND agent='usage'",
+                             (args.run_id,)).fetchone()
+        if not row:
+            print("No usage breakdown for that run (runs before this feature only have totals)."); return 1
+        print(format_usage(row["content"]["by_step"], row["content"]["total"]))
     elif args.cmd == "runs":
         from research_agent.db import get_conn
 

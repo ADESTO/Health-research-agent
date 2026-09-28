@@ -79,6 +79,36 @@ def corpus_count(ctx, keywords: str, year_from: int | None = None, year_to: int 
     return {"by_source": by_source, "keywords": keywords, "matching_papers": n, "health_corpus_size": total}
 
 
+def coverage_probe(ctx, topic: str, concepts: list[str], limit: int = 6, source: str | None = None) -> dict:
+    """For each concept (a method or data type the question cares about), how many papers on the topic in
+    the whole corpus mention it, how many of those are on the shortlist, and the best ones that are not.
+    A concept that is common in the corpus but thin on the shortlist is a sign discovery missed a strand."""
+    where, fparams = _filters(None, None, None, source)
+    shortlisted = set(ctx.shortlist_ids())
+    t_sql, t_params = tsquery_sql(topic, prefix="tp")
+    topic_total = ctx.pg.execute(f"SELECT count(*) n FROM papers WHERE tsv @@ ({t_sql}) {where}",
+                                 {**t_params, **fparams}).fetchone()["n"]
+    out = []
+    for concept in (concepts or [])[:8]:
+        c_sql, c_params = tsquery_sql(concept, prefix="cp")
+        params = {**t_params, **c_params, **fparams, "ids": list(shortlisted) or [""], "lim": max(1, min(int(limit), 15))}
+        match = f"tsv @@ ({t_sql}) AND tsv @@ ({c_sql}) {where}"
+        n = ctx.pg.execute(f"SELECT count(*) n FROM papers WHERE {match}", params).fetchone()["n"]
+        on = ctx.pg.execute(f"SELECT count(*) n FROM papers WHERE {match} AND paper_id = ANY(%(ids)s)",
+                            params).fetchone()["n"]
+        missing = ctx.pg.execute(
+            f"""SELECT paper_id, source, title, year FROM papers WHERE {match} AND NOT (paper_id = ANY(%(ids)s))
+                ORDER BY ts_rank_cd(tsv, ({t_sql}) && ({c_sql})) DESC, year DESC LIMIT %(lim)s""",
+            params).fetchall()
+        ctx.emit("coverage_probe", "count", {"n": n, "total": topic_total, "keywords": f"{topic} + {concept}"})
+        under = n >= 5 and on < 0.3 * n
+        out.append({"concept": concept, "corpus_papers": n, "on_shortlist": on,
+                    "under_covered": under, "not_shortlisted_examples": missing})
+    return {"topic": topic, "topic_papers_in_corpus": topic_total, "probes": out,
+            "note": "Counts are title/abstract keyword matches. For every under_covered concept, read the "
+                    "examples and add the ones that answer the question; skip off-topic ones."}
+
+
 def find_similar(ctx, paper_id: str, limit: int = 10) -> dict:
     rows = ctx.pg.execute(
         """SELECT p.paper_id, p.title, p.year, round((1 - (p.embedding <=> s.embedding))::numeric, 3) AS similarity
@@ -188,6 +218,15 @@ SEARCH_TOOLS = [
     Tool("corpus_count",
          "Count how many papers in the whole health corpus match a keyword query. Use to size a topic.",
          obj({"keywords": STR, **YEAR_PROPS, "source": SOURCE}, ["keywords"]), corpus_count, read_only=True),
+    Tool("coverage_probe",
+         "Check the shortlist is not missing a strand of the literature: for each concept (method family or "
+         "data type, with synonyms in web-search syntax), compare how many topic papers in the whole corpus "
+         "mention it with how many are shortlisted, and list the best ones not yet shortlisted.",
+         obj({"topic": {**STR, "description": "The question's topic query, e.g. malaria OR plasmodium"},
+              "concepts": {**STRS, "description": "One query per concept, e.g. ['transformer OR attention', "
+                                                  "'entomological OR mosquito OR vector OR larval']"},
+              "source": SOURCE, "limit": INT}, ["topic", "concepts"]),
+         coverage_probe, read_only=True),
     Tool("find_similar", "Nearest neighbours of a paper by embedding similarity.",
          obj({"paper_id": STR, "limit": INT}, ["paper_id"]), find_similar, read_only=True),
     Tool("get_papers", "Full metadata and abstract for up to 20 paper ids.",

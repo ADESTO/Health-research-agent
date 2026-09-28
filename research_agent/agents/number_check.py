@@ -21,6 +21,7 @@ from research_agent.agents.report import _N_OF_M, _int, allowed_counts, normalis
 from research_agent.tools.base import INT, STR, obj
 from research_agent.tools.claims import PREDICATE_DOC, PROPOSE_TOOL, TEST_TOOL, verify_claims
 from research_agent.tools.extraction import ANALYSIS_TOOLS
+from research_agent.tools.recheck import RECHECK_TOOL
 
 MAX_ITEMS = 40
 ROUNDS = 2
@@ -78,7 +79,7 @@ NUMBER_CHECK = Agent(
 
 Predicate formats: {PREDICATE_DOC}.
 Work through all items; several test_claim calls per turn are fine. Then call finish with one fix per item.""",
-    tools=[TEST_TOOL, PROPOSE_TOOL] + [t for t in ANALYSIS_TOOLS if t.name in
+    tools=[TEST_TOOL, PROPOSE_TOOL, RECHECK_TOOL] + [t for t in ANALYSIS_TOOLS if t.name in
                                        ("value_counts", "extraction_coverage", "cross_tab", "list_extractions")],
     finish_schema=obj({"fixes": {"type": "array", "items": obj({
         "item": STR, "action": {"type": "string", "enum": ["measure", "drop", "keep"]},

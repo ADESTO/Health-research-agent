@@ -27,6 +27,14 @@ def _msg_chars(messages: list[dict]) -> int:
     return total
 
 
+def _label(llm, step: str) -> None:
+    """Remember which step a model client belongs to, so a run's usage can be broken down by step."""
+    try:
+        llm._step = step
+    except Exception:
+        pass
+
+
 def compact(messages: list[dict], budget: int) -> list[dict]:
     """Shorten old tool results (oldest first) until the conversation fits the budget.
 
@@ -202,8 +210,12 @@ class Agent:
 
     # ------------------------------------------------------------------ main loop
     def _chat(self, llm, messages, specs, force=None):
-        return llm.chat(self.system, compact(messages, settings.context_budget_chars), tools=specs,
-                        force_tool=force, max_tokens=self._max_tokens())
+        # Trim in one large step and keep the result: providers cache the start of a conversation, and
+        # re-trimming a little on every turn would change that start each time and throw the cache away.
+        budget = settings.context_budget_chars
+        if budget and _msg_chars(messages) > budget:
+            messages[:] = compact(messages, int(budget * 0.6))
+        return llm.chat(self.system, messages, tools=specs, force_tool=force, max_tokens=self._max_tokens())
 
     @staticmethod
     def _add_user_text(messages: list[dict], text: str) -> None:
@@ -215,6 +227,7 @@ class Agent:
 
     def run(self, ctx, task: str) -> dict:
         llm = ctx.llm_factory(strong=self.strong_model)
+        _label(llm, self.name)
         tools_by_name = {t.name: t for t in self.tools}
         specs = self._tool_specs()
         finish_only = [specs[-1]]  # when forcing a finish, offer ONLY the finish tool

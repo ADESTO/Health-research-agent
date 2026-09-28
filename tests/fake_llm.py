@@ -85,6 +85,39 @@ def fake_protocol_extraction(text: str) -> dict:
     return out
 
 
+def fake_reading(text: str, tools) -> dict:
+    """Plays the single reader: general fields and/or question-specific fields, as the tool asks for."""
+    props = tools[0]["input_schema"]["properties"]
+    if "records" in props:
+        props = props["records"]["items"]["properties"]
+    out, evidence = {}, {}
+    if "methods" in props:
+        base = fake_extraction(text)
+        evidence.update(base.pop("evidence"))
+        out.update(base)
+    if any(k.startswith("q_") for k in props):
+        proto = fake_protocol_extraction(text)
+        evidence.update(proto.pop("evidence"))
+        out.update({k: v for k, v in proto.items() if k in props})
+    out["evidence"] = evidence
+    return out
+
+
+def fake_recheck(text: str, tools) -> dict:
+    """Plays the re-checker: 'yes' with the exact sentence when the paper's own work uses the term,
+    'no' when the term only appears in a background sentence."""
+    import re as _re
+
+    terms = tools[0]["input_schema"]["properties"]["which"]["enum"]
+    for sentence in _re.split(r"(?<=[.!?])\s+", text.replace("\n", " ")):
+        low = sentence.lower()
+        hit = next((t for t in terms if t.lower() in low), None)
+        if hit:
+            own = any(w in low for w in ("we ", "using ", "driven by", "our "))
+            return {"uses": "yes" if own else "no", "which": hit, "quote": sentence.strip() if own else ""}
+    return {"uses": "unclear"}
+
+
 class FakeLLM:
     provider = "fake"
     model = "fake-1"
@@ -95,11 +128,15 @@ class FakeLLM:
     # ------------------------------------------------------------------
     def chat(self, system, messages, tools=None, force_tool=None, max_tokens=2048, temperature=0.0):
         self.usage.add({"input_tokens": 100, "output_tokens": 50})
-        if force_tool == "record_extraction":
-            return self._resp([_call("record_extraction", **fake_extraction(messages[0]["content"][0]["text"]))])
-        if force_tool == "record_protocol_fields":
-            return self._resp([_call("record_protocol_fields",
-                                     **fake_protocol_extraction(messages[0]["content"][0]["text"]))])
+        if force_tool == "record_reading":
+            return self._resp([_call("record_reading", **fake_reading(messages[0]["content"][0]["text"], tools))])
+        if force_tool == "record_readings":
+            text = messages[0]["content"][0]["text"]
+            blocks = re.split(r"^=== Paper (\S+) ===\n", text, flags=re.M)[1:]
+            records = [{"paper_id": pid, **fake_reading(body, tools)} for pid, body in zip(blocks[::2], blocks[1::2])]
+            return self._resp([_call("record_readings", records=records)])
+        if force_tool == "record_check":
+            return self._resp([_call("record_check", **fake_recheck(messages[0]["content"][0]["text"], tools))])
         agent = self._agent(system)
         step = sum(1 for m in messages if m["role"] == "assistant")
         last = self._last_results(messages)

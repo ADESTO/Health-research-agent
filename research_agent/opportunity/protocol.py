@@ -188,15 +188,6 @@ def protocol_tool(protocol: dict) -> dict:
             "input_schema": {"type": "object", "properties": props, "required": names + ["evidence"]}}
 
 
-PROTOCOL_EXTRACTION_SYSTEM = """You extract question-specific facts from a health research paper.
-Research question: {question}
-Rules:
-- Record only what the text states. If it is not stated, use not_stated or an empty list. Never guess.
-- Follow each field's definition exactly; pick the single best category for enum fields.
-- evidence: copy the exact words that show each value. If you cannot point to words in the text, the value is
-  a guess: leave it out."""
-
-
 def _normalise_protocol(data: dict, protocol: dict) -> dict:
     out = {}
     for f in protocol["fields"]:
@@ -215,16 +206,6 @@ def _normalise_protocol(data: dict, protocol: dict) -> dict:
     return out
 
 
-def _paper_text(pg, paper: dict, read_full: bool) -> tuple[str, str]:
-    text = f"Title: {paper['title']}\n\nAbstract: {paper['abstract']}"
-    if read_full:
-        row = pg.execute("SELECT sections FROM paper_fulltext WHERE paper_id=%s AND status='ok'",
-                         (paper["paper_id"],)).fetchone()
-        if row and row["sections"]:
-            return "fulltext", text + "\n\nSelected full-text sections:\n" + select_for_reading(row["sections"])
-    return "abstract", text
-
-
 def extract_protocol_fields(ctx, protocol: dict) -> dict:
     """Extract this run's protocol fields for every extracted shortlisted paper (skips ones already done).
     Papers read in full for the base extraction are read in full here too."""
@@ -233,47 +214,69 @@ def extract_protocol_fields(ctx, protocol: dict) -> dict:
            JOIN papers p USING (paper_id)
            JOIN extractions e ON e.paper_id = rp.paper_id AND e.schema_version = %s
            WHERE rp.run_id = %s""", (ctx.extraction_version, ctx.run_id)).fetchall()}
-    done_ids = {r["paper_id"] for r in ctx.pg.execute(
-        "SELECT paper_id FROM protocol_extractions WHERE run_id=%s", (ctx.run_id,)).fetchall()}
-    todo = [pid for pid in papers if pid not in done_ids]
-    tool = protocol_tool(protocol)
-    names = [f["name"] for f in protocol["fields"]]
-    list_names = [f["name"] for f in protocol["fields"] if f["type"] == "list"]
-    system = PROTOCOL_EXTRACTION_SYSTEM.format(question=ctx.question) + "\n\nField definitions:\n" + "\n".join(
-        f"- {f['name']}: {f['definition']}" for f in protocol["fields"])
-    llm = ctx.llm_factory()
-    failed, dropped = [], {}
+    done = {r["paper_id"]: r["source"] for r in ctx.pg.execute(
+        "SELECT paper_id, source FROM protocol_extractions WHERE run_id=%s", (ctx.run_id,)).fetchall()}
+    # redo a paper whose fields were read from its abstract but whose full text has since been read
+    todo = [pid for pid, p in papers.items()
+            if pid not in done or (done[pid] == "abstract" and p["source"] == "fulltext")]
+    done_ids = set(done) - set(todo)
+    # Papers whose general extraction is cached from earlier runs still need this run's fields: one read each
+    # (full text for papers that were read in full), abstract-only ones in batches.
+    from research_agent.tools.reading import read_papers
 
-    def work(pid: str):
-        conn = connect()
-        try:
-            depth, text = _paper_text(conn, papers[pid], papers[pid]["source"] == "fulltext")
-            resp = llm.chat(system, [{"role": "user", "content": [{"type": "text", "text": text}]}],
-                            tools=[tool], force_tool="record_protocol_fields",
-                            max_tokens=settings.extraction_max_tokens)
-            if not resp.tool_calls:
-                raise ValueError("model returned no protocol extraction")
-            args = resp.tool_calls[0].input or {}
-            if "_raw_arguments" in args:
-                raise ValueError("protocol extraction was cut off; raise EXTRACTION_MAX_TOKENS")
-            data = check_evidence(_normalise_protocol(args, protocol), args.get("evidence"), text,
-                                  fields=names, list_fields=list_names)
+    items = []
+    for pid in todo:
+        p = papers[pid]
+        fulltext = None
+        if p["source"] == "fulltext":
+            row = ctx.pg.execute("SELECT sections FROM paper_fulltext WHERE paper_id=%s AND status='ok'",
+                                 (pid,)).fetchone()
+            fulltext = select_for_reading(row["sections"], budget=settings.fulltext_read_chars) if row and row["sections"] else None
+        items.append({"paper_id": pid, "title": p["title"], "abstract": p["abstract"], "fulltext": fulltext})
+    results, failed, _ = read_papers(ctx, items, protocol, include_base=False, step="protocol_fields")
+    dropped: dict[str, int] = {}
+    conn = connect()
+    try:
+        for pid, res in results.items():
+            data = res["protocol"] or {}
+            for f in (data.get("_unverified") or {}):
+                dropped[f] = dropped.get(f, 0) + 1
             conn.execute(
                 "INSERT INTO protocol_extractions (run_id, paper_id, source, data) VALUES (%s,%s,%s,%s::jsonb) "
                 "ON CONFLICT (run_id, paper_id) DO UPDATE SET source=EXCLUDED.source, data=EXCLUDED.data",
-                (ctx.run_id, pid, depth, json.dumps(data)))
-            return data
-        finally:
-            conn.close()
-
-    with ThreadPoolExecutor(max_workers=settings.extraction_workers) as pool:
-        futures = {pool.submit(work, pid): pid for pid in todo}
-        for fut in as_completed(futures):
-            try:
-                data = fut.result()
-                for f in (data.get("_unverified") or {}):
-                    dropped[f] = dropped.get(f, 0) + 1
-            except Exception as exc:
-                failed.append({"paper_id": futures[fut], "error": str(exc)[:200]})
+                (ctx.run_id, pid, res["source"], json.dumps(data)))
+    finally:
+        conn.close()
+    # values dropped for lack of a quote in reads that also covered the general fields
+    for r in ctx.pg.execute("SELECT data FROM protocol_extractions WHERE run_id=%s AND paper_id <> ALL(%s)",
+                            (ctx.run_id, list(results) or [""])).fetchall():
+        for f in (r["data"].get("_unverified") or {}):
+            dropped[f] = dropped.get(f, 0) + 1
     return {"papers": len(papers), "newly_extracted": len(todo) - len(failed), "reused": len(done_ids),
             "failed": failed, "fields_dropped_without_evidence": dropped}
+
+
+def ensure_protocol(ctx, question: str) -> dict:
+    """Write and validate this run's protocol once (a resumed run reuses the one it has)."""
+    from research_agent.tools.extraction import protocol_of
+
+    protocol = protocol_of(ctx)
+    if protocol:
+        ctx.emit("protocol", "skipped", {"reason": "finished in the earlier attempt"})
+        return protocol
+    raw = PROTOCOL.run(ctx, f"Write the review protocol for this question: {question}")
+    protocol, problems = validate_protocol(raw)
+    ctx.save_note("protocol", {"protocol": protocol, "problems": problems})
+    ctx.emit("protocol", "message", {"text": f"{len(protocol['fields'])} question-specific fields"
+                                             + (f"; fixed: {problems}" if problems else "")})
+    return protocol
+
+
+def probe_concepts(protocol: dict | None, limit: int = 8) -> list[str]:
+    """Search queries for the protocol's practices, used to check discovery did not miss a strand."""
+    out: list[str] = []
+    for f in (protocol or {}).get("fields", []):
+        for q in (f.get("search") or {}).values():
+            if q and q not in out:
+                out.append(q)
+    return out[:limit]

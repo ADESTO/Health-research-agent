@@ -13,10 +13,9 @@ import traceback
 from research_agent.agents.orchestrator import _already_done, run_specialist
 from research_agent.opportunity.agents import DESIGN, GAP_REASONING, check_designs, check_gap_reasoning
 from research_agent.opportunity.compute import compute_map
-from research_agent.opportunity.protocol import PROTOCOL, extract_protocol_fields, validate_protocol
+from research_agent.opportunity.protocol import ensure_protocol, extract_protocol_fields, probe_concepts
 from research_agent.opportunity.render import references, render_map
 from research_agent.runstate import RunContext
-from research_agent.tools.extraction import protocol_of
 
 
 def _step_done(ctx, name: str) -> bool:
@@ -40,15 +39,7 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
     dropped: list[str] = []
     try:
         # 1. protocol ---------------------------------------------------------------------------
-        protocol = protocol_of(ctx)
-        if not protocol:
-            raw = PROTOCOL.run(ctx, f"Write the review protocol for this question: {question}")
-            protocol, problems = validate_protocol(raw)
-            ctx.save_note("protocol", {"protocol": protocol, "problems": problems})
-            ctx.emit("protocol", "message", {"text": f"{len(protocol['fields'])} question-specific fields"
-                                                     + (f"; fixed: {problems}" if problems else "")})
-        else:
-            ctx.emit("protocol", "skipped", {"reason": "finished in the earlier attempt"})
+        protocol = ensure_protocol(ctx, question)
         if not protocol["fields"]:
             raise RuntimeError("the protocol defined no usable question-specific fields")
         scope = ""
@@ -58,7 +49,10 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
             scope += " Exclude papers that: " + "; ".join(protocol["exclusion"]) + "."
 
         # 2-3. discovery and literature (the same agents as `ask`) -------------------------------
-        for name, task in (("discovery", f"Build the shortlist for: {question}.{scope}"),
+        probes = probe_concepts(protocol)
+        probe_note = (f" Run coverage_probe with topic '{protocol.get('topic_query')}' and these concepts: "
+                      f"{probes}." if probes and protocol.get("topic_query") else "")
+        for name, task in (("discovery", f"Build the shortlist for: {question}.{scope}{probe_note}"),
                            ("literature", f"Extract the shortlisted papers for: {question}. Read the most "
                                           "central ones in full.")):
             if resume and _already_done(ctx, name):
@@ -71,10 +65,12 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
                 raise RuntimeError("discovery found no relevant papers; the map needs a shortlist")
 
         # 4. question-specific fields for every paper (code + extraction calls) ------------------
-        ctx.emit("protocol_extraction", "start", {"task": "extract question-specific fields"})
+        # (usually already done right after the literature step; this catches papers added since)
+        earlier = ctx.notes().get("protocol_extraction")
         stats = extract_protocol_fields(ctx, protocol)
-        ctx.save_note("protocol_extraction", stats)
-        ctx.emit("protocol_extraction", "finish", {"output": stats})
+        if stats.get("newly_extracted") or not earlier:
+            ctx.save_note("protocol_extraction", stats)
+            ctx.emit("protocol_extraction", "finish", {"output": stats})
 
         # 5. the map itself (code) ---------------------------------------------------------------
         m = compute_map(ctx, protocol)
@@ -111,7 +107,8 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
         cited = list(dict.fromkeys(cited))
         md += f"\n## References ({len(cited)} cited of {m['N']} analysed)\n\n" + "\n".join(references(ctx.pg, cited))
         ctx.finish(md)
-        return {"run_id": ctx.run_id, "report": md, "map": m, "usage": ctx.token_usage()}
+        return {"run_id": ctx.run_id, "report": md, "map": m, "usage": ctx.token_usage(),
+                "usage_by_step": ctx.usage_by_step()}
     except Exception as exc:
         ctx.emit("system", "error", {"error": str(exc), "trace": traceback.format_exc()[-2000:]})
         ctx.finish(None, str(exc))

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 
+from research_agent.config import settings
 from research_agent.tools.base import INT, NUM, STR, STRS, Tool, obj
 from research_agent.tools.extraction import ENUM_FIELDS, LIST_FIELDS, SPECIAL_FIELDS, _rows, _values, known_fields
 from research_agent.tools.trends import topic_series, window_ratio
@@ -159,11 +160,18 @@ def _near_duplicate(ctx, predicate: dict) -> dict | None:
 
 
 def _measure(ctx, claim_type: str, predicate: dict, text: str | None = None) -> dict:
-    """Evaluate a predicate now. With `text`, also check the text against the result."""
+    """Evaluate a predicate now. With `text`, also check the text against the result. A rarity count that
+    papers' own text contradicts triggers one focused re-check of those papers, then is measured again."""
     if claim_type == "prevalence":
         if not _rows(ctx):
             return {}
         r = evaluate_prevalence(ctx, predicate)
+        if r.get("absence_problem") and getattr(ctx, "llm_factory", None) and settings.recheck:
+            from research_agent.tools.recheck import recheck
+
+            rc = recheck(ctx, predicate["field"], predicate["any_of"])
+            r = evaluate_prevalence(ctx, predicate)
+            r["recheck"] = {k: rc.get(k) for k in ("confirmed", "only_mentioned", "unclear", "not_checked")}
         summary = (f"{r['n_matching']} of {r['denominator']} papers ({r['share']:.0%}); "
                    f"bounds {'pass' if r['supported'] else 'fail'}")
         problem = text and (wording_problem(text, r["share"])
@@ -372,22 +380,25 @@ def _absence_problem(ctx, p: dict, rows: list[dict], n: int, denom: int, exact: 
     mention the terms in their title or abstract; if many do, absence is not established."""
     if exact or not rows or not _asserts_rarity(p, denom):
         return None
-    terms = [t for t in (str(x).strip().replace('"', "") for x in p["any_of"]) if t]
+    from research_agent.tools.recheck import _terms, mentioning, verdicts
+
+    terms = _terms(p["any_of"])
     if not terms:
         return None
-    from research_agent.tools.query import tsquery_sql
-
-    sql, params = tsquery_sql(" OR ".join(f'"{t}"' for t in terms), prefix="ab")
     try:
-        mentions = ctx.pg.execute(f"SELECT count(*) AS k FROM papers WHERE paper_id = ANY(%(ids)s) AND tsv @@ ({sql})",
-                                  {**params, "ids": [r["paper_id"] for r in rows]}).fetchone()["k"]
+        ids = mentioning(ctx.pg, [r["paper_id"] for r in rows], terms)
+        # only a 'no' settles a paper (it merely mentions the term). A confirmed 'yes' must show up in the
+        # count itself; if it somehow does not, the paper stays open rather than silently excused.
+        settled = {pid for pid, v in verdicts(ctx.pg, ctx.run_id, p["field"], terms).items() if v == "no"}
     except Exception:   # the check is a safeguard; never let it break counting
         return None
-    if mentions >= 3 and mentions >= 2 * n + 3:
-        return (f"{mentions} of these {len(rows)} papers mention {', '.join(terms[:4])} in their title or "
-                f"abstract, but only {n} have it in the extracted '{p['field']}' field. The field may not "
-                "capture this, so rarity is not established. Test it with a field built for it, or report it "
-                "as not measured rather than absent.")
+    matched = {r["paper_id"] for r in rows if _hits(r, p["field"], [_norm(t) for t in terms], False)}
+    open_ = ids - matched - settled
+    if len(open_) >= 3 and len(ids) >= 2 * n + 3:
+        return (f"{len(open_)} of these {len(rows)} papers mention {', '.join(terms[:4])} in their text but "
+                f"their extracted '{p['field']}' does not record it, and no re-check has settled them. The "
+                "field may not capture this, so rarity is not established. Run recheck_field on these terms, "
+                "or report it as not measured rather than absent.")
     return None
 
 

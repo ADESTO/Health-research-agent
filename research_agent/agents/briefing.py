@@ -19,8 +19,13 @@ def brief(ctx, for_agent: str | None = None, note_chars: int = 2500) -> str:
     if cl:
         lines.append("- Claims: " + ", ".join(f"{r['n']} {r['status']}" for r in cl))
     notes = ctx.notes()
+    protocol = (notes.get("protocol") or {}).get("protocol") if isinstance(notes.get("protocol"), dict) else None
+    if protocol and protocol.get("fields"):
+        lines.append("- Question-specific fields you can count (value_counts, test_claim, propose_claim): " + "; ".join(
+            f"{f['name']} ({'values: ' + ', '.join(f['values']) if f.get('values') else 'free text'}): "
+            f"{f.get('definition', '')[:160]}" for f in protocol["fields"]))
     for agent, content in notes.items():
-        if agent in (for_agent, "orchestrator", "synthesis"):
+        if agent in (for_agent, "orchestrator", "synthesis", "protocol", "fulltext_index", "number_check"):
             continue
         text = json.dumps(content, ensure_ascii=False, default=str)
         if len(text) > note_chars:

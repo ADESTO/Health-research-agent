@@ -73,6 +73,21 @@ PubMed Central (second corpus, topic slices of the open-access subset):
 per-year denominators so trends normalise against the right corpus. Full text is fetched lazily from
 NCBI, as arXiv full text is from Hugging Face. Set `NCBI_API_KEY` in `.env` for 10 requests/s.
 
+How the agents avoid missing things:
+
+- **Question-specific fields.** Every run (ask and map) starts with a protocol step that defines fields for
+  the question, for example "uses entomological data" or "model family", on top of the general extraction
+  form. Set `ASK_PROTOCOL=0` to skip it for ask runs.
+- **Coverage probes.** Discovery compares, for each method or data type the question turns on, how many topic
+  papers in the corpus mention it with how many were shortlisted, and adds relevant ones it missed.
+- **Full-text search.** Fetched full texts are indexed, so mention checks and passage search see methods
+  sections, not only abstracts.
+- **Focused re-checks.** When papers mention a method or data type that their extracted record does not
+  show, each gets one quoted yes/no question (`recheck_field`). Confirmed uses, with a verified quote, are
+  added to the counts; background mentions are not. Set `RECHECK=0` to turn it off.
+- **Number check.** After the report is written, every "n of N" that code cannot trace is measured, corrected
+  or removed by an agent under code checks (`NUMBER_CHECK=0` turns it off).
+
 Web UI and API: `uvicorn research_agent.api.main:app --reload`, then open http://127.0.0.1:8000 to ask a
 question in the browser. Pick a mode: Pipeline (fixed order), Orchestrated (a lead agent plans), or
 Opportunity map. The JSON API is the same: `POST /runs {"question": ..., "mode": "pipeline"|"orchestrated"|"map"}`
