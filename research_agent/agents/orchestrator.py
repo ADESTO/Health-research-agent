@@ -49,8 +49,19 @@ def run_specialist(ctx: RunContext, agent_name: str, task: str) -> dict:
             # Report may only be written from verified claims: verify anything still pending.
             verify_claims(child)
         out = agent.run(child, task)
+        if agent_name == "discovery" and not child.shortlist_ids():
+            # Common model failure: it searches, sees results, then finishes without shortlisting.
+            # Give it one explicit second chance before concluding the corpus has nothing.
+            child.emit("discovery", "message", {"text": "Shortlist empty after discovery; retrying once."})
+            out = agent.run(child, task + "\n\nYour previous attempt finished with an EMPTY shortlist. Search "
+                             "again without year or category filters, and call add_to_shortlist for every "
+                             "relevant paper. Only finish empty if nothing in the corpus is relevant.")
         if agent_name == "synthesis":
             body = out.get("report_markdown") or out.get("summary") or ""
+            if not body.strip():
+                body = ("## Summary\n\n_The synthesis agent returned no report text (usually its output was cut "
+                        "off by the token limit). Raise REPORT_MAX_TOKENS and rerun with `--redo synthesis`. "
+                        "The code-checked sections below are still valid._")
             report, audit = finalize_report(child, body)
             child.pg.execute("UPDATE runs SET report_md=%s WHERE run_id=%s", (report, ctx.run_id))
             child.emit("synthesis", "report", audit)
@@ -105,34 +116,78 @@ When synthesis has written the report, call finish.""",
 )
 
 
+def _no_evidence_report(ctx: RunContext) -> str:
+    note = ctx.notes().get("discovery", {})
+    n_corpus = ctx.pg.execute("SELECT count(*) n FROM papers").fetchone()["n"]
+    searches = note.get("search_log") or []
+    lines = [f"# No relevant papers found", "",
+             f"**Question:** {ctx.question}", "",
+             f"The Discovery agent searched a corpus of {n_corpus:,} health-research papers and did not find "
+             "papers that address this question, so no analysis was run and no claims were made.", ""]
+    if note.get("coverage_notes"):
+        lines += ["**Discovery notes:** " + str(note["coverage_notes"]), ""]
+    if searches:
+        lines += ["**Searches tried:**", ""] + [f"- {s}" for s in searches[:15]] + [""]
+    lines += ["Possible reasons: the corpus is only partly loaded, the topic is rare on arXiv, or the search "
+              "terms were too narrow. Try rephrasing, or load more of the corpus with `ingest`."]
+    return "\n".join(lines)
+
+
 def _ensure_report(ctx: RunContext) -> str | None:
     row = ctx.pg.execute("SELECT report_md FROM runs WHERE run_id=%s", (ctx.run_id,)).fetchone()
     if row["report_md"]:
         return row["report_md"]
+    if not ctx.shortlist_ids():
+        return _no_evidence_report(ctx)
     res = run_specialist(ctx, "synthesis", "Write the final report.")
     if "error" in res:
         return None
     return ctx.pg.execute("SELECT report_md FROM runs WHERE run_id=%s", (ctx.run_id,)).fetchone()["report_md"]
 
 
-def run_research(question: str, mode: str = "orchestrated", provider: str | None = None,
-                 llm_factory=None, on_event=None, run_id: str | None = None) -> dict:
-    ctx = RunContext.create(question, provider=provider, llm_factory=llm_factory, on_event=on_event,
-                            run_id=run_id)
+def _already_done(ctx: RunContext, name: str) -> bool:
+    """On resume, skip agents that finished properly last time (auto-finished ones run again)."""
+    note = ctx.notes().get(name)
+    if not note or note.get("_note"):
+        return False
+    return name != "discovery" or bool(ctx.shortlist_ids())
+
+
+def run_research(question: str | None = None, mode: str = "orchestrated", provider: str | None = None,
+                 llm_factory=None, on_event=None, run_id: str | None = None,
+                 resume: str | None = None) -> dict:
+    if resume:
+        ctx = RunContext.resume(resume, provider=provider, llm_factory=llm_factory, on_event=on_event)
+    else:
+        ctx = RunContext.create(question, provider=provider, llm_factory=llm_factory, on_event=on_event,
+                                run_id=run_id)
+    question = ctx.question
+    if on_event:
+        on_event("system", "run", {"run_id": ctx.run_id, "resumed": bool(resume)})
     try:
         if mode == "pipeline":
             for name in ORDER:
+                if name != "discovery" and not ctx.shortlist_ids():
+                    break  # nothing relevant found: _ensure_report explains that instead of failing
+                if resume and _already_done(ctx, name):
+                    ctx.emit(name, "skipped", {"reason": "finished in the earlier attempt"})
+                    continue
                 res = run_specialist(ctx, name, f"Do your part for this question: {question}")
-                if "error" in res and name in ("discovery", "literature"):
+                if "error" in res and (name in ("discovery", "literature") or "DAILY token limit" in res["error"]):
                     raise RuntimeError(res["error"])
         else:
-            ORCHESTRATOR.run(ctx, "Plan and run the research, then have synthesis write the report.")
+            task = "Plan and run the research, then have synthesis write the report."
+            if resume:
+                task += (" This run is being RESUMED: check get_status and only delegate the work that is "
+                         "still missing.")
+            ORCHESTRATOR.run(ctx, task)
         report = _ensure_report(ctx)
         ctx.finish(report, None if report else "no report produced")
         return {"run_id": ctx.run_id, "report": report, "usage": ctx.token_usage()}
     except Exception as exc:
         ctx.emit("system", "error", {"error": str(exc), "trace": traceback.format_exc()[-2000:]})
         ctx.finish(None, str(exc))
+        exc.run_id = ctx.run_id  # so the CLI can say how to resume
         raise
     finally:
         ctx.close()

@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Health Research Intelligence</title>
+<style>
+  :root {
+    --bg: #fbfaf8; --panel: #fff; --ink: #1c1a17; --muted: #6b6560; --line: #e5e0d8;
+    --accent: #7a4f2c; --ok: #2f6b3f; --bad: #9a2f2f; --warn: #8a6a1f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg: #14130f; --panel: #1c1b17; --ink: #efece6; --muted: #a39c92; --line: #33302a;
+            --accent: #d0a06a; --ok: #7fbf8f; --bad: #e08a8a; --warn: #d8bd72; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 16px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  header { padding: 20px 16px 8px; max-width: 900px; margin: 0 auto; }
+  h1 { font-size: 20px; margin: 0 0 2px; }
+  .sub { color: var(--muted); font-size: 13px; }
+  main { max-width: 900px; margin: 0 auto; padding: 0 16px 64px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin: 16px 0; }
+  textarea { width: 100%; min-height: 76px; font: inherit; padding: 10px; border-radius: 8px;
+             border: 1px solid var(--line); background: var(--bg); color: var(--ink); resize: vertical; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-top: 10px; }
+  select, button { font: inherit; padding: 8px 12px; border-radius: 8px; border: 1px solid var(--line);
+                   background: var(--bg); color: var(--ink); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; cursor: pointer; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  .status { font-size: 13px; color: var(--muted); }
+  #log { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; max-height: 260px; overflow-y: auto;
+         border-top: 1px solid var(--line); margin-top: 12px; padding-top: 10px; }
+  #log div { padding: 1px 0; }
+  .agent { color: var(--accent); }
+  .err { color: var(--bad); }
+  .done { color: var(--ok); }
+  #report { line-height: 1.6; }
+  #report h2 { font-size: 17px; margin: 22px 0 8px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+  #report table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0; display: block; overflow-x: auto; }
+  #report th, #report td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+  #report code { background: var(--bg); padding: 1px 4px; border-radius: 4px; font-size: 13px; }
+  .v-supported { color: var(--ok); font-weight: 600; }
+  .v-unsupported, .v-rejected { color: var(--bad); font-weight: 600; }
+  .flag { color: var(--warn); }
+  ul.runs { list-style: none; padding: 0; margin: 0; font-size: 14px; }
+  ul.runs li { padding: 6px 0; border-bottom: 1px solid var(--line); display: flex; gap: 10px; }
+  ul.runs a { color: var(--accent); text-decoration: none; }
+  .hint { font-size: 13px; color: var(--muted); margin-top: 8px; }
+  #report li.sub { margin-left: 22px; list-style: circle; }
+  .v-notsupported, .v-untestable { font-weight: 600; }
+  .v-notsupported { color: var(--bad); }
+  .v-untestable { color: var(--warn); }
+  .pill { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Health Research Intelligence</h1>
+  <div class="sub" id="corpus">connecting…</div>
+</header>
+<main>
+  <div class="card">
+    <textarea id="q" placeholder="Ask a research question, e.g. What machine learning methods are used for malaria forecasting, and what validation gaps exist?"></textarea>
+    <div class="row">
+      <select id="provider">
+        <option value="deepseek">DeepSeek</option>
+        <option value="anthropic">Claude</option>
+        <option value="groq">Groq</option>
+      </select>
+      <select id="mode">
+        <option value="pipeline">Pipeline (fixed order)</option>
+        <option value="orchestrated">Orchestrated (LLM plans)</option>
+        <option value="map">Opportunity map (gaps and designs)</option>
+      </select>
+      <button class="primary" id="go">Run research</button>
+      <span class="status" id="status"></span>
+    </div>
+    <div class="hint" id="modeHint"></div>
+    <div id="log" hidden></div>
+  </div>
+
+  <div class="card" id="reportCard" hidden>
+    <div class="row" style="justify-content: space-between; margin: 0 0 8px">
+      <span class="pill" id="reportMeta"></span>
+      <button id="download">Download .md</button>
+    </div>
+    <div id="report"></div>
+  </div>
+
+  <div class="card">
+    <div class="pill">Recent runs</div>
+    <ul class="runs" id="runs"></ul>
+  </div>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+let timer = null, lastEvent = 0, currentRun = null, reportText = "";
+
+function esc(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+// Small markdown renderer: headings, tables, lists, bold/italic/code, links.
+function md(src) {
+  const lines = src.split("\n");
+  let out = [], list = null, table = null;
+  const inline = t => esc(t)
+    .replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>')
+    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|\W)\*([^*]+)\*/g, "$1<em>$2</em>")
+    .replace(/(^|\s)_([^_]+)_(?=$|[\s.,;:])/g, "$1<em>$2</em>")
+    .replace(/`([^`]+)`/g, "<code>$1</code>")
+    .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
+    .replace(/\[(C\d+)\]/g, '<code>$1</code>')
+    .replace(/<strong>(supported|not supported|untestable)<\/strong>/g,
+             (m, v) => `<span class="v-${v.replace(" ", "")}">${v}</span>`)
+    .replace(/\[([^\]]*(?:not verified|does not match|unverified|citation removed)[^\]]*)\]/g, '<span class="flag">[$1]</span>');
+  const verdict = c => /^(supported|unsupported|rejected)$/.test(c.trim())
+    ? `<span class="v-${c.trim()}">${c.trim()}</span>` : inline(c);
+  const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
+  const closeTable = () => { if (table) { out.push("</tbody></table>"); table = null; } };
+
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (/^\|.*\|$/.test(line)) {
+      const cells = line.slice(1, -1).split("|");
+      if (/^[\s|:-]+$/.test(line)) continue;
+      if (!table) {
+        closeList();
+        out.push("<table><thead><tr>" + cells.map(c => `<th>${inline(c.trim())}</th>`).join("") + "</tr></thead><tbody>");
+        table = true;
+      } else {
+        out.push("<tr>" + cells.map(c => `<td>${verdict(c)}</td>`).join("") + "</tr>");
+      }
+      continue;
+    }
+    closeTable();
+    const h = line.match(/^(#{1,4})\s+(.*)$/);
+    if (h) { closeList(); out.push(`<h${h[1].length}>${inline(h[2])}</h${h[1].length}>`); continue; }
+    const ul = line.match(/^(\s*)[-*]\s+(.*)$/), ol = line.match(/^(\s*)\d+[.)]\s+(.*)$/);
+    if (ul || ol) {
+      const want = ul ? "ul" : "ol", m = ul || ol, nested = m[1].length >= 2 && list;
+      if (!nested && list !== want) { closeList(); out.push(`<${want}>`); list = want; }
+      out.push(`<li${nested ? ' class="sub"' : ""}>${inline(m[2])}</li>`);
+      continue;
+    }
+    closeList();
+    if (line.trim()) out.push(`<p>${inline(line)}</p>`);
+  }
+  closeList(); closeTable();
+  return out.join("\n");
+}
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.statusText);
+  return r.json();
+}
+
+function logLine(html, cls) {
+  const box = $("#log");
+  box.hidden = false;
+  const d = document.createElement("div");
+  if (cls) d.className = cls;
+  d.innerHTML = html;
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+}
+
+function renderEvent(e) {
+  const a = `<span class="agent">${esc(e.agent)}</span>`;
+  const p = e.payload || {};
+  if (e.kind === "start") return logLine(`▶ ${a}: ${esc((p.task || "").slice(0, 160))}`);
+  if (e.kind === "tool_call") return logLine(`&nbsp;&nbsp;· ${a} → ${esc(p.tool)}`);
+  if (e.kind === "tool_result" && p.error) return logLine(`&nbsp;&nbsp;! ${a} ${esc(p.tool)} error`, "err");
+  if (e.kind === "finish" && e.agent === "map" && p.output)
+    return logLine(`✔ ${a}: ${Object.entries(p.output).map(([k, v]) => `${v} ${k}`).join(", ")}`, "done");
+  if (e.kind === "message" && e.agent === "protocol") return logLine(`&nbsp;&nbsp;· ${a}: ${esc(p.text || "")}`);
+  if (e.kind === "finish") return logLine(`✔ ${a} finished`, "done");
+  if (e.kind === "skipped") return logLine(`↷ ${a} skipped: ${esc(p.reason || "")}`);
+  if (e.kind === "error") return logLine(`✖ ${a}: ${esc((p.error || "").slice(0, 200))}`, "err");
+}
+
+async function poll() {
+  const data = await api(`/runs/${currentRun}?after_event=${lastEvent}`);
+  for (const e of data.events) { renderEvent(e); lastEvent = Math.max(lastEvent, e.id); }
+  const run = data.run;
+  $("#status").textContent = `${run.status} · ${data.shortlist_size} papers shortlisted`;
+  if (run.status === "done" || run.has_report) {
+    clearInterval(timer); timer = null;
+    const rep = await api(`/runs/${currentRun}/report`);
+    showReport(rep.report_markdown, run);
+    $("#go").disabled = false;
+    loadRuns();
+  } else if (run.status === "failed") {
+    clearInterval(timer); timer = null;
+    logLine(`✖ run failed: ${esc(run.error || "")}`, "err");
+    $("#go").disabled = false;
+  }
+}
+
+function showReport(markdown, run) {
+  reportText = markdown;
+  $("#report").innerHTML = md(markdown);
+  $("#reportCard").hidden = false;
+  const tok = run && run.input_tokens ? ` · ${run.input_tokens.toLocaleString()} in / ${run.output_tokens.toLocaleString()} out tokens` : "";
+  $("#reportMeta").textContent = `${(run && run.provider) || ""} ${(run && run.model) || ""}${tok}`;
+  $("#reportCard").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+const HINTS = {
+  pipeline: "A written, cited report. Agents run in a fixed order: cheaper and more repeatable.",
+  orchestrated: "A written, cited report. A lead agent decides which specialists to run and when.",
+  map: "What is established, emerging and missing, with confidence grades, tested explanations of the gaps "
+     + "and candidate study designs. Takes longer and costs roughly twice an ordinary run.",
+};
+let currentMode = "pipeline";
+function syncMode() {
+  const m = $("#mode").value;
+  $("#modeHint").textContent = HINTS[m] || "";
+  $("#go").textContent = m === "map" ? "Build map" : "Run research";
+}
+$("#mode").onchange = syncMode;
+syncMode();
+
+$("#go").onclick = async () => {
+  const question = $("#q").value.trim();
+  if (question.length < 10) { $("#status").textContent = "Write a longer question."; return; }
+  $("#go").disabled = true; $("#log").innerHTML = ""; $("#reportCard").hidden = true;
+  lastEvent = 0; $("#status").textContent = "starting…";
+  try {
+    const res = await api("/runs", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, provider: $("#provider").value, mode: $("#mode").value }),
+    });
+    currentRun = res.run_id; currentMode = res.mode || $("#mode").value;
+    logLine(`run ${esc(res.run_id)}`);
+    timer = setInterval(() => poll().catch(e => logLine(esc(e.message), "err")), 3000);
+  } catch (e) {
+    $("#status").textContent = e.message; $("#go").disabled = false;
+  }
+};
+
+$("#download").onclick = () => {
+  const blob = new Blob([reportText], { type: "text/markdown" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${currentMode === "map" ? "map" : "report"}_${currentRun ? currentRun.slice(0, 8) : "health"}.md`;
+  a.click();
+};
+
+async function openRun(id) {
+  currentRun = id; lastEvent = 0; $("#log").innerHTML = "";
+  const data = await api(`/runs/${id}`);
+  currentMode = data.run.is_map ? "map" : "report";
+  for (const e of data.events.slice(-60)) { renderEvent(e); lastEvent = Math.max(lastEvent, e.id); }
+  $("#status").textContent = `${data.run.status} · ${data.shortlist_size} papers shortlisted`;
+  if (data.run.has_report) showReport((await api(`/runs/${id}/report`)).report_markdown, data.run);
+  else if (data.run.status !== "failed" && !timer) timer = setInterval(() => poll().catch(() => {}), 3000);
+}
+
+async function loadRuns() {
+  try {
+    const { runs } = await api("/runs?limit=10");
+    $("#runs").innerHTML = runs.map(r => `
+      <li><span class="pill">${new Date(r.created_at).toLocaleString()}</span>
+      <a href="#" data-id="${r.run_id}">${esc((r.question || "").slice(0, 70))}</a>
+      <span class="pill">${r.is_map ? "map · " : ""}${r.status}</span></li>`).join("") || "<li class='pill'>none yet</li>";
+    $("#runs").querySelectorAll("a").forEach(a => a.onclick = ev => {
+      ev.preventDefault(); if (timer) { clearInterval(timer); timer = null; } openRun(a.dataset.id);
+    });
+  } catch (e) { /* listing is optional */ }
+}
+
+api("/health").then(h => $("#corpus").textContent = `${h.papers.toLocaleString()} health papers indexed`)
+  .catch(() => $("#corpus").textContent = "API not reachable");
+loadRuns();
+</script>
+</body>
+</html>

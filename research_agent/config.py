@@ -44,12 +44,14 @@ class Settings:
     embedding_model: str = os.getenv("EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
     embedding_dim: int = int(os.getenv("EMBEDDING_DIM", "384"))
 
-    # LLM provider seam: "anthropic" | "groq"
+    # LLM provider seam: "anthropic" | "groq" | "deepseek"
     llm_provider: str = os.getenv("LLM_PROVIDER", "anthropic")
     anthropic_model: str = os.getenv("ANTHROPIC_MODEL", "claude-haiku-4-5-20251001")
     groq_model: str = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     # Optional stronger model just for the orchestrator + synthesis (falls back to the main one)
     anthropic_model_strong: str = os.getenv("ANTHROPIC_MODEL_STRONG", "")
+    deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
+    deepseek_model_strong: str = os.getenv("DEEPSEEK_MODEL_STRONG", "")
 
     # Run limits (cost guards)
     max_shortlist: int = int(os.getenv("MAX_SHORTLIST", "60"))
@@ -58,7 +60,20 @@ class Settings:
     agent_max_turns: int = int(os.getenv("AGENT_MAX_TURNS", "14"))
     orchestrator_max_turns: int = int(os.getenv("ORCHESTRATOR_MAX_TURNS", "16"))
 
-    extraction_schema_version: str = "health-v1"
+    # Per-request size controls. Defaults suit Claude; for Groq's free tier (8K tokens/minute, and
+    # Groq counts max_tokens towards that) see the "Groq free tier" block in .env.example.
+    agent_max_tokens: int = int(os.getenv("AGENT_MAX_TOKENS", "4096"))
+    report_max_tokens: int = int(os.getenv("REPORT_MAX_TOKENS", "4096"))
+    # agents whose final answer is a long structured list (map protocol, gap reasoning, designs)
+    long_output_max_tokens: int = int(os.getenv("LONG_OUTPUT_MAX_TOKENS", "8192"))
+    # evidence quotes make extractions longer; a cut-off extraction now fails loudly instead of saving blanks
+    extraction_max_tokens: int = int(os.getenv("EXTRACTION_MAX_TOKENS", "2000"))
+    tool_result_chars: int = int(os.getenv("TOOL_RESULT_CHARS", "9000"))
+    # When an agent's conversation exceeds this many characters, older tool results are shortened.
+    context_budget_chars: int = int(os.getenv("CONTEXT_BUDGET_CHARS", "60000"))
+
+    # v2 adds evidence quotes; v1 extractions are not reused because their fields were never checked
+    extraction_schema_version: str = "health-v2"
     extra: dict = field(default_factory=dict)
 
 

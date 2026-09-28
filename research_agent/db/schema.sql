@@ -4,6 +4,7 @@ CREATE EXTENSION IF NOT EXISTS vector;
 -- ---------------------------------------------------------------- corpus
 CREATE TABLE IF NOT EXISTS papers (
     paper_id            text PRIMARY KEY,
+    source              text NOT NULL DEFAULT 'arxiv',   -- arxiv | pmc
     title               text NOT NULL,
     abstract            text NOT NULL,
     authors             text,
@@ -26,12 +27,14 @@ CREATE INDEX IF NOT EXISTS papers_year_idx  ON papers (year);
 CREATE INDEX IF NOT EXISTS papers_cats_idx  ON papers USING gin (categories);
 -- HNSW index is created after bulk load (much faster) — see ingestion.load.build_indexes
 
--- Denominators for trend normalisation: ALL arXiv papers per year and primary category
+-- Denominators for trend normalisation: ALL papers per source, year and primary category
+-- (every arXiv paper, every open-access PMC article), not just the ones we ingested.
 CREATE TABLE IF NOT EXISTS corpus_year_stats (
+    source           text NOT NULL DEFAULT 'arxiv',
     year             int  NOT NULL,
     primary_category text NOT NULL,
     n_papers         int  NOT NULL,
-    PRIMARY KEY (year, primary_category)
+    PRIMARY KEY (source, year, primary_category)
 );
 
 -- Cleaned full text, fetched lazily for shortlisted papers only
@@ -54,6 +57,17 @@ CREATE TABLE IF NOT EXISTS extractions (
     model           text,
     created_at      timestamptz DEFAULT now(),
     PRIMARY KEY (paper_id, schema_version)
+);
+
+-- Question-specific fields defined by a run's protocol (e.g. forecast horizon, validation strategy).
+-- Kept per run, separate from the cached base extraction, because every question defines its own fields.
+CREATE TABLE IF NOT EXISTS protocol_extractions (
+    run_id      uuid NOT NULL,
+    paper_id    text NOT NULL REFERENCES papers(paper_id) ON DELETE CASCADE,
+    source      text NOT NULL,                  -- abstract | fulltext
+    data        jsonb NOT NULL,
+    created_at  timestamptz DEFAULT now(),
+    PRIMARY KEY (run_id, paper_id)
 );
 
 -- ---------------------------------------------------------------- runs (shared agent workspace)
@@ -115,3 +129,19 @@ CREATE TABLE IF NOT EXISTS claims (
     created_at  timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS claims_run_idx ON claims (run_id);
+
+-- ---------------------------------------------------------------- migrations (safe to re-run)
+-- Anything that touches a new column goes here, AFTER the ALTER that adds it: on an existing database
+-- the CREATE TABLE IF NOT EXISTS statements above are skipped, so those columns do not exist yet.
+ALTER TABLE papers ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'arxiv';
+CREATE INDEX IF NOT EXISTS papers_source_idx ON papers (source, year);
+ALTER TABLE corpus_year_stats ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'arxiv';
+DO $$
+BEGIN
+    -- older databases keyed corpus_year_stats on (year, primary_category); widen it to include source
+    IF EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'corpus_year_stats_pkey'
+                 AND array_length(conkey, 1) = 2) THEN
+        ALTER TABLE corpus_year_stats DROP CONSTRAINT corpus_year_stats_pkey;
+        ALTER TABLE corpus_year_stats ADD PRIMARY KEY (source, year, primary_category);
+    END IF;
+END $$;

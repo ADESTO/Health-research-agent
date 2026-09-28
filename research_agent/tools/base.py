@@ -10,6 +10,8 @@ class Tool:
     description: str
     input_schema: dict
     fn: Callable[..., Any]          # fn(ctx, **kwargs) -> JSON-serialisable
+    max_chars: int | None = None    # override TOOL_RESULT_CHARS for results that must not be cut much
+    read_only: bool = False         # pure lookups: an identical repeat call in one task is short-circuited
 
     def spec(self) -> dict:
         return {"name": self.name, "description": self.description, "input_schema": self.input_schema}

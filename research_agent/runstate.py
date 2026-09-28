@@ -49,6 +49,19 @@ class RunContext:
         ctx._prepare_session()
         return ctx
 
+    @classmethod
+    def resume(cls, run_id: str, provider: str | None = None, llm_factory=None, on_event=None) -> "RunContext":
+        """Re-attach to an earlier run: its shortlist, extractions, claims and agent notes are reused."""
+        pg = connect()
+        row = pg.execute("SELECT question FROM runs WHERE run_id=%s", (run_id,)).fetchone()
+        pg.close()
+        if not row:
+            raise ValueError(f"No run with id {run_id}")
+        ctx = cls.create(row["question"], provider=provider, llm_factory=llm_factory, on_event=on_event,
+                         run_id=run_id)
+        ctx.pg.execute("UPDATE runs SET error=NULL, finished_at=NULL, report_md=NULL WHERE run_id=%s", (run_id,))
+        return ctx
+
     def child(self) -> "RunContext":
         """Same run, separate DB connection + LLM client — lets sub-agents run in parallel threads."""
         c = RunContext(self.run_id, self.question, self.llm_factory, connect(), self.on_event, self.clients)

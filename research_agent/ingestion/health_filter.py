@@ -6,7 +6,10 @@ what is or isn't in the corpus.
 
 1. Category rule: papers whose categories include a core biomedical category.
 2. Keyword rule: papers in computational categories (cs, eess, stat, q-bio, physics.soc-ph, econ)
-   whose title/abstract contains a health term.
+   with real health focus: a health term in the TITLE, or at least MIN_DISTINCT_TERMS different
+   health terms in the abstract. A single passing mention ("applications include healthcare")
+   is not enough. Tuned after the first scope run on the real corpus (Sept 2026), where one-mention
+   papers such as influence maximisation or model-checking tools were getting in.
 
 The keyword list is deliberately conservative (precision over recall). Tune it by running
 `python -m research_agent.cli scope` and inspecting samples.
@@ -14,7 +17,12 @@ The keyword list is deliberately conservative (precision over recall). Tune it b
 from __future__ import annotations
 
 # Categories that are health/biomedical by definition
-CORE_CATEGORIES = ["physics.med-ph", "q-bio.TO", "q-bio.QM"]
+# (q-bio.QM was here at first, but it also holds a lot of non-health biophysics and ecology; it now
+#  goes through the keyword rule like the other q-bio categories.)
+CORE_CATEGORIES = ["physics.med-ph", "q-bio.TO"]
+
+# Keyword rule strength: distinct health terms needed when none appears in the title
+MIN_DISTINCT_TERMS = 2
 
 # Category prefixes where we only keep a paper if it mentions a health term
 KEYWORD_SCOPE_PREFIXES = ["cs.", "eess.", "stat.", "q-bio.", "physics.soc-ph", "econ."]
@@ -77,16 +85,19 @@ def health_subset_sql(source: str, min_year: int, limit: int | None = None) -> s
         SELECT *,
             list_filter(cats, c -> list_contains([{core}], c)) AS core_hits,
             list_bool_or(list_transform(cats, c -> ({scope}))) AS in_scope,
-            lower(regexp_extract(title || ' ' || abstract, '{rx}', 1)) AS kw
+            lower(regexp_extract(title, '{rx}', 1)) AS title_kw,
+            list_distinct(list_transform(regexp_extract_all(title || ' ' || abstract, '{rx}', 1),
+                                         t -> regexp_replace(lower(t), '\s+', ' ', 'g'))) AS terms
         FROM base
     )
     SELECT paper_id, title, abstract, authors, cats AS categories, primary_category, year,
            first_version_date, doi, journal_ref, license,
            CASE WHEN len(core_hits) > 0 THEN 'category:' || core_hits[1]
-                ELSE 'keyword:' || kw END AS health_reason
+                ELSE 'keyword:' || coalesce(nullif(title_kw, ''), terms[1]) || ' (' || len(terms) || CASE WHEN len(terms) = 1 THEN ' term' ELSE ' terms' END
+                     || CASE WHEN title_kw <> '' THEN ', in title' ELSE '' END || ')' END AS health_reason
     FROM tagged
-    WHERE len(core_hits) > 0 OR (in_scope AND kw <> '')
-    ORDER BY paper_id
+    WHERE len(core_hits) > 0
+       OR (in_scope AND (title_kw <> '' OR len(terms) >= {MIN_DISTINCT_TERMS}))
     {lim}
     """
 

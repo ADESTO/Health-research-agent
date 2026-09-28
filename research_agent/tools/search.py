@@ -1,15 +1,23 @@
 """Discovery tools: hybrid (semantic + keyword) search, similarity, shortlist management."""
 from __future__ import annotations
 
+import re
+
 from research_agent.config import settings
 from research_agent.embeddings import get_embedder
 from research_agent.tools.base import INT, STR, STRS, Tool, obj
+from research_agent.tools.query import tsquery_sql
 
 RRF_K = 60
+SOURCE = {"type": "string", "enum": ["arxiv", "pmc", "all"],
+          "description": "Which corpus to search: arxiv preprints, pmc published open-access articles, "
+                         "or all (default)."}
 
 
-def _filters(year_from, year_to, categories) -> tuple[str, dict]:
+def _filters(year_from, year_to, categories, source=None) -> tuple[str, dict]:
     clauses, params = [], {}
+    if source and source != "all":
+        clauses.append("source = %(src)s"); params["src"] = str(source)
     if year_from:
         clauses.append("year >= %(yf)s"); params["yf"] = int(year_from)
     if year_to:
@@ -20,18 +28,15 @@ def _filters(year_from, year_to, categories) -> tuple[str, dict]:
 
 
 def hybrid_search(ctx, query: str, keywords: str | None = None, year_from: int | None = None,
-                  year_to: int | None = None, categories: list[str] | None = None, limit: int = 25) -> dict:
+                  year_to: int | None = None, categories: list[str] | None = None, limit: int = 25,
+                  source: str | None = None) -> dict:
     """Reciprocal-rank fusion of pgvector cosine search and Postgres full-text search."""
     limit = max(1, min(int(limit or 25), 60))
-    where, params = _filters(year_from, year_to, categories)
-    params.update(
-        qvec=get_embedder().embed_query(query),
-        tq=keywords or query,
-        lim=limit,
-        run=ctx.run_id,
-    )
+    where, params = _filters(year_from, year_to, categories, source)
+    tq_sql, tq_params = tsquery_sql(keywords or query)
+    params.update(tq_params, qvec=get_embedder().embed_query(query), lim=limit, run=ctx.run_id)
     sql = f"""
-    WITH q AS (SELECT websearch_to_tsquery('english', %(tq)s) AS tq),
+    WITH q AS (SELECT ({tq_sql}) AS tq),
     sem AS (
         SELECT paper_id, row_number() OVER (ORDER BY embedding <=> %(qvec)s) AS r
         FROM (SELECT paper_id, embedding FROM papers WHERE embedding IS NOT NULL {where}
@@ -47,7 +52,7 @@ def hybrid_search(ctx, query: str, keywords: str | None = None, year_from: int |
                sem.r AS sem_rank, kw.r AS kw_rank
         FROM sem FULL OUTER JOIN kw USING (paper_id)
     )
-    SELECT p.paper_id, p.title, p.year, p.primary_category, left(p.abstract, 280) AS abstract_start,
+    SELECT p.paper_id, p.source, p.title, p.year, p.primary_category, left(p.abstract, 280) AS abstract_start,
            round(f.score::numeric, 5) AS score, f.sem_rank, f.kw_rank,
            EXISTS (SELECT 1 FROM run_papers rp WHERE rp.run_id = %(run)s AND rp.paper_id = p.paper_id)
                AS in_shortlist
@@ -58,15 +63,20 @@ def hybrid_search(ctx, query: str, keywords: str | None = None, year_from: int |
     return {"query": query, "keywords": keywords or query, "n": len(rows), "results": rows}
 
 
-def corpus_count(ctx, keywords: str, year_from: int | None = None, year_to: int | None = None) -> dict:
+def corpus_count(ctx, keywords: str, year_from: int | None = None, year_to: int | None = None,
+                 source: str | None = None) -> dict:
     """How many health-corpus papers match a keyword query (to gauge how big a topic is)."""
-    where, params = _filters(year_from, year_to, None)
-    params["tq"] = keywords
-    n = ctx.pg.execute(
-        f"SELECT count(*) AS n FROM papers WHERE tsv @@ websearch_to_tsquery('english', %(tq)s) {where}",
-        params).fetchone()["n"]
+    where, params = _filters(year_from, year_to, None, source)
+    tq_sql, tq_params = tsquery_sql(keywords)
+    params.update(tq_params)
+    n = ctx.pg.execute(f"SELECT count(*) AS n FROM papers WHERE tsv @@ ({tq_sql}) {where}", params).fetchone()["n"]
     total = ctx.pg.execute(f"SELECT count(*) AS n FROM papers WHERE TRUE {where}", params).fetchone()["n"]
-    return {"keywords": keywords, "matching_papers": n, "health_corpus_size": total}
+    # Record the count so the report's number audit can accept "n of N" figures that came from this tool.
+    ctx.emit("corpus_count", "count", {"keywords": keywords, "n": n, "total": total})
+    by_source = {r["source"]: r["n"] for r in ctx.pg.execute(
+        f"SELECT source, count(*) AS n FROM papers WHERE tsv @@ ({tq_sql}) {where} GROUP BY source",
+        params).fetchall()}
+    return {"by_source": by_source, "keywords": keywords, "matching_papers": n, "health_corpus_size": total}
 
 
 def find_similar(ctx, paper_id: str, limit: int = 10) -> dict:
@@ -81,29 +91,70 @@ def find_similar(ctx, paper_id: str, limit: int = 10) -> dict:
 
 def get_papers(ctx, paper_ids: list[str]) -> dict:
     rows = ctx.pg.execute(
-        """SELECT paper_id, title, year, authors, categories, primary_category, abstract, doi, journal_ref
-           FROM papers WHERE paper_id = ANY(%s)""", (list(paper_ids)[:20],)).fetchall()
+        """SELECT paper_id, source, title, year, authors, categories, primary_category, abstract, doi,
+                  journal_ref FROM papers WHERE paper_id = ANY(%s)""", (list(paper_ids)[:20],)).fetchall()
     return {"papers": rows}
 
 
 # ---------------------------------------------------------------- shortlist (shared run state)
+def _norm_title(t: str) -> str:
+    return " ".join(re.sub(r"[^a-z0-9]+", " ", (t or "").lower()).split())
+
+
+def _surname(authors: str) -> str:
+    first = re.split(r",|\band\b", authors or "")[0].strip()
+    return first.split()[-1].lower() if first.split() else ""
+
+
+def _same_work(a: dict, b: dict) -> bool:
+    """A preprint and its published version: same DOI, or same title (one may extend the other) and
+    the same first author."""
+    if a["doi"] and b["doi"] and a["doi"].lower().strip() == b["doi"].lower().strip():
+        return True
+    ta, tb = _norm_title(a["title"]), _norm_title(b["title"])
+    short, long_ = sorted((ta, tb), key=len)
+    return len(short) >= 40 and long_.startswith(short) and _surname(a["authors"]) == _surname(b["authors"])
+
+
 def add_to_shortlist(ctx, paper_ids: list[str], reason: str, _agent: str = "discovery") -> dict:
-    current = len(ctx.shortlist_ids())
-    room = settings.max_shortlist - current
-    valid = [r["paper_id"] for r in ctx.pg.execute(
-        "SELECT paper_id FROM papers WHERE paper_id = ANY(%s)", (list(paper_ids),)).fetchall()]
-    unknown = sorted(set(paper_ids) - set(valid))
-    added = 0
-    for pid in valid[: max(room, 0)]:
+    """Add papers to the run's shortlist. The same study can exist twice, as an arXiv preprint and as
+    its published PMC version; only one copy is kept (the published one), so nothing is counted twice."""
+    cols = "paper_id, source, title, doi, authors"
+    rows = {r["paper_id"]: r for r in ctx.pg.execute(
+        f"SELECT {cols} FROM papers WHERE paper_id = ANY(%s)", (list(paper_ids),)).fetchall()}
+    unknown = sorted(set(paper_ids) - set(rows))
+    shortlist = {r["paper_id"]: r for r in ctx.pg.execute(
+        f"SELECT {cols} FROM run_papers JOIN papers USING (paper_id) WHERE run_id=%s", (ctx.run_id,)).fetchall()}
+    added, duplicates, replaced, full = 0, [], [], 0
+    for pid in [p for p in dict.fromkeys(paper_ids) if p in rows]:
+        new = rows[pid]
+        if pid in shortlist:
+            continue
+        twin = next((o for o in shortlist.values() if o["source"] != new["source"] and _same_work(o, new)), None)
+        if twin and new["source"] != "pmc":
+            duplicates.append({"paper_id": pid, "same_work_as": twin["paper_id"]})
+            continue
+        if twin:   # a published PMC version replaces the arXiv preprint already on the list
+            ctx.pg.execute("DELETE FROM run_papers WHERE run_id=%s AND paper_id=%s", (ctx.run_id, twin["paper_id"]))
+            shortlist.pop(twin["paper_id"])
+            replaced.append({"removed_preprint": twin["paper_id"], "kept_published": pid})
+        if len(shortlist) >= settings.max_shortlist:
+            full += 1
+            continue
         cur = ctx.pg.execute(
             "INSERT INTO run_papers (run_id, paper_id, added_by, reason) VALUES (%s,%s,%s,%s) "
             "ON CONFLICT DO NOTHING", (ctx.run_id, pid, _agent, reason))
         added += cur.rowcount
-    out = {"added": added, "shortlist_size": current + added, "max_shortlist": settings.max_shortlist}
+        shortlist[pid] = new
+    out = {"added": added, "shortlist_size": len(shortlist), "max_shortlist": settings.max_shortlist}
     if unknown:
         out["unknown_ids"] = unknown
-    if len(valid) > room:
-        out["warning"] = f"shortlist full; {len(valid) - max(room, 0)} ids not added"
+    if duplicates:
+        out["skipped_duplicates"] = duplicates
+    if replaced:
+        out["replaced_preprints"] = replaced
+    if full:
+        out["warning"] = f"shortlist full; {full} ids not added"
     return out
 
 
@@ -132,15 +183,15 @@ SEARCH_TOOLS = [
          "to `query`). Returns ranked papers with a short abstract snippet.",
          obj({"query": STR, "keywords": STR, **YEAR_PROPS,
               "categories": {**STRS, "description": "arXiv categories to require, e.g. ['eess.IV']"},
-              "limit": INT}, ["query"]),
-         hybrid_search),
+              "source": SOURCE, "limit": INT}, ["query"]),
+         hybrid_search, read_only=True),
     Tool("corpus_count",
          "Count how many papers in the whole health corpus match a keyword query. Use to size a topic.",
-         obj({"keywords": STR, **YEAR_PROPS}, ["keywords"]), corpus_count),
+         obj({"keywords": STR, **YEAR_PROPS, "source": SOURCE}, ["keywords"]), corpus_count, read_only=True),
     Tool("find_similar", "Nearest neighbours of a paper by embedding similarity.",
-         obj({"paper_id": STR, "limit": INT}, ["paper_id"]), find_similar),
+         obj({"paper_id": STR, "limit": INT}, ["paper_id"]), find_similar, read_only=True),
     Tool("get_papers", "Full metadata and abstract for up to 20 paper ids.",
-         obj({"paper_ids": STRS}, ["paper_ids"]), get_papers),
+         obj({"paper_ids": STRS}, ["paper_ids"]), get_papers, read_only=True),
 ]
 
 SHORTLIST_TOOLS = [

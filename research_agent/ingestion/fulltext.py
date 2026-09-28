@@ -111,6 +111,16 @@ def fetch_fulltext(pg, paper_ids: list[str]) -> dict[str, str]:
         "SELECT paper_id, status FROM paper_fulltext WHERE paper_id = ANY(%s)", (paper_ids,)).fetchall()}
     todo = sorted(set(paper_ids) - set(have))
     if todo:
+        # PMC articles come from NCBI as JATS XML; arXiv papers from the Hugging Face parquet.
+        sources = {r["paper_id"]: r["source"] for r in pg.execute(
+            "SELECT paper_id, source FROM papers WHERE paper_id = ANY(%s)", (todo,)).fetchall()}
+        pmc_ids = [pid for pid in todo if sources.get(pid) == "pmc"]
+        if pmc_ids:
+            from research_agent.ingestion import pmc
+
+            have.update(pmc.fetch_fulltext(pg, pmc_ids))
+            todo = [pid for pid in todo if pid not in have]
+    if todo:
         from research_agent.ingestion.load import duck
 
         con = duck()

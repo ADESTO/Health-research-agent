@@ -55,15 +55,33 @@ python -m research_agent.cli ingest --limit 3000   # quick dev load; drop --limi
 python -m research_agent.cli ask "What machine learning methods are used to forecast malaria, and what gaps exist for East Africa?" --out report.md
 ```
 
-`--provider groq` switches the whole team to Groq; `--mode pipeline` runs the same agents in a fixed
+`--provider groq` or `--provider deepseek` switches the whole team to that provider; `--mode pipeline` runs the same agents in a fixed
 order without the LLM planner (a useful baseline).
 
-API: `uvicorn research_agent.api.main:app --reload`, then `POST /runs {"question": ...}` and poll
-`GET /runs/{id}` (agent timeline, token usage), `GET /runs/{id}/report`, `GET /runs/{id}/claims`.
+Research Opportunity Map: `python -m research_agent.cli map "your question" --provider deepseek --out map.md`.
+A Protocol agent first defines the question-specific fields (e.g. forecast horizon, validation split,
+probabilistic output) that every shortlisted paper is then extracted against, with evidence quotes checked
+by code. Code computes what is established, emerging and missing, grades evidence strength and gap
+confidence with listed reasons, and finds underexplored combinations. A Gap Reasoning agent explains each
+gap through hypotheses that code tests against subgroup counts (supported / not supported / untestable),
+and a Research Design agent proposes candidate studies tied to map items, with supporting and challenging
+papers. References to unknown papers, gaps or untested hypotheses are removed and listed.
+
+PubMed Central (second corpus, topic slices of the open-access subset):
+`python -m research_agent.cli pmc-ingest "malaria forecasting" --from-year 2010`. Papers are tagged
+`source='pmc'`, only licences allowing reuse (CC0/CC BY/CC BY-SA) are kept, and PMC gets its own
+per-year denominators so trends normalise against the right corpus. Full text is fetched lazily from
+NCBI, as arXiv full text is from Hugging Face. Set `NCBI_API_KEY` in `.env` for 10 requests/s.
+
+Web UI and API: `uvicorn research_agent.api.main:app --reload`, then open http://127.0.0.1:8000 to ask a
+question in the browser. Pick a mode: Pipeline (fixed order), Orchestrated (a lead agent plans), or
+Opportunity map. The JSON API is the same: `POST /runs {"question": ..., "mode": "pipeline"|"orchestrated"|"map"}`
+and poll `GET /runs/{id}` (agent timeline, token usage), `GET /runs/{id}/report`, `GET /runs/{id}/claims`.
 
 ### Tests (offline, no API keys, real Postgres)
 
 ```bash
+pip install -r requirements-dev.txt
 docker compose exec db createdb -U research research_test
 TEST_DATABASE_URL=postgresql://research:research@localhost:5432/research_test pytest -q
 ```
@@ -96,7 +114,7 @@ research_agent/
   agents/        base loop, 7 specialists, orchestrator, report finalisation
   tools/         search+shortlist, extraction+analysis, trends, claims/evidence
   ingestion/     health filter, DuckDB→pgvector loader, full-text fetch + LaTeX cleaning
-  llm/           provider seam: anthropic | groq (same internal message format)
+  llm/           provider seam: anthropic | groq | deepseek (same internal message format)
   db/            schema.sql
   api/           FastAPI
   cli.py

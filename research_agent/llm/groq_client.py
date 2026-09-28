@@ -33,6 +33,35 @@ def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
     return out
 
 
+def _recover_rejected_call(exc, tools) -> LLMResponse | None:
+    """Groq validates tool arguments against the JSON schema on its side and rejects the whole
+    response on any mismatch (e.g. a string where the schema says array). When the rejected call is
+    still valid JSON naming a real tool, return it instead: the agent loop repairs minor type
+    mismatches itself. Only ever runs on a Groq `tool_use_failed` error."""
+    body = getattr(exc, "body", None)
+    err = body.get("error", body) if isinstance(body, dict) else None
+    if not isinstance(err, dict) or err.get("code") != "tool_use_failed" or not tools:
+        return None
+    try:
+        gen = json.loads(err.get("failed_generation") or "")
+    except (json.JSONDecodeError, TypeError):
+        return None  # e.g. output cut off mid-JSON: let the agent loop ask again
+    if isinstance(gen, list) and gen:
+        gen = gen[0]
+    name = gen.get("name") if isinstance(gen, dict) else None
+    args = gen.get("arguments", gen.get("parameters", {})) if isinstance(gen, dict) else None
+    if isinstance(args, str):
+        try:
+            args = json.loads(args)
+        except json.JSONDecodeError:
+            return None
+    if name not in {t["name"] for t in tools} or not isinstance(args, dict):
+        return None
+    call_id = f"call_{uuid.uuid4().hex[:12]}"
+    content = [{"type": "tool_use", "id": call_id, "name": name, "input": args}]
+    return LLMResponse("", [ToolCall(call_id, name, args)], content, "tool_calls", {})
+
+
 class GroqClient:
     provider = "groq"
 
@@ -55,7 +84,24 @@ class GroqClient:
             kwargs["tool_choice"] = (
                 {"type": "function", "function": {"name": force_tool}} if force_tool else "auto"
             )
-        resp = with_retries(lambda: self._client.chat.completions.create(**kwargs))
+        try:
+            resp = with_retries(lambda: self._client.chat.completions.create(**kwargs))
+        except Exception as exc:
+            recovered = _recover_rejected_call(exc, tools)
+            if recovered is not None:
+                return recovered
+            if getattr(exc, "status_code", None) == 413 or "request too large" in str(exc).lower():
+                output_limit = "output tokens per minute" in str(exc).lower()
+                raise RuntimeError(
+                    ("This Groq model limits OUTPUT tokens per minute below the max_tokens being requested. "
+                     "Lower AGENT_MAX_TOKENS, EXTRACTION_MAX_TOKENS and REPORT_MAX_TOKENS below that limit, "
+                     "or use a model without an output cap (e.g. openai/gpt-oss-20b). ")
+                    if output_limit else
+                    ("Groq rejected a request larger than your tokens-per-minute limit (it counts the prompt "
+                     "plus max_tokens). Use the 'Groq free tier' settings from .env.example "
+                     "(AGENT_MAX_TOKENS, TOOL_RESULT_CHARS, CONTEXT_BUDGET_CHARS), or a higher Groq tier. ")
+                    + f"Original error: {exc}") from exc
+            raise
         choice = resp.choices[0]
         msg = choice.message
 

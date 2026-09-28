@@ -22,7 +22,27 @@ def _call(name, **inp):
     return ToolCall(f"tc_{next(_ids)}", name, inp)
 
 
+def _quote(text: str, needle: str) -> str:
+    """Up to ~12 words of the text around `needle`, copied exactly, like a careful extractor would."""
+    words = text.split()
+    for i, w in enumerate(words):
+        if needle.lower().split()[0] in w.lower():
+            return " ".join(words[max(0, i - 5): i + 7])
+    return ""
+
+
 def fake_extraction(text: str) -> dict:
+    data = _fake_fields(text)
+    keys = {"methods": data["methods"], "datasets": data["datasets"], "geography": data["geography"],
+            "data_modalities": [{"surveillance counts": "surveillance", "chest X-ray": "x-ray",
+                                 "EHR structured": "health", "histopathology": "histopathology",
+                                 "climate/environmental": "rainfall"}[m] for m in data["data_modalities"]],
+            "validation_level": ["validation"] if data["validation_level"] != "not_stated" else []}
+    data["evidence"] = {f: [q for q in (_quote(text, v) for v in vals[:2]) if q] for f, vals in keys.items()}
+    return data
+
+
+def _fake_fields(text: str) -> dict:
     low = text.lower()
     return {
         "problem": text.split("\n")[0][7:120],
@@ -45,6 +65,26 @@ def fake_extraction(text: str) -> dict:
     }
 
 
+def fake_protocol_extraction(text: str) -> dict:
+    """Plays the protocol extractor on the fixture malaria abstracts, quoting its evidence."""
+    low = text.lower()
+    out = {"q_forecast_horizon": "not_stated", "q_validation_split": "not_stated",
+           "q_probabilistic": "not_stated", "q_uses_satellite": "not_stated", "evidence": {}}
+    if "monthly" in low:
+        out["q_forecast_horizon"] = "one_month"
+        out["evidence"]["q_forecast_horizon"] = [_quote(text, "monthly")]
+    if "internal only" in low:
+        out["q_validation_split"] = "random_split"
+        out["evidence"]["q_validation_split"] = [_quote(text, "internal")]
+    if "satellite" in low:
+        out["q_uses_satellite"] = "yes"
+        out["evidence"]["q_uses_satellite"] = [_quote(text, "satellite")]
+    if "lstm" in low:                            # claims a probabilistic forecast with an invented quote
+        out["q_probabilistic"] = "yes"
+        out["evidence"]["q_probabilistic"] = ["we issue calibrated probabilistic forecasts"]
+    return out
+
+
 class FakeLLM:
     provider = "fake"
     model = "fake-1"
@@ -57,6 +97,9 @@ class FakeLLM:
         self.usage.add({"input_tokens": 100, "output_tokens": 50})
         if force_tool == "record_extraction":
             return self._resp([_call("record_extraction", **fake_extraction(messages[0]["content"][0]["text"]))])
+        if force_tool == "record_protocol_fields":
+            return self._resp([_call("record_protocol_fields",
+                                     **fake_protocol_extraction(messages[0]["content"][0]["text"]))])
         agent = self._agent(system)
         step = sum(1 for m in messages if m["role"] == "assistant")
         last = self._last_results(messages)
@@ -72,7 +115,9 @@ class FakeLLM:
 
     @staticmethod
     def _agent(system: str) -> str:
-        for key, name in (("Research Manager", "orchestrator"), ("Discovery agent", "discovery"),
+        for key, name in (("Protocol agent", "protocol"), ("Gap Reasoning agent", "gap_reasoning"),
+                          ("Research Design agent", "design"),
+                          ("Research Manager", "orchestrator"), ("Discovery agent", "discovery"),
                           ("Literature Analyst", "literature"), ("Methods agent", "methods"),
                           ("Trend agent", "trends"), ("Research Gap agent", "gaps"),
                           ("Evidence agent", "evidence"), ("Synthesis agent", "synthesis")):
@@ -189,6 +234,87 @@ class FakeLLM:
         supported = [c["claim"] for c in brief["claims"] if c["status"] == "supported"]
         unsupported = [c["claim"] for c in brief["claims"] if c["status"] != "supported"]
         body = (f"## Summary\n- Malaria forecasting relies on climate covariates [arXiv:{first}] "
-                f"[{supported[0]}].\n- A fake citation [arXiv:9999.99999] and an unverified one "
-                f"[{unsupported[0]}].\n")
+                f"[{supported[0] if supported else 'C0'}].\n- A fake citation [arXiv:9999.99999] and an "
+                f"unverified one [{unsupported[0] if unsupported else 'C0'}].\n")
         return [_call("finish", report_markdown=body)]
+
+    # ------------------------------------------------------------------ opportunity map agents
+    def _protocol(self, step, last, messages):
+        if step == 0:
+            return [_call("corpus_count", keywords="malaria forecast")]
+        return [_call("finish", setting="Malaria forecasting, any country", topic_query="malaria forecast",
+                      inclusion=["forecasts or predicts malaria incidence"], exclusion=["no forecasting"],
+                      fields=[
+                          {"name": "forecast_horizon", "type": "enum",
+                           "values": ["one_month", "one_to_three_months", "three_to_six_months", "over_six_months"],
+                           "definition": "How far ahead forecasts are made.", "desirable": ["three_to_six_months"],
+                           "search": {"three_to_six_months": '"6 months" OR "six months"'}},
+                          {"name": "validation_split", "type": "enum",
+                           "values": ["random_split", "temporal_holdout", "spatial_holdout",
+                                      "spatiotemporal_holdout", "none"], "role": "evaluation",
+                           "definition": "How evaluation data were separated.",
+                           "desirable": ["spatial_holdout", "spatiotemporal_holdout"],
+                           "groups": [{"label": "tests on unseen places",
+                                       "values": ["spatial_holdout", "spatiotemporal_holdout"]},
+                                      {"label": "lonely group", "values": ["temporal_holdout"]}],
+                           "search": {"spatial_holdout": '"spatial cross-validation" OR "held-out districts"',
+                                      "spatiotemporal_holdout": '"space-time cross-validation"'}},
+                          {"name": "probabilistic", "type": "enum", "values": ["yes", "no"],
+                           "definition": "Forecasts give probabilities or intervals.", "desirable": ["yes"]},
+                          {"name": "uses_satellite", "type": "enum", "values": ["yes", "no"],
+                           "definition": "Uses satellite-derived inputs."},
+                          {"name": "methods", "type": "list", "definition": "duplicate of a base field"},
+                          {"name": "bad", "type": "enum", "values": ["only_one"], "definition": "x"},
+                      ])]
+
+    def _gap_reasoning(self, step, last, messages):
+        if step == 0:
+            return [_call("get_map")]
+        if step == 1:
+            self._map = last[0]
+            return [_call("test_claim", claim_type="prevalence",
+                          predicate={"field": "validation_level", "any_of": ["internal"], "min_share": 0.5})]
+        gaps = [g["id"] for g in self._map["gaps"]]
+        if step == 2:
+            n, d = last[0]["n_matching"], last[0]["denominator"]
+            return [_call("test_hypothesis", gap_id=gaps[0], role="cause", claim_type="prevalence",
+                          text=f"Internal-only validation appears in {n} of {d} papers.",
+                          predicate={"field": "validation_level", "any_of": ["internal"], "min_share": 0.5}),
+                    _call("test_hypothesis", gap_id=gaps[0], role="artifact", claim_type="prevalence",
+                          text="Among recent abstract-only papers, internal validation is reported.",
+                          predicate={"field": "validation_level", "any_of": ["internal"], "min_share": 0.5,
+                                     "where": [{"field": "read", "any_of": ["abstract"]},
+                                               {"field": "year", "min": 2099}]}),
+                    _call("test_hypothesis", gap_id=gaps[0], role="cause", claim_type="prevalence",
+                          text=f"External validation appears in {d - 1} of {d} papers.",
+                          predicate={"field": "validation_level", "any_of": ["external"], "min_share": 0.5}),
+                    _call("test_hypothesis", gap_id=gaps[-1], role="cause", claim_type="prevalence",
+                          text=f"Internal-only validation appears in {n} of {d} papers.",
+                          predicate={"field": "validation_level", "any_of": ["internal"], "min_share": 0.5})]
+        if step == 3:
+            return [_call("find_passages", terms=["internal"])]
+        ids = [p["paper_id"] for p in last[0]["papers"]]
+        return [_call("finish", gaps=[{
+            "gap_id": gaps[0], "explanation": "Papers validate on the data they were fitted on (H1).",
+            "hypothesis_ids": ["H1", "H99"], "artifact_risk": "low", "artifact_reason": "stated in full text",
+            "linked_gaps": [{"gap_id": gaps[-1], "relation": "no shared data, no external test", "hypothesis_id": "H1"},
+                            {"gap_id": gaps[-1], "relation": "untested link", "hypothesis_id": "H42"}],
+            "near_misses": [{"paper_id": ids[0], "what_it_does": "forecasts monthly", "what_is_missing": "holdout"},
+                            {"paper_id": "0000.00000", "what_it_does": "invented", "what_is_missing": "all"}],
+            "would_change_if": "papers with district holdouts appear"}],
+            cross_cutting=["Validation practice follows data access (H1)."])]
+
+    def _design(self, step, last, messages):
+        if step == 0:
+            return [_call("get_map")]
+        m = last[0]
+        gap = m["gaps"][0]["id"]
+        pid = m["established"][0]["example_paper_ids"][0]
+        return [_call("finish", designs=[
+            {"title": "District-holdout 3-6 month forecasts", "target": "monthly cases per district",
+             "predictors": ["rainfall", "temperature"], "horizon": "3-6 months",
+             "validation_strategy": "leave-one-district-out", "baseline": "seasonal naive",
+             "addresses": [gap, "G99", "H1"], "rests_on": ["H77"], "builds_on": [pid],
+             "supporting": [{"paper_id": pid, "why": "uses the same surveillance data"}],
+             "challenging": [{"paper_id": "9999.99999", "why": "invented"}]},
+            {"title": "Unanchored idea", "target": "x", "validation_strategy": "y", "addresses": ["G99"]}])]

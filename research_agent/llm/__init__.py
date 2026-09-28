@@ -1,4 +1,4 @@
-"""LLM provider factory. Swap providers with LLM_PROVIDER=anthropic|groq."""
+"""LLM provider factory. Swap providers with LLM_PROVIDER=anthropic|groq|deepseek."""
 from __future__ import annotations
 
 from research_agent.config import settings
@@ -17,4 +17,10 @@ def get_llm(provider: str | None = None, strong: bool = False) -> LLMClient:
         from research_agent.llm.groq_client import GroqClient
 
         return GroqClient(settings.groq_model)
+    if provider == "deepseek":
+        from research_agent.llm.deepseek_client import DeepSeekClient
+
+        model = (settings.deepseek_model_strong if strong and settings.deepseek_model_strong
+                 else settings.deepseek_model)
+        return DeepSeekClient(model)
     raise ValueError(f"Unknown LLM_PROVIDER={provider!r}")

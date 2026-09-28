@@ -65,7 +65,20 @@ class LLMClient(Protocol):
     ) -> LLMResponse: ...
 
 
-def with_retries(fn, *, attempts: int = 5, base_delay: float = 2.0, retry_on: tuple = (Exception,)):
+class DailyLimitError(RuntimeError):
+    """Raised when a per-day quota is exhausted (retrying within the run is pointless)."""
+
+
+def _retry_after(exc) -> float | None:
+    resp = getattr(exc, "response", None)
+    headers = getattr(resp, "headers", None) or {}
+    try:
+        return float(headers.get("retry-after")) if headers.get("retry-after") else None
+    except (TypeError, ValueError):
+        return None
+
+
+def with_retries(fn, *, attempts: int = 6, base_delay: float = 2.0, retry_on: tuple = (Exception,)):
     """Retry transient provider errors (rate limits, 5xx, timeouts) with exponential backoff."""
     last = None
     for i in range(attempts):
@@ -78,7 +91,16 @@ def with_retries(fn, *, attempts: int = 5, base_delay: float = 2.0, retry_on: tu
             transient = status in (408, 409, 429, 500, 502, 503, 504, 529) or any(
                 k in name for k in ("ratelimit", "timeout", "connection", "overloaded", "internalserver")
             )
+            if "tokens per day" in str(exc).lower() or "requests per day" in str(exc).lower():
+                raise DailyLimitError(
+                    "The provider's DAILY token limit is used up; waiting a minute will not help. "
+                    "Resume this run later with `ask --resume <run_id>` (finished agents are skipped), "
+                    "switch GROQ_MODEL to another model (limits are per model), or use --provider anthropic. "
+                    f"Provider said: {str(exc)[:300]}") from exc
             if not transient or i == attempts - 1:
                 raise
-            time.sleep(base_delay * (2**i))
+            wait = _retry_after(exc) or base_delay * (2**i)
+            if status == 429:  # per-minute token limits: waiting out the minute is what works
+                wait = max(wait, 10.0)
+            time.sleep(min(wait, 65.0))
     raise last  # pragma: no cover

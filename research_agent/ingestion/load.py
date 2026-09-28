@@ -27,7 +27,7 @@ def duck() -> duckdb.DuckDBPyConnection:
     return con
 
 
-def scope(limit_samples: int = 8) -> dict:
+def scope(limit_samples: int = 20, csv_path: str | None = None) -> dict:
     """Measure the health subset before loading anything (counts by year, reason, category)."""
     con = duck()
     sql = health_subset_sql(settings.metadata_glob, settings.min_year)
@@ -38,7 +38,8 @@ def scope(limit_samples: int = 8) -> dict:
         "SELECT split_part(health_reason, ':', 1) kind, count(*) FROM subset GROUP BY 1 ORDER BY 2 DESC"
     ).fetchall()
     top_terms = con.execute(
-        "SELECT health_reason, count(*) n FROM subset GROUP BY 1 ORDER BY 2 DESC LIMIT 25"
+        "SELECT regexp_replace(health_reason, ' \\(.*', '') r, count(*) n FROM subset GROUP BY 1 "
+        "ORDER BY 2 DESC LIMIT 25"
     ).fetchall()
     by_cat = con.execute(
         "SELECT primary_category, count(*) n FROM subset GROUP BY 1 ORDER BY 2 DESC LIMIT 20"
@@ -46,6 +47,9 @@ def scope(limit_samples: int = 8) -> dict:
     samples = con.execute(
         f"SELECT paper_id, health_reason, title FROM subset USING SAMPLE {int(limit_samples)} ROWS"
     ).fetchall()
+    if csv_path:  # a bigger random sample to label by hand: is each paper really health research?
+        con.execute(f"COPY (SELECT paper_id, health_reason, primary_category, title, '' AS is_health "
+                    f"FROM subset USING SAMPLE 300 ROWS) TO '{csv_path}' (HEADER)")
     return {"total": total, "by_year": by_year, "by_reason": by_reason, "top_reasons": top_terms,
             "top_primary_categories": by_cat, "samples": samples}
 
@@ -54,29 +58,37 @@ def load_year_stats(pg) -> int:
     con = duck()
     rows = con.execute(year_stats_sql(settings.metadata_glob, settings.min_year)).fetchall()
     with pg.cursor() as cur:
-        cur.execute("TRUNCATE corpus_year_stats")
-        with cur.copy("COPY corpus_year_stats (year, primary_category, n_papers) FROM STDIN") as cp:
+        cur.execute("DELETE FROM corpus_year_stats WHERE source = 'arxiv'")
+        with cur.copy("COPY corpus_year_stats (source, year, primary_category, n_papers) FROM STDIN") as cp:
             for r in rows:
-                cp.write_row(r)
+                cp.write_row(("arxiv", *r))
     return len(rows)
 
 
-def load_papers(pg, limit: int | None = None, batch_size: int = 512, log=print) -> int:
+def load_papers(pg, limit: int | None = None, batch_size: int = 512, log=print,
+                from_year: int | None = None) -> int:
     embedder = get_embedder()
     existing = {r["paper_id"] for r in pg.execute("SELECT paper_id FROM papers").fetchall()}
     con = duck()
-    reader = con.execute(health_subset_sql(settings.metadata_glob, settings.min_year, limit)) \
-                .to_arrow_reader(batch_size)
+    cur_duck = con.execute(health_subset_sql(settings.metadata_glob, max(settings.min_year, from_year or 0), limit))
+    names = [d[0] for d in cur_duck.description]
     cols = ["paper_id", "title", "abstract", "authors", "categories", "primary_category", "year",
             "first_version_date", "doi", "journal_ref", "license", "health_reason", "embedding"]
-    inserted, t0 = 0, time.time()
-    for batch in reader:
-        rows = [r for r in batch.to_pylist() if r["paper_id"] not in existing]
+    inserted, t0, embed_secs, read_secs = 0, time.time(), 0.0, 0.0
+    while True:
+        t_read = time.time()
+        batch = cur_duck.fetchmany(batch_size)  # plain tuples: no pyarrow needed at runtime
+        read_secs += time.time() - t_read
+        if not batch:
+            break
+        rows = [r for r in (dict(zip(names, t)) for t in batch) if r["paper_id"] not in existing]
         if not rows:
             continue
+        t_emb = time.time()
         vecs = embedder.embed_documents(
             [paper_text_for_embedding(r["title"], r["abstract"]) for r in rows]
         )
+        embed_secs += time.time() - t_emb
         with pg.cursor() as cur, cur.copy(f"COPY papers ({', '.join(cols)}) FROM STDIN") as cp:
             for r, v in zip(rows, vecs):
                 cp.write_row([
@@ -87,7 +99,8 @@ def load_papers(pg, limit: int | None = None, batch_size: int = 512, log=print) 
                 ])
         inserted += len(rows)
         rate = inserted / max(time.time() - t0, 1e-6)
-        log(f"  loaded {inserted:,} papers ({rate:,.0f}/s)")
+        log(f"  loaded {inserted:,} papers ({rate:,.1f}/s overall | embedding {inserted / max(embed_secs, 1e-6):,.1f}/s"
+            f" | reading parquet {read_secs:,.0f}s so far)")
     return inserted
 
 
@@ -100,7 +113,7 @@ def build_indexes(pg) -> None:
     pg.execute("ANALYZE papers")
 
 
-def run_ingest(limit: int | None = None, log=print) -> dict:
+def run_ingest(limit: int | None = None, log=print, from_year: int | None = None) -> dict:
     init_schema()
     pg = connect()
     try:
@@ -108,7 +121,7 @@ def run_ingest(limit: int | None = None, log=print) -> dict:
         n_stats = load_year_stats(pg)
         log(f"  {n_stats:,} year×category rows")
         log(f"Loading health subset (embedder: {get_embedder().name})…")
-        n = load_papers(pg, limit=limit, log=log)
+        n = load_papers(pg, limit=limit, log=log, from_year=from_year)
         log("Building HNSW vector index…")
         build_indexes(pg)
         total = pg.execute("SELECT count(*) AS n FROM papers").fetchone()["n"]
