@@ -50,6 +50,11 @@
   .v-notsupported, .v-untestable { font-weight: 600; }
   .v-notsupported { color: var(--bad); }
   .v-untestable { color: var(--warn); }
+  .ref { cursor: pointer; color: var(--accent); border-bottom: 1px dotted var(--accent); }
+  .ref:hover { background: var(--bg); }
+  #thread .msg { border-top: 1px solid var(--line); padding: 10px 0; }
+  #thread .who { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }
+  #thread .you { white-space: pre-wrap; }
   .pill { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
 </style>
 </head>
@@ -87,6 +92,19 @@
     <div id="report"></div>
   </div>
 
+  <div class="card" id="followCard" hidden>
+    <div class="pill">Follow-up questions</div>
+    <p class="hint">Ask about a claim, a gap, a paper or a number. Click any id in the report (C12, G2, N1…) to
+      ask about it. New counts are checked by code, and the report above stays as it is.</p>
+    <div id="thread"></div>
+    <textarea id="fq" placeholder="e.g. Which papers are behind C12? Does it hold for PMC papers only?"></textarea>
+    <div class="row">
+      <button class="primary" id="fgo">Ask</button>
+      <span class="status" id="fabout"></span>
+      <span class="status" id="fstatus"></span>
+    </div>
+  </div>
+
   <div class="card">
     <div class="pill">Recent runs</div>
     <ul class="runs" id="runs"></ul>
@@ -109,7 +127,7 @@ function md(src) {
     .replace(/(^|\s)_([^_]+)_(?=$|[\s.,;:])/g, "$1<em>$2</em>")
     .replace(/`([^`]+)`/g, "<code>$1</code>")
     .replace(/(https?:\/\/[^\s<]+)/g, '<a href="$1" target="_blank" rel="noopener">$1</a>')
-    .replace(/\[(C\d+)\]/g, '<code>$1</code>')
+    .replace(/(^|[^\w:\/.-])([CGNERWHD]\d{1,5})(?![\w-]|\.\d)/g, '$1<span class="ref" data-id="$2" title="Ask about $2">$2</span>')
     .replace(/<strong>(supported|not supported|untestable)<\/strong>/g,
              (m, v) => `<span class="v-${v.replace(" ", "")}">${v}</span>`)
     .replace(/\[([^\]]*(?:not verified|does not match|unverified|citation removed)[^\]]*)\]/g, '<span class="flag">[$1]</span>');
@@ -200,6 +218,8 @@ async function poll() {
 function showReport(markdown, run) {
   reportText = markdown;
   $("#report").innerHTML = md(markdown);
+  $("#followCard").hidden = false;
+  loadFollowups();
   $("#reportCard").hidden = false;
   $("#reportMeta").textContent = `${(run && run.provider) || ""} ${(run && run.model) || ""}`;
   $("#reportCard").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -236,6 +256,53 @@ $("#go").onclick = async () => {
   } catch (e) {
     $("#status").textContent = e.message; $("#go").disabled = false;
   }
+};
+
+// ---------------------------------------------------------------- follow-up questions
+let about = null, ftimer = null;
+
+function setAbout(id) {
+  about = id;
+  $("#fabout").innerHTML = id ? `About <b>${esc(id)}</b> · <a href="#" id="fclear">clear</a>` : "";
+  if (id) $("#fclear").onclick = ev => { ev.preventDefault(); setAbout(null); };
+}
+
+document.addEventListener("click", ev => {
+  const ref = ev.target.closest(".ref");
+  if (!ref || !currentRun) return;
+  setAbout(ref.dataset.id);
+  if (!$("#fq").value.trim()) $("#fq").value = `What is behind ${ref.dataset.id}?`;
+  $("#followCard").scrollIntoView({ behavior: "smooth", block: "start" });
+  $("#fq").focus();
+});
+
+async function loadFollowups() {
+  if (!currentRun) return;
+  const { messages } = await api(`/runs/${currentRun}/followups`);
+  $("#thread").innerHTML = messages.map(m => m.role === "user"
+    ? `<div class="msg"><div class="who">You${m.about ? " · about " + esc(m.about) : ""}</div><div class="you">${esc(m.content)}</div></div>`
+    : `<div class="msg"><div class="who">Answer</div>${m.status === "pending" ? '<p class="status">working: looking up claims, counting, reading papers…</p>'
+        : md(m.content) + (m.new_claims && m.new_claims.length ? `<p class="hint">New claims recorded: ${m.new_claims.map(esc).join(", ")}</p>` : "")}</div>`
+  ).join("");
+  const pending = messages.some(m => m.status === "pending");
+  $("#fgo").disabled = pending;
+  $("#fstatus").textContent = pending ? "answering…" : "";
+  if (pending && !ftimer) ftimer = setInterval(() => loadFollowups().catch(() => {}), 3000);
+  if (!pending && ftimer) { clearInterval(ftimer); ftimer = null; }
+}
+
+$("#fgo").onclick = async () => {
+  const question = $("#fq").value.trim();
+  if (question.length < 3 || !currentRun) return;
+  $("#fgo").disabled = true;
+  try {
+    await api(`/runs/${currentRun}/followups`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ question, about, provider: $("#provider").value }),
+    });
+    $("#fq").value = ""; setAbout(null);
+    await loadFollowups();
+  } catch (e) { $("#fstatus").textContent = e.message; $("#fgo").disabled = false; }
 };
 
 $("#download").onclick = () => {

@@ -9,6 +9,7 @@ from __future__ import annotations
 import threading
 import time
 from collections import defaultdict, deque
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -20,7 +21,19 @@ from research_agent.db import get_conn
 
 STATIC = Path(__file__).parent / "static"
 
-app = FastAPI(title="Health Research Intelligence API", version="0.1.0")
+@asynccontextmanager
+async def _lifespan(_app):
+    """Bring an existing database up to date (new tables and indexes only) before serving requests."""
+    from research_agent.db import init_schema
+
+    try:
+        init_schema()
+    except Exception as exc:   # the server should still start; endpoints report their own errors
+        print(f"database migration failed: {exc}")
+    yield
+
+
+app = FastAPI(title="Health Research Intelligence API", version="0.1.0", lifespan=_lifespan)
 
 # Simple per-IP rate limit: runs cost money. A map costs about two ordinary runs, so it counts twice.
 _RUNS_PER_HOUR = 5
@@ -114,6 +127,47 @@ def get_report(run_id: str):
     if not row or not row["report_md"]:
         raise HTTPException(404, "report not ready")
     return {"report_markdown": row["report_md"]}
+
+
+class FollowupRequest(BaseModel):
+    question: str = Field(min_length=3, max_length=1500)
+    about: str | None = Field(default=None, pattern="^[CGNERWHDcgnerwhd][0-9]{1,6}$")
+    provider: str | None = Field(default=None, pattern="^(anthropic|groq|deepseek)$")
+
+
+_FOLLOWUPS_PER_HOUR = 40
+_fhits: dict[str, deque] = defaultdict(deque)
+
+
+@app.post("/runs/{run_id}/followups", status_code=202)
+def ask_followup(run_id: str, req: FollowupRequest, request: Request):
+    """Ask a follow-up question about a finished run. Answered in the background; poll the GET below."""
+    from research_agent.agents import followup
+
+    ip = request.client.host if request.client else "unknown"
+    q, now = _fhits[ip], time.time()
+    while q and now - q[0] > 3600:
+        q.popleft()
+    if len(q) >= _FOLLOWUPS_PER_HOUR:
+        raise HTTPException(429, "Follow-up limit reached; try again later.")
+    with get_conn() as pg:
+        run = pg.execute("SELECT status FROM runs WHERE run_id=%s", (run_id,)).fetchone()
+    if not run:
+        raise HTTPException(404, "no such run")
+    if run["status"] not in ("done", "failed"):
+        raise HTTPException(409, "The run is still in progress; ask follow-ups once it has finished.")
+    q.append(now)
+    ids = followup.answer_in_background(run_id, req.question, req.about.upper() if req.about else None, req.provider)
+    return {**ids, "poll": f"/runs/{run_id}/followups"}
+
+
+@app.get("/runs/{run_id}/followups")
+def list_followups(run_id: str):
+    from research_agent.agents.followup import history
+
+    return {"messages": [{"id": r["id"], "role": r["role"], "content": r["content"], "status": r["status"],
+                          "about": (r["meta"] or {}).get("focus"), "new_claims": (r["meta"] or {}).get("new_claims", []),
+                          "ts": r["ts"]} for r in history(run_id, limit=200)]}
 
 
 @app.get("/runs/{run_id}/claims")

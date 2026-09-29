@@ -59,6 +59,28 @@ class RunContext:
         return ctx
 
     @classmethod
+    def attach(cls, run_id: str, provider: str | None = None, llm_factory=None, on_event=None) -> "RunContext":
+        """Open a finished run for follow-up questions WITHOUT changing it: its status, report and finish time
+        stay as they are (resume, by contrast, reopens the run and clears its report)."""
+        pg = connect()
+        row = pg.execute("SELECT question FROM runs WHERE run_id=%s", (run_id,)).fetchone()
+        if not row:
+            pg.close()
+            raise ValueError(f"No run with id {run_id}")
+        base = llm_factory or (lambda strong=False: get_llm(provider, strong=strong))
+        clients: list = []
+
+        def factory(strong: bool = False):
+            client = base(strong=strong)
+            clients.append(client)
+            return client
+
+        ctx = cls(run_id=run_id, question=row["question"], llm_factory=factory, pg=pg, on_event=on_event,
+                  clients=clients)
+        ctx._prepare_session()
+        return ctx
+
+    @classmethod
     def resume(cls, run_id: str, provider: str | None = None, llm_factory=None, on_event=None) -> "RunContext":
         """Re-attach to an earlier run: its shortlist, extractions, claims and agent notes are reused."""
         pg = connect()

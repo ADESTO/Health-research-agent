@@ -165,3 +165,15 @@ CREATE TABLE IF NOT EXISTS rechecks (
     ts       timestamptz DEFAULT now(),
     PRIMARY KEY (run_id, paper_id, field, concept)
 );
+
+-- Follow-up questions about a finished run: the conversation, one row per message.
+CREATE TABLE IF NOT EXISTS followups (
+    id       bigserial PRIMARY KEY,
+    run_id   uuid NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    role     text NOT NULL,                 -- user | assistant
+    content  text NOT NULL DEFAULT '',
+    status   text NOT NULL DEFAULT 'done',  -- pending | done | failed (assistant rows)
+    meta     jsonb,                         -- focus item, new claim ids, audit
+    ts       timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS followups_run_idx ON followups (run_id, id);

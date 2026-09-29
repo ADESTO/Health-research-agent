@@ -35,6 +35,53 @@ def _print_event(agent: str, kind: str, payload: dict) -> None:
 
 
 
+
+def chat(run_id: str, question: str | None = None, about: str | None = None, provider: str | None = None) -> int:
+    """Follow-up questions about a finished run, in the terminal. The report itself is never changed."""
+    import re as _re
+
+    from research_agent.agents import followup
+    from research_agent.db import get_conn, init_schema
+
+    init_schema()
+    with get_conn() as pg:
+        run = pg.execute("SELECT question, status FROM runs WHERE run_id=%s", (run_id,)).fetchone()
+    if not run:
+        print(f"No run with id {run_id}. `python -m research_agent.cli runs` lists recent runs."); return 1
+
+    def ask(q: str, focus: str | None) -> None:
+        print("\n…thinking (it may look up claims, count, or read papers)\n")
+        try:
+            res = followup.answer(run_id, q, focus, provider=provider)
+        except Exception as exc:
+            print(f"The follow-up failed: {exc}"); return
+        print(res["answer"])
+        if res["new_claims"]:
+            print(f"\n(new claims recorded for this run: {', '.join(res['new_claims'])})")
+
+    if question:
+        ask(question, about)
+        return 0
+    print(f"Follow-up on: {run['question']}")
+    past = followup.history(run_id)
+    if past:
+        print(f"\n{len([p for p in past if p['role'] == 'user'])} earlier question(s). Last exchange:")
+        for r in past[-2:]:
+            print(f"\n{'You' if r['role'] == 'user' else 'Answer'}: {r['content'][:800]}")
+    print("\nAsk about a claim (C12), a map item (G2, N1), a paper or a number. Type 'exit' to leave.")
+    while True:
+        try:
+            q = input("\n> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(); break
+        if not q:
+            continue
+        if q.lower() in ("exit", "quit", ":q"):
+            break
+        m = _re.search(r"\b([CGNERWHD]\d+)\b", q)
+        ask(q, m.group(1).upper() if m else None)
+    return 0
+
 def format_usage(by_step: dict, total: dict | None = None) -> str:
     """A small table: where a run's tokens (and money, when PRICE_* is set) went."""
     if not by_step:
@@ -90,6 +137,11 @@ def main(argv: list[str] | None = None) -> int:
     p_map.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
     p_map.add_argument("--out", help="write the map to this .md file")
     p_rep = sub.add_parser("report"); p_rep.add_argument("run_id")
+    p_chat = sub.add_parser("chat", help="ask follow-up questions about a finished run")
+    p_chat.add_argument("run_id")
+    p_chat.add_argument("--question", "-q", help="ask one question and exit")
+    p_chat.add_argument("--about", help="the item the question is about, e.g. C512 or G2")
+    p_chat.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
     p_use = sub.add_parser("usage", help="tokens (and cost) per step for a finished run")
     p_use.add_argument("run_id")
     sub.add_parser("runs", help="list recent runs (to find a run_id to resume)")
@@ -185,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\nrun_id={res['run_id']}  (token use: python -m research_agent.cli usage {res['run_id']})")
         if args.out:
             Path(args.out).write_text(res["report"]); print(f"saved to {args.out}")
+    elif args.cmd == "chat":
+        return chat(args.run_id, args.question, args.about, args.provider)
     elif args.cmd == "usage":
         from research_agent.db import get_conn
 

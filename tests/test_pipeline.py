@@ -1682,3 +1682,95 @@ def test_cut_off_batch_keeps_finished_records(ctx):
     results, failed, _ = RD.read_papers(ctx, papers, None)
     assert results["b0"]["base"]["methods"] == ["ARIMA"]                 # kept from the cut-off batch
     assert Stub.calls.count("record_reading") == 2 and set(results) == {"b0", "b1", "b2"}
+
+
+def test_followup_answers_are_checked_and_leave_the_report_alone(loaded_db):
+    from research_agent.agents import followup
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.db import get_conn
+
+    res = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())
+    rid = res["run_id"]
+    with get_conn() as pg:
+        before = pg.execute("SELECT status, report_md, finished_at FROM runs WHERE run_id=%s", (rid,)).fetchone()
+        cid = pg.execute("SELECT id FROM claims WHERE run_id=%s AND status='supported' ORDER BY id LIMIT 1",
+                         (rid,)).fetchone()["id"]
+    out = followup.answer(rid, f"Which papers are behind C{cid}?", f"C{cid}", llm_factory=lambda strong=False: FakeLLM())
+    ans = out["answer"]
+    new = out["new_claims"][0]
+    assert f"[{new}]" in ans and "0000.00000" not in ans and "citation removed" in ans   # invented paper removed
+    assert "7 of 9 [unverified]" in ans                                                   # untraced number tagged
+    with get_conn() as pg:
+        after = pg.execute("SELECT status, report_md, finished_at FROM runs WHERE run_id=%s", (rid,)).fetchone()
+        added = pg.execute("SELECT agent, status FROM claims WHERE id=%s", (int(new[1:]),)).fetchone()
+    assert after == before                                  # the run and its report are untouched
+    assert added["agent"] == "followup" and added["status"] == "supported"
+    # the conversation is stored, and the next question sees it
+    second = followup.answer(rid, "And overall?", None, llm_factory=lambda strong=False: FakeLLM())
+    assert second["answer"].startswith("As discussed before")
+    msgs = followup.history(rid)
+    assert [m["role"] for m in msgs] == ["user", "assistant", "user", "assistant"]
+    assert all(m["status"] == "done" for m in msgs)
+
+
+def test_followup_item_lookup_and_paper_reading(ctx, monkeypatch):
+    from research_agent.agents import followup
+    from research_agent.tools import claims as C
+
+    assert "error" in followup.get_item(ctx, "C999999")
+    assert "error" in followup.get_item(ctx, "G7")
+    assert "not one of the papers analysed" in followup.read_paper(ctx, "0000.00000")["error"]
+
+
+def test_followup_api_and_cli(loaded_db, monkeypatch, capsys):
+    import time
+
+    from fastapi.testclient import TestClient
+
+    from research_agent import cli
+    from research_agent.agents import followup
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.api import main as api
+
+    real = followup.answer
+    monkeypatch.setattr(followup, "answer", lambda *a, **k: real(*a, **{**k, "llm_factory": lambda strong=False: FakeLLM()}))
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    client = TestClient(api.app)
+    assert client.post(f"/runs/{rid}/followups", json={"question": "Why?", "about": "C1; DROP"}).status_code == 422
+    r = client.post(f"/runs/{rid}/followups", json={"question": "What is behind the main claim?"})
+    assert r.status_code == 202
+    for _ in range(60):
+        msgs = client.get(f"/runs/{rid}/followups").json()["messages"]
+        if msgs and msgs[-1]["status"] != "pending":
+            break
+        time.sleep(0.3)
+    assert msgs[-1]["role"] == "assistant" and msgs[-1]["status"] == "done" and msgs[-1]["new_claims"]
+    assert client.post("/runs/00000000-0000-0000-0000-000000000000/followups",
+                       json={"question": "anything?"}).status_code == 404
+    # terminal: one question, then the answer is printed
+    assert cli.chat(rid, "Does it hold for PMC papers only?") == 0
+    assert "Surveillance counts appear in" in capsys.readouterr().out
+
+
+def test_followups_work_on_a_database_from_before_followups(loaded_db):
+    from fastapi.testclient import TestClient
+
+    from research_agent.agents import followup
+    from research_agent.api import main as api
+    from research_agent.db import get_conn
+
+    with get_conn() as pg:
+        pg.execute("DROP TABLE IF EXISTS followups")
+        rid = str(pg.execute("SELECT run_id FROM runs WHERE status='done' LIMIT 1").fetchone()["run_id"])
+    followup._schema_ready = False
+    client = TestClient(api.app, raise_server_exceptions=False)
+    assert client.get(f"/runs/{rid}/followups").status_code == 200       # the table is created on demand
+    with get_conn() as pg:
+        pg.execute("DROP TABLE IF EXISTS followups")
+    followup._schema_ready = False
+    with TestClient(api.app) as started:                                  # and when the server starts
+        with get_conn() as pg:
+            assert pg.execute("SELECT to_regclass('followups') AS t").fetchone()["t"] is not None
+        assert started.get(f"/runs/{rid}/followups").status_code == 200

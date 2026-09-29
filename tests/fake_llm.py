@@ -158,7 +158,7 @@ class FakeLLM:
                           ("Literature Analyst", "literature"), ("Methods agent", "methods"),
                           ("Trend agent", "trends"), ("Research Gap agent", "gaps"),
                           ("Evidence agent", "evidence"), ("Synthesis agent", "synthesis"),
-                          ("Number Check agent", "number_check")):
+                          ("Number Check agent", "number_check"), ("Follow-up agent", "followup")):
             if key in system:
                 return name
         raise AssertionError("unknown agent prompt")
@@ -278,6 +278,29 @@ class FakeLLM:
                 f"- Satellite-derived inputs appear in {n - 1} of {n} papers.\n"
                 f"- Point metrics are reported by 3 of {n} papers (a hand-made sum).\n")
         return [_call("finish", report_markdown=body)]
+
+    def _followup(self, step, last, messages):
+        """Looks up the claim asked about, counts something new, and answers (with one invented id and one
+        untraced number, which the audit must catch)."""
+        first = messages[0]["content"][0]["text"]
+        if step == 0:
+            ids = re.findall(r"\bC\d+\b", first.split("New question from the researcher:")[-1])
+            return [_call("get_item", item_id=ids[0]) if ids else _call("run_overview")]
+        if step == 1:
+            self._looked_up = last[0]
+            return [_call("test_claim", claim_type="prevalence",
+                          predicate={"field": "data_modalities", "any_of": ["surveillance"], "min_count": 1})]
+        if step == 2:
+            self._n, self._d = last[0]["n_matching"], last[0]["denominator"]
+            return [_call("add_claim", text=f"Surveillance counts appear in {self._n} of {self._d} papers.",
+                          claim_type="prevalence",
+                          predicate={"field": "data_modalities", "any_of": ["surveillance"], "min_count": 1})]
+        new = last[0]["claim_id"]
+        remembered = "Conversation so far:" in first
+        return [_call("finish", answer=(
+            f"{'As discussed before, ' if remembered else ''}the claim you asked about is "
+            f"{self._looked_up.get('status', 'an overview')}. Surveillance counts appear in {self._n} of {self._d} papers "
+            f"[C{new}]. One more study [arXiv:0000.00000] reports 7 of 9 sites."))]
 
     def _number_check(self, step, last, messages):
         """Measures the first untraced number with a claim, drops the second, keeps the rest."""

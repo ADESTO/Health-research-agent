@@ -88,6 +88,20 @@ How the agents avoid missing things:
 - **Number check.** After the report is written, every "n of N" that code cannot trace is measured, corrected
   or removed by an agent under code checks (`NUMBER_CHECK=0` turns it off).
 
+Follow-up questions about a finished run (terminal or web page):
+
+```bash
+python -m research_agent.cli chat <run_id>                      # interactive; 'exit' to leave
+python -m research_agent.cli chat <run_id> -q "Which papers are behind C12?" --about C12
+```
+
+The Follow-up agent answers from the run's own papers, quotes, claims and map. It can show the papers behind a
+claim, count again for a subgroup or a wider definition, or read one paper. New counts become claims marked
+as follow-ups; answers go through the same citation and number checks as reports; the report itself never
+changes. The conversation is saved with the run. In the web page, a panel under the report does the same,
+and clicking any id in the report (C12, G2, N1, H4, D1) starts a question about it.
+API: `POST /runs/{id}/followups {"question": ..., "about": "C12"}`, then poll `GET /runs/{id}/followups`.
+
 Web UI and API: `uvicorn research_agent.api.main:app --reload`, then open http://127.0.0.1:8000 to ask a
 question in the browser. Pick a mode: Pipeline (fixed order), Orchestrated (a lead agent plans), or
 Opportunity map. The JSON API is the same: `POST /runs {"question": ..., "mode": "pipeline"|"orchestrated"|"map"}`
