@@ -1,0 +1,363 @@
+"""Reported results and reported associations: what papers FOUND, not only what they did.
+
+Extraction records, per paper:
+  reported_results       a performance number: metric, value, which model, baseline or not, split, setting
+  reported_associations  a driver's reported effect on malaria: direction, lag, significance
+
+Every item needs a quote copied from the paper, checked by code; a result's quote must also contain its
+number, and an association's quote must name its driver. Items that fail are dropped, as with other fields.
+
+On top of that, code (not the model) builds:
+  results_table       the numbers, grouped by metric, with medians across papers (descriptive only)
+  method_comparison   head-to-head results INSIDE the same paper (same data, same metric): the fair test
+  contradictions      drivers with papers reporting opposite directions, and what separates the two sides
+"""
+from __future__ import annotations
+
+import math
+import re
+
+from research_agent.tools.base import STR, STRS, Tool, obj
+
+MAX_ITEMS = 12
+STRUCT_FIELDS = ["reported_results", "reported_associations"]
+SPLITS = ["test_or_holdout", "cross_validation", "in_sample", "not_stated"]
+DIRECTIONS = ["positive", "negative", "none", "nonlinear", "mixed"]
+
+RESULT_SCHEMA = {
+    "type": "array", "description": (
+        "Performance numbers the paper reports for its models (up to 12): RMSE, MAE, MAPE, AUC, accuracy, R2, "
+        "sensitivity, correlation, CRPS... One entry per number. quote must be copied word for word and must "
+        "contain the number."),
+    "items": {"type": "object", "properties": {
+        "metric": STR, "value": {**STR, "description": "The number exactly as written, e.g. 0.87 or 12.4%"},
+        "model": {**STR, "description": "Which model or method produced it"},
+        "is_baseline": {"type": "boolean", "description": "true if this is a comparator/baseline model"},
+        "split": {"type": "string", "enum": SPLITS},
+        "setting": {**STR, "description": "Place, dataset or subgroup the number is for"},
+        "horizon": {**STR, "description": "Forecast lead time if stated, else ''"},
+        "quote": STR}, "required": ["metric", "value", "model", "quote"]}}
+
+ASSOCIATION_SCHEMA = {
+    "type": "array", "description": (
+        "Associations the paper reports between a driver (rainfall, temperature, bed net coverage, NDVI, "
+        "wealth...) and malaria (up to 12). Only what the paper states as its own finding. quote must be "
+        "copied word for word and name the driver."),
+    "items": {"type": "object", "properties": {
+        "driver": STR, "outcome": {**STR, "description": "e.g. incidence, prevalence, cases"},
+        "direction": {"type": "string", "enum": DIRECTIONS},
+        "lag": {**STR, "description": "Lag if stated, e.g. '2 months', else ''"},
+        "significant": {"type": "string", "enum": ["yes", "no", "not_stated"]},
+        "quote": STR}, "required": ["driver", "direction", "quote"]}}
+
+STRUCT_SCHEMA = {"reported_results": RESULT_SCHEMA, "reported_associations": ASSOCIATION_SCHEMA}
+
+# lower is better for errors; higher is better for skill scores
+_METRICS = [
+    ("rmse", r"\brmse\b|root mean squared? error", False), ("mae", r"\bmae\b|mean absolute error", False),
+    ("mape", r"\bmape\b|mean absolute percentage", False), ("mse", r"(?<!r)\bmse\b|mean squared error", False),
+    ("crps", r"\bcrps\b", False), ("wis", r"\bwis\b|weighted interval score", False),
+    ("auc", r"\bau(roc|c)\b|area under", True), ("r2", r"\br\s*(2|²|squared)\b|coefficient of determination", True),
+    ("accuracy", r"accuracy", True), ("sensitivity", r"sensitivity|recall", True),
+    ("specificity", r"specificity", True), ("f1", r"\bf1\b|f-?score", True),
+    ("correlation", r"correlation|pearson|spearman|\br\b", True), ("nse", r"\bnse\b|nash", True),
+]
+_DRIVERS = [
+    ("rainfall", r"rain|precipitation"), ("temperature", r"temperature|\blst\b|\btemp\b"),
+    ("humidity", r"humidity"), ("vegetation (NDVI/EVI)", r"ndvi|\bevi\b|vegetation"),
+    ("bed nets (ITN/LLIN)", r"bed ?net|\bitn|\bllin|insecticide[- ]treated"),
+    ("indoor residual spraying", r"\birs\b|residual spray"), ("elevation", r"elevation|altitude"),
+    ("ENSO / sea surface temperature", r"enso|el ni|sea surface"), ("surface water / hydrology", r"water|flood|river|soil moisture|hydrolog"),
+    ("wealth / socioeconomic status", r"wealth|poverty|socio|income"), ("urbanisation", r"urban"),
+    ("housing quality", r"housing|house|roof"), ("health-care access", r"access|travel time|distance to"),
+    ("mosquito density / entomology", r"mosquito|anophel|vector|entomolog|larva|\beir\b"),
+]
+
+
+def metric_key(name: str) -> tuple[str, bool | None]:
+    low = (name or "").lower()
+    for key, rx, higher in _METRICS:
+        if re.search(rx, low):
+            return key, higher
+    return low.strip() or "unknown", None
+
+
+def driver_key(name: str) -> str:
+    low = (name or "").lower()
+    for key, rx in _DRIVERS:
+        if re.search(rx, low):
+            return key
+    return low.strip()
+
+
+def parse_number(value: str) -> float | None:
+    m = re.search(r"-?\d+(?:[.,]\d+)?", str(value or ""))
+    if not m:
+        return None
+    try:
+        x = float(m.group(0).replace(",", "."))
+    except ValueError:
+        return None
+    return x / 100 if "%" in str(value) and x > 1 else x
+
+
+def verify_structured(args: dict, text: str) -> tuple[dict, dict]:
+    """Keep only result and association items whose quote is in the text (and carries the number / names
+    the driver). Returns ({field: kept items}, {field: number dropped})."""
+    from research_agent.tools.extraction import _words, quote_found
+
+    words = _words(text)
+    shingles = {tuple(words[i:i + k]) for k in (3, 4, 5) for i in range(len(words) - k + 1)}
+    kept, dropped = {}, {}
+    for field in STRUCT_FIELDS:
+        items = args.get(field) if isinstance(args.get(field), list) else []
+        good = []
+        for it in items[:MAX_ITEMS]:
+            if not isinstance(it, dict):
+                continue
+            quote = " ".join(str(it.get("quote") or "").split())[:400]
+            if not quote or not quote_found(quote, words, shingles):
+                continue
+            if field == "reported_results":
+                raw = str(it.get("value") or "").strip()
+                num = re.search(r"\d+(?:[.,]\d+)?", raw)
+                if not num or num.group(0) not in quote:
+                    continue
+                key, higher = metric_key(it.get("metric"))
+                good.append({"metric": key, "metric_as_written": str(it.get("metric") or "")[:60],
+                             "value": raw[:40], "value_num": parse_number(raw),
+                             "higher_is_better": higher, "model": str(it.get("model") or "")[:80],
+                             "is_baseline": bool(it.get("is_baseline")),
+                             "split": it.get("split") if it.get("split") in SPLITS else "not_stated",
+                             "setting": str(it.get("setting") or "")[:80], "horizon": str(it.get("horizon") or "")[:40],
+                             "quote": quote})
+            else:
+                driver = str(it.get("driver") or "").strip()
+                tokens = [t for t in re.findall(r"[a-z]{4,}", driver.lower())] or [driver.lower()]
+                if not driver or not any(t in quote.lower() for t in tokens):
+                    continue
+                good.append({"driver": driver_key(driver), "driver_as_written": driver[:60],
+                             "outcome": str(it.get("outcome") or "")[:40],
+                             "direction": it.get("direction") if it.get("direction") in DIRECTIONS else "mixed",
+                             "lag": str(it.get("lag") or "")[:30],
+                             "significant": it.get("significant") if it.get("significant") in ("yes", "no") else "not_stated",
+                             "quote": quote})
+        kept[field] = good
+        if len([i for i in items[:MAX_ITEMS] if isinstance(i, dict)]) > len(good):
+            dropped[field] = len([i for i in items[:MAX_ITEMS] if isinstance(i, dict)]) - len(good)
+    return kept, dropped
+
+
+# ---------------------------------------------------------------- analyses (code only)
+def _rows(ctx):
+    from research_agent.tools import claims
+
+    return claims._rows(ctx)
+
+
+def _median(xs: list[float]) -> float | None:
+    xs = sorted(x for x in xs if x is not None and not math.isnan(x))
+    if not xs:
+        return None
+    m = len(xs) // 2
+    return xs[m] if len(xs) % 2 else (xs[m - 1] + xs[m]) / 2
+
+
+def _quartiles(xs: list[float]) -> tuple[float | None, float | None]:
+    xs = sorted(x for x in xs if x is not None)
+    if len(xs) < 4:
+        return None, None
+    return xs[len(xs) // 4], xs[(3 * len(xs)) // 4]
+
+
+def results_table(ctx, metric: str | None = None, split: str | None = None, model_contains: str | None = None,
+                  limit: int = 60) -> dict:
+    """Reported performance numbers across the analysed papers. Values from different papers are on
+    different data and scales, so the summary is descriptive; use method_comparison for fair comparisons."""
+    want = metric_key(metric)[0] if metric else None
+    rows, by_metric = [], {}
+    for r in _rows(ctx):
+        for it in r["data"].get("reported_results") or []:
+            if want and it["metric"] != want:
+                continue
+            if split and it["split"] != split:
+                continue
+            if model_contains and model_contains.lower() not in it["model"].lower():
+                continue
+            rows.append({"paper_id": r["paper_id"], "year": r["year"], **{k: it[k] for k in
+                         ("metric", "value", "model", "is_baseline", "split", "setting", "horizon", "quote")}})
+            by_metric.setdefault(it["metric"], []).append((r["paper_id"], it.get("value_num")))
+    summary = {}
+    for m, vals in by_metric.items():
+        nums = [v for _, v in vals if v is not None]
+        q1, q3 = _quartiles(nums)
+        summary[m] = {"papers": len({p for p, _ in vals}), "values": len(vals), "median": _median(nums),
+                      "q1": q1, "q3": q3}
+    return {"summary": summary, "results": rows[:max(1, min(int(limit), 200))], "n_results": len(rows),
+            "note": "Across-paper values come from different data, places and scales: describe them, do not "
+                    "rank methods with them. Within-paper comparisons (method_comparison) are the fair test."}
+
+
+def _sign_test_p(wins: int, losses: int) -> float:
+    n = wins + losses
+    if n == 0:
+        return 1.0
+    k = min(wins, losses)
+    tail = sum(math.comb(n, i) for i in range(k + 1)) / 2 ** n
+    return min(1.0, 2 * tail)
+
+
+def method_comparison(ctx, method_a: list[str], method_b: list[str], metric: str | None = None) -> dict:
+    """Head-to-head: papers that report the SAME metric for a model of family A and a model of family B
+    (same data, same split). Counts how often A beats B, with a two-sided sign test."""
+    a_terms = [t.lower() for t in method_a if t.strip()]
+    b_terms = [t.lower() for t in method_b if t.strip()]
+    want = metric_key(metric)[0] if metric else None
+    pairs = []
+    for r in _rows(ctx):
+        items = [it for it in r["data"].get("reported_results") or [] if it.get("value_num") is not None
+                 and it.get("higher_is_better") is not None and (not want or it["metric"] == want)]
+        for m in {it["metric"] for it in items}:
+            same = [it for it in items if it["metric"] == m]
+            for split in {it["split"] for it in same}:
+                group = [it for it in same if it["split"] == split]
+                a = [it for it in group if any(t in it["model"].lower() for t in a_terms)]
+                b = [it for it in group if any(t in it["model"].lower() for t in b_terms)]
+                a = [it for it in a if it not in b]
+                if not a or not b:
+                    continue
+                higher = group[0]["higher_is_better"]
+                best_a = max(a, key=lambda i: i["value_num"]) if higher else min(a, key=lambda i: i["value_num"])
+                best_b = max(b, key=lambda i: i["value_num"]) if higher else min(b, key=lambda i: i["value_num"])
+                if best_a["value_num"] == best_b["value_num"]:
+                    winner = "tie"
+                else:
+                    winner = "A" if (best_a["value_num"] > best_b["value_num"]) == higher else "B"
+                pairs.append({"paper_id": r["paper_id"], "metric": m, "split": split, "winner": winner,
+                              "A": {"model": best_a["model"], "value": best_a["value"], "quote": best_a["quote"]},
+                              "B": {"model": best_b["model"], "value": best_b["value"], "quote": best_b["quote"]}})
+    per_paper: dict[str, str] = {}
+    for p in pairs:   # one vote per paper: its test-set result when there is one
+        if p["paper_id"] not in per_paper or p["split"] == "test_or_holdout":
+            per_paper[p["paper_id"]] = p["winner"]
+    wins = sum(1 for w in per_paper.values() if w == "A")
+    losses = sum(1 for w in per_paper.values() if w == "B")
+    return {"A": method_a, "B": method_b, "metric": want or "any", "papers_with_head_to_head": len(per_paper),
+            "A_better": wins, "B_better": losses, "ties": sum(1 for w in per_paper.values() if w == "tie"),
+            "sign_test_p": round(_sign_test_p(wins, losses), 4), "comparisons": pairs[:40],
+            "note": "Each paper counts once. Few head-to-heads means little evidence either way."}
+
+
+def associations(ctx, driver: str | None = None) -> dict:
+    want = driver_key(driver) if driver else None
+    out: dict[str, dict] = {}
+    for r in _rows(ctx):
+        seen = set()
+        for it in r["data"].get("reported_associations") or []:
+            if want and it["driver"] != want:
+                continue
+            key = (it["driver"], it["direction"])
+            if key in seen:
+                continue
+            seen.add(key)
+            d = out.setdefault(it["driver"], {d: [] for d in DIRECTIONS})
+            d[it["direction"]].append({"paper_id": r["paper_id"], "lag": it["lag"], "significant": it["significant"],
+                                       "quote": it["quote"]})
+    return {"drivers": {k: {d: v for d, v in dirs.items() if v} for k, dirs in out.items()}}
+
+
+def _attributes(r: dict) -> set[str]:
+    d = r["data"]
+    attrs = {f"place: {g}" for g in (d.get("geography") or [])}
+    attrs |= {f"method: {m.lower()}" for m in (d.get("methods") or [])}
+    attrs |= {f"read: {r['source']}", f"period: {'2020 or later' if (r.get('year') or 0) >= 2020 else 'before 2020'}"}
+    for k, v in d.items():
+        if k.startswith("q_") and isinstance(v, str) and v not in ("", "not_stated"):
+            attrs.add(f"{k[2:]}: {v}")
+    return attrs
+
+
+def contradictions(ctx, min_each_side: int = 2) -> dict:
+    """Drivers where papers report opposite directions (positive vs negative), each side with at least
+    `min_each_side` papers, with the attributes that most separate the two sides (possible explanations,
+    not proven ones)."""
+    rows = {r["paper_id"]: r for r in _rows(ctx)}
+    found = []
+    for drv, dirs in associations(ctx)["drivers"].items():
+        pos, neg = dirs.get("positive", []), dirs.get("negative", [])
+        pos_ids = {x["paper_id"] for x in pos} - {x["paper_id"] for x in neg}
+        neg_ids = {x["paper_id"] for x in neg} - {x["paper_id"] for x in pos}
+        if len(pos_ids) < min_each_side or len(neg_ids) < min_each_side:
+            continue
+        contrasts = []
+        attrs_pos = [_attributes(rows[p]) for p in pos_ids if p in rows]
+        attrs_neg = [_attributes(rows[p]) for p in neg_ids if p in rows]
+        for a in set().union(*attrs_pos, *attrs_neg):
+            sp = sum(a in s for s in attrs_pos) / len(attrs_pos)
+            sn = sum(a in s for s in attrs_neg) / len(attrs_neg)
+            if abs(sp - sn) >= 0.5 and max(sum(a in s for s in attrs_pos), sum(a in s for s in attrs_neg)) >= 2:
+                contrasts.append({"attribute": a, "share_positive_side": round(sp, 2), "share_negative_side": round(sn, 2)})
+        contrasts.sort(key=lambda c: -abs(c["share_positive_side"] - c["share_negative_side"]))
+        found.append({"driver": drv, "positive": [x for x in pos if x["paper_id"] in pos_ids],
+                      "negative": [x for x in neg if x["paper_id"] in neg_ids],
+                      "no_effect": dirs.get("none", []), "separating_attributes": contrasts[:6]})
+    found.sort(key=lambda c: -(len(c["positive"]) + len(c["negative"])))
+    return {"contradictions": found,
+            "note": "Separating attributes are candidate explanations (setting, method, lag, period). Test one "
+                    "with test_claim or test_hypothesis before stating it."}
+
+
+def results_markdown(ctx) -> list[str]:
+    """Code-built appendix: reported performance and conflicting findings, for the end of a report."""
+    lines: list[str] = []
+    rt = results_table(ctx, limit=200)
+    if rt["summary"]:
+        lines += ["## Reported performance (computed)", "",
+                  "Numbers papers report for their own models, each backed by a quote. Values from different "
+                  "papers come from different data and scales, so the medians describe the literature; they do "
+                  "not rank methods.", "", "| Metric | Papers | Reported values | Median | Middle half |",
+                  "|---|---|---|---|---|"]
+        for m, s in sorted(rt["summary"].items(), key=lambda kv: -kv[1]["papers"]):
+            mid = f"{_fmt(s['q1'])} to {_fmt(s['q3'])}" if s["q1"] is not None else "n/a"
+            lines.append(f"| {m.upper() if len(m) <= 5 else m} | {s['papers']} | {s['values']} | {_fmt(s['median'])} | {mid} |")
+        lines.append("")
+    co = contradictions(ctx)["contradictions"]
+    if co:
+        lines += ["## Where studies disagree (computed)", ""]
+        for c in co:
+            sep = "; ".join(f"{x['attribute']} ({round(100 * x['share_positive_side'])}% of positive vs "
+                            f"{round(100 * x['share_negative_side'])}% of negative)" for x in c["separating_attributes"][:3])
+            lines.append(f"- **{c['driver']}**: {len(c['positive'])} studies report a positive association "
+                         f"({_ids(c['positive'])}) and {len(c['negative'])} a negative one ({_ids(c['negative'])})"
+                         + (f"; {len(c['no_effect'])} report no effect" if c["no_effect"] else "")
+                         + (f". What differs between the two sides: {sep}." if sep else "."))
+        lines.append("")
+    return lines
+
+
+def _fmt(x):
+    if x is None:
+        return "n/a"
+    return f"{x:.3g}"
+
+
+def _ids(items, k=4):
+    from research_agent.agents.report import _cite
+
+    ids = list(dict.fromkeys(x["paper_id"] for x in items))
+    return ", ".join(_cite(p) for p in ids[:k]) + (" …" if len(ids) > k else "")
+
+
+RESULT_TOOLS = [
+    Tool("results_table", "Performance numbers the analysed papers report (RMSE, AUC, accuracy...), each with its "
+         "quote, plus per-metric medians. Descriptive only: values from different papers are not comparable.",
+         obj({"metric": STR, "split": {"type": "string", "enum": SPLITS}, "model_contains": STR,
+              "limit": {"type": "integer"}}), results_table, read_only=True, max_chars=16000),
+    Tool("method_comparison", "Fair comparison of two method families: papers that report the same metric for "
+         "both (same data), how often A beats B, with a sign test. E.g. A=['lstm','transformer'], "
+         "B=['arima','sarima'].", obj({"method_a": STRS, "method_b": STRS, "metric": STR}, ["method_a", "method_b"]),
+         method_comparison, read_only=True, max_chars=16000),
+    Tool("contradictions", "Drivers (rainfall, temperature, bed nets...) where papers report opposite directions, "
+         "with quotes, and the attributes (place, method, period, read depth) that separate the two sides.",
+         obj({}), contradictions, read_only=True, max_chars=16000),
+]

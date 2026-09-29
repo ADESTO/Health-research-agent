@@ -143,7 +143,7 @@ def recheck(ctx, field: str, any_of: list[str], concept: str | None = None,
         """SELECT p.paper_id, p.title, p.abstract, f.clean_text FROM papers p
            LEFT JOIN paper_fulltext f ON f.paper_id = p.paper_id AND f.status = 'ok'
            WHERE p.paper_id = ANY(%s)""", (todo,)).fetchall()}
-    llm = ctx.llm_factory()
+    llm = ctx.llm_factory(step="recheck")
     setattr(llm, "_step", "recheck")
     key = concept_key(terms)
     results: dict[str, dict] = {}

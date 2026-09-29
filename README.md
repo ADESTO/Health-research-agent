@@ -104,6 +104,73 @@ and after and which papers changed. The conversation is saved with the run. In t
 and clicking any id in the report (C12, G2, N1, H4, D1) starts a question about it.
 API: `POST /runs/{id}/followups {"question": ..., "about": "C12"}`, then poll `GET /runs/{id}/followups`.
 
+### What papers found, and how the literature fits together
+
+- **Reported results and associations.** Every paper's performance numbers (RMSE, AUC, accuracy...) and the
+  effects it reports for drivers (rainfall, temperature, bed nets...) are extracted, each with a quote that
+  contains the number or names the driver. `method_comparison` compares method families only inside the same
+  paper (same data, same metric), with a sign test; `contradictions` finds drivers reported in opposite
+  directions and what separates the two sides. Reports and maps append both as computed tables.
+- **Citation graph.** Papers are matched in OpenAlex by DOI; citations among the analysed papers, the most
+  cited studies, and snowballing (papers they cite, papers citing them) during discovery. Set
+  `OPENALEX_API_KEY` (free) for a 10x larger daily allowance; `CITATIONS=0` turns it off.
+- **Research versus burden.** `python -m research_agent.cli burden-fetch` downloads WHO estimates of malaria
+  cases and deaths by country (or `burden-import file.csv` for other sources). Reports then compare each
+  country's share of the analysed papers with its share of cases.
+- **Systematic-review record.** Discovery logs every paper it sees; reports include PRISMA 2020 counts and a
+  flow diagram; the protocol document lists question, sources, eligibility, data items and searches.
+
+### Exports
+
+```bash
+python -m research_agent.cli export <run_id> -f docx     # md, docx, html, bib, ris, csv, xlsx,
+                                                         # protocol, screening, burden, burden_chart
+```
+The web page has the same list under the report (Export).
+
+### Drafts: research proposals and review manuscripts
+
+A finished run (report or map) can be turned into a first draft:
+
+- **Research proposal**: argues for a gap or direction (pick one of the run's gaps, untried combinations or
+  designs, or describe your own) with background, the evidence gap, aims, proposed methods, expected outcomes,
+  risks, ethics, a workplan table and a budget placeholder.
+- **Review manuscript**: the run written up as a literature review: structured abstract, introduction,
+  methods (from the review record), results with the PRISMA flow as Figure 1 and the computed tables, discussion
+  and conclusions. It states that screening and extraction were automated.
+
+A planner agent first counts what the argument needs (new claims, verified by code), then each section is
+written in its own call and the whole draft goes through the report's checks: untraced numbers are measured,
+corrected or marked [unverified], and citations to papers outside the run are removed. In a proposal, aims and
+methods are marked as the applicant's plan, and decisions only the applicant can make are left as
+`[to be confirmed: ...]`. The run's report is never changed.
+
+```bash
+python -m research_agent.cli draft <run_id> --directions                 # the run's gaps and directions
+python -m research_agent.cli draft <run_id> -t proposal --about G2        # or -d "your direction"
+python -m research_agent.cli draft <run_id> -t review -f docx -o review.docx
+python -m research_agent.cli draft --export <draft_id> -f bib             # md, docx, html, bib, ris
+```
+On the web page, the Draft panel sits under the follow-up questions. A draft costs about as much as writing
+a report: one planning pass and one call per section, sharing a cached evidence pack.
+
+### Model routing
+
+Each step can use its own model: `MODEL_ROUTES=cheap=deepseek:deepseek-flash; strong=deepseek:<stronger model>`.
+"cheap" covers extraction, re-checks and number checks; "strong" covers the report, gap reasoning, designs,
+follow-ups and drafts; a step name (e.g. `synthesis=anthropic:<model>`) overrides its tier.
+
+### Job queue
+
+Runs, maps, follow-ups and drafts started from the web page are jobs in Postgres. The web server works them itself
+(`EMBEDDED_WORKERS=1`). For more capacity, or to keep long runs going while the server restarts, run workers
+separately and set `EMBEDDED_WORKERS=0`:
+
+```bash
+python -m research_agent.cli worker -c 2
+```
+A worker that dies mid-run is replaced and the run resumes from its last finished step.
+
 Web UI and API: `uvicorn research_agent.api.main:app --reload`, then open http://127.0.0.1:8000 to ask a
 question in the browser. Pick a mode: Pipeline (fixed order), Orchestrated (a lead agent plans), or
 Opportunity map. The JSON API is the same: `POST /runs {"question": ..., "mode": "pipeline"|"orchestrated"|"map"}`

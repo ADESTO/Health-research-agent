@@ -206,15 +206,15 @@ def test_api_builds_a_map(loaded_db, monkeypatch):
     from research_agent.api import main as api
     from research_agent.opportunity import pipeline
 
-    real = pipeline.run_map
-    monkeypatch.setattr(pipeline, "run_map", lambda q, provider=None, run_id=None:
-                        real(q, llm_factory=lambda strong=False: FakeLLM(), run_id=run_id))
+    from research_agent import jobs
+    monkeypatch.setattr(jobs, "_llm_factory", lambda strong=False: FakeLLM())
     api._hits.clear()
     client = TestClient(api.app)
     assert client.post("/runs", json={"question": "Can ML improve malaria forecasts?", "mode": "maps"}).status_code == 422
     res = client.post("/runs", json={"question": "Can machine learning improve 1-6 month malaria forecasting?",
                                      "mode": "map"}).json()
-    assert res["mode"] == "map"
+    assert res["mode"] == "map" and res["job_id"]
+    assert jobs.Worker(name="test").run_once()          # a worker picks the job up
     for _ in range(120):
         run = client.get(f"/runs/{res['run_id']}").json()["run"]
         if run["status"] in ("done", "failed"):
@@ -1733,6 +1733,8 @@ def test_followup_api_and_cli(loaded_db, monkeypatch, capsys):
     from research_agent.agents.orchestrator import run_research
     from research_agent.api import main as api
 
+    from research_agent import jobs
+    monkeypatch.setattr(jobs, "_llm_factory", lambda strong=False: FakeLLM())
     real = followup.answer
     monkeypatch.setattr(followup, "answer", lambda *a, **k: real(*a, **{**k, "llm_factory": lambda strong=False: FakeLLM()}))
     rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
@@ -1740,7 +1742,8 @@ def test_followup_api_and_cli(loaded_db, monkeypatch, capsys):
     client = TestClient(api.app)
     assert client.post(f"/runs/{rid}/followups", json={"question": "Why?", "about": "C1; DROP"}).status_code == 422
     r = client.post(f"/runs/{rid}/followups", json={"question": "What is behind the main claim?"})
-    assert r.status_code == 202
+    assert r.status_code == 202 and r.json()["job_id"]
+    assert jobs.Worker(name="test").run_once()
     for _ in range(60):
         msgs = client.get(f"/runs/{rid}/followups").json()["messages"]
         if msgs and msgs[-1]["status"] != "pending":
@@ -1813,3 +1816,417 @@ def test_followup_reads_abstract_only_papers_in_full_and_recounts(loaded_db):
         ctx.close()
     with get_conn() as pg:
         assert pg.execute("SELECT report_md IS NOT NULL AS r FROM runs WHERE run_id=%s", (rid,)).fetchone()["r"]
+
+
+def test_model_routing_by_step_and_tier(monkeypatch):
+    import dataclasses
+
+    from research_agent import llm as L
+    from research_agent.runstate import _routing_factory
+
+    assert L.parse_routes("cheap=deepseek:deepseek-flash; synthesis = anthropic:claude-x;bad") == {
+        "cheap": ("deepseek", "deepseek-flash"), "synthesis": ("anthropic", "claude-x")}
+    monkeypatch.setattr(L, "settings", dataclasses.replace(
+        L.settings, model_routes="cheap=deepseek:m-cheap; strong=deepseek:m-strong; synthesis=deepseek:m-write"))
+    assert L.route_for("extraction") == ("deepseek", "m-cheap")        # tier
+    assert L.route_for("gap_reasoning") == ("deepseek", "m-strong")    # tier
+    assert L.route_for("synthesis") == ("deepseek", "m-write")         # the step's own route wins
+    assert L.route_for("methods") is None                              # not routed: default provider
+    assert L.route_for("methods", strong=True) == ("deepseek", "m-strong")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "x")
+    assert L.get_llm(step="extraction").model == "m-cheap" and L.get_llm(step="synthesis").model == "m-write"
+    # factories that only take `strong` (tests, custom code) keep working, and clients are labelled by step
+    clients = []
+    f = _routing_factory(lambda strong=False: FakeLLM(), clients)
+    c = f(step="recheck")
+    assert c._step == "recheck" and clients == [c]
+
+
+def test_reported_results_and_associations_need_their_own_quotes():
+    from research_agent.tools.results import verify_structured
+
+    text = ("The LSTM reached an RMSE of 12.4 cases on the test set, against 18.9 for SARIMA. "
+            "Rainfall at a two-month lag was positively associated with incidence.")
+    kept, dropped = verify_structured({
+        "reported_results": [
+            {"metric": "RMSE", "value": "12.4", "model": "LSTM", "split": "test_or_holdout",
+             "quote": "The LSTM reached an RMSE of 12.4 cases on the test set"},
+            {"metric": "RMSE", "value": "18.9", "model": "SARIMA", "is_baseline": True,
+             "quote": "The LSTM reached an RMSE of 12.4 cases on the test set"},        # number not in quote
+            {"metric": "AUC", "value": "0.93", "model": "LSTM", "quote": "AUC was 0.93 overall"}],  # not in text
+        "reported_associations": [
+            {"driver": "rainfall", "direction": "positive", "lag": "2 months",
+             "quote": "Rainfall at a two-month lag was positively associated with incidence"},
+            {"driver": "temperature", "direction": "negative",
+             "quote": "Rainfall at a two-month lag was positively associated with incidence"}]}, text)   # driver absent
+    assert [(r["metric"], r["value_num"], r["higher_is_better"]) for r in kept["reported_results"]] == [("rmse", 12.4, False)]
+    assert [a["driver"] for a in kept["reported_associations"]] == ["rainfall"]
+    assert dropped == {"reported_results": 2, "reported_associations": 1}
+
+
+def _results_rows():
+    rows = []
+    def res(model, v, metric="RMSE", baseline=False):
+        return {"metric": metric.lower(), "value": str(v), "value_num": v, "higher_is_better": False,
+                "model": model, "is_baseline": baseline, "split": "test_or_holdout", "setting": "", "horizon": "",
+                "quote": f"{model} {v}"}
+    def assoc(driver, direction):
+        return {"driver": driver, "direction": direction, "lag": "", "significant": "yes", "outcome": "cases",
+                "quote": f"{driver} {direction}"}
+    for i in range(8):   # deep learning beats ARIMA in 6 of 8 papers, loses in 2
+        dl_better = i < 6
+        rows.append({"paper_id": f"p{i}", "source": "fulltext", "corpus": "pmc", "year": 2021, "title": "t",
+                     "data": {"reported_results": [res("LSTM", 10 if dl_better else 20), res("ARIMA", 15, baseline=True)],
+                              "reported_associations": [assoc("temperature", "positive" if i < 4 else "negative")],
+                              "geography": ["Ethiopia"] if i < 4 else ["Kenya"], "methods": ["LSTM"]}})
+    return rows
+
+
+def test_fair_method_comparison_and_contradictions(ctx, monkeypatch):
+    from research_agent.tools import claims as C
+    from research_agent.tools import results as RS
+
+    rows = _results_rows()
+    monkeypatch.setattr(C, "_rows", lambda _ctx: rows)
+    cmp = RS.method_comparison(ctx, ["lstm"], ["arima"], "rmse")
+    assert (cmp["papers_with_head_to_head"], cmp["A_better"], cmp["B_better"]) == (8, 6, 2)
+    assert 0.2 < cmp["sign_test_p"] < 0.4                      # 6 vs 2 is not convincing on its own
+    table = RS.results_table(ctx, metric="root mean squared error")
+    assert table["summary"]["rmse"]["papers"] == 8 and table["n_results"] == 16
+    co = RS.contradictions(ctx)["contradictions"]
+    assert [c["driver"] for c in co] == ["temperature"]
+    assert len(co[0]["positive"]) == 4 and len(co[0]["negative"]) == 4
+    top = co[0]["separating_attributes"][0]
+    assert top["attribute"] in ("place: Ethiopia", "place: Kenya") and abs(top["share_positive_side"] - top["share_negative_side"]) == 1
+    md = "\n".join(RS.results_markdown(ctx))
+    assert "## Reported performance (computed)" in md and "## Where studies disagree (computed)" in md
+    assert "temperature" in md and "place: Ethiopia" in md
+
+
+def test_extraction_records_results_and_report_appends_them(loaded_db):
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.db import get_conn
+
+    res = run_research("How well do models detect pneumonia and forecast malaria?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())
+    with get_conn() as pg:
+        rows = pg.execute("""SELECT e.data FROM run_papers rp JOIN extractions e USING (paper_id)
+                             WHERE rp.run_id=%s AND e.schema_version='health-v3'""", (res["run_id"],)).fetchall()
+    results = [it for r in rows for it in r["data"].get("reported_results") or []]
+    assocs = [it for r in rows for it in r["data"].get("reported_associations") or []]
+    assert rows and (results or assocs)
+    assert all(it["value"] in it["quote"] for it in results)
+
+
+def test_screening_log_and_prisma_flow(ctx):
+    from research_agent.tools.review import prisma_counts, prisma_markdown, protocol_markdown, screening_rows
+    from research_agent.tools.search import add_to_shortlist, hybrid_search, remove_from_shortlist
+
+    found = hybrid_search(ctx, "malaria forecasting", limit=10)["results"]
+    ids = [r["paper_id"] for r in found]
+    add_to_shortlist(ctx, ids[:4], "forecasts malaria incidence")
+    remove_from_shortlist(ctx, ids[3:4], "no forecasting model")
+    c = prisma_counts(ctx)
+    assert c["identified"] == len(ids) and c["included"] == 3
+    assert c["screened"] == c["identified"] - c["duplicates_removed"]
+    assert c["excluded_at_screening"] == c["screened"] - c["included"]
+    assert c["exclusion_reasons"] == {"no forecasting model": 1}
+    stages = {r["paper_id"]: r["stage"] for r in screening_rows(ctx)}
+    assert stages[ids[0]] == "included" and stages[ids[3]] == "excluded" and stages[ids[-1]] == "identified"
+    md = "\n".join(prisma_markdown(ctx))
+    assert "## Review record (PRISMA 2020)" in md and "```mermaid" in md and f"Included: {c['included']}" in md
+    assert protocol_markdown(ctx).startswith("# Review protocol") and "## Sources" in protocol_markdown(ctx)
+
+
+def _openalex_mock(paper_ids):
+    """A tiny OpenAlex: work W<i> for each fixture paper; each paper cites the one before it, and paper 0 is
+    cited by an outside work. Also serves reference lookups and 'cites' queries."""
+    import json as _json
+
+    import httpx
+
+    doi = {pid: f"10.48550/arxiv.{pid.lower()}" for pid in paper_ids}
+    wid = {pid: f"W{i + 1}" for i, pid in enumerate(paper_ids)}
+    work = {pid: {"id": f"https://openalex.org/{wid[pid]}", "doi": f"https://doi.org/{doi[pid]}",
+                  "cited_by_count": 10 * (len(paper_ids) - i),
+                  "referenced_works": [f"https://openalex.org/{wid[paper_ids[i - 1]]}"] if i else []}
+            for i, pid in enumerate(paper_ids)}
+    calls = []
+
+    def handler(request):
+        f = request.url.params.get("filter", "")
+        calls.append(f)
+        if f.startswith("doi:"):
+            want = set(f[4:].split("|"))
+            res = [w for pid, w in work.items() if doi[pid] in want]
+        elif f.startswith("openalex:"):
+            want = set(f[9:].split("|"))
+            res = [w for pid, w in work.items() if wid[pid] in want]
+        elif f.startswith("cites:"):
+            target = f[6:]
+            res = [w for w in work.values() if f"https://openalex.org/{target}" in w["referenced_works"]]
+        else:
+            return httpx.Response(400, text="bad filter")
+        return httpx.Response(200, text=_json.dumps({"results": res}))
+    return httpx.MockTransport(handler), calls
+
+
+def test_citation_graph_and_snowball(ctx, monkeypatch):
+    from research_agent.tools import citations as CT
+    from research_agent.tools.search import add_to_shortlist
+
+    ids = [r["paper_id"] for r in ctx.pg.execute(
+        "SELECT paper_id FROM papers WHERE source='arxiv' AND tsv @@ plainto_tsquery('english','malaria') "
+        "ORDER BY paper_id LIMIT 6").fetchall()]
+    transport, calls = _openalex_mock(ids)
+    monkeypatch.setattr(CT, "_transport", transport)
+    ctx.pg.execute("DELETE FROM openalex_works WHERE paper_id = ANY(%s)", (ids,))
+    add_to_shortlist(ctx, ids[:4], "seed")
+    g = CT.citation_graph(ctx)
+    assert g["matched_in_openalex"] == 4 and g["links_between_papers"] == 3        # a chain 1<-2<-3<-4
+    assert calls == [f for f in calls if f.startswith("doi:")] and len(calls) == 1   # one request for 4 papers
+    top = g["most_cited_within_set"][0]
+    assert top["cited_by_papers_in_set"] == 1 and top["cited_by_all_literature"] > 0
+    # snowballing from paper 3 finds paper 4 (cites it) in the corpus; paper 2 is already shortlisted
+    found = CT.snowball(ctx, [ids[3]], "forward")
+    assert [p["paper_id"] for p in found["found_in_corpus"]] == [ids[4]]
+    back = CT.snowball(ctx, [ids[4]], "backward")
+    assert back["found_in_corpus"] == []                      # it cites paper 3, which is on the shortlist
+    md = "\n".join(CT.citation_markdown(ctx))
+    assert "## Citation structure (computed)" in md and "cite each other 3 times" in md
+    # an unreachable OpenAlex leaves the citation parts out instead of failing
+    import httpx
+    monkeypatch.setattr(CT, "_transport", httpx.MockTransport(lambda r: httpx.Response(503)))
+    monkeypatch.setattr(CT.time, "sleep", lambda s: None)
+    ctx.pg.execute("DELETE FROM openalex_works")
+    assert "unavailable" in CT.ensure(ctx)
+
+
+def test_research_versus_burden(ctx, monkeypatch, tmp_path):
+    import json as _json
+
+    import httpx
+
+    from research_agent.tools import burden as B
+    from research_agent.tools import claims as C
+
+    rows = [{"paper_id": f"p{i}", "source": "abstract", "corpus": "pmc", "year": 2021, "title": "t",
+             "data": {"geography": g}} for i, g in enumerate(
+        [["Kenya"], ["western Kenya"], ["Kenya", "Uganda"], ["Amhara region"], ["sub-Saharan Africa"], []])]
+    monkeypatch.setattr(C, "_rows", lambda _ctx: rows)
+    ctx.pg.execute("DELETE FROM burden")
+    # WHO GHO download (mocked): Nigeria carries most cases and has no studies here
+    data = {"MALARIA_EST_CASES": [("NGA", 2022, 68e6), ("KEN", 2022, 3e6), ("UGA", 2022, 12e6), ("ETH", 2022, 1e6),
+                                  ("NGA", 2021, 65e6)],
+            "MALARIA_EST_DEATHS": [("NGA", 2022, 180e3), ("KEN", 2022, 10e3)]}
+
+    def handler(request):
+        code = request.url.path.rsplit("/", 1)[-1]
+        return httpx.Response(200, text=_json.dumps({"value": [
+            {"SpatialDim": i, "SpatialDimType": "COUNTRY", "TimeDim": y, "NumericValue": v} for i, y, v in data[code]]}))
+    monkeypatch.setattr(B, "_transport", httpx.MockTransport(handler))
+    assert B.fetch_who(ctx.pg)["country_years"] == 5
+    rb = B.research_vs_burden(ctx)
+    by = {x["iso3"]: x for x in rb["countries"]}
+    assert (by["KEN"]["papers"], by["UGA"]["papers"], by["ETH"]["papers"], by["NGA"]["papers"]) == (3, 1, 1, 0)
+    assert rb["burden_year"] == 2022 and abs(by["NGA"]["burden_share"] - 68 / 84) < 0.001
+    assert by["KEN"]["ratio"] > 1 and "NGA" in [x["iso3"] for x in rb["under_researched"]]
+    assert rb["regions"] == {"Sub-Saharan Africa": 1} and rb["papers_without_place"] == 1
+    md = "\n".join(B.burden_markdown(ctx))
+    assert "## Research versus burden (computed)" in md and "Nigeria" in md
+    assert B.burden_chart(ctx, str(tmp_path / "burden.png")) and (tmp_path / "burden.png").stat().st_size > 1000
+    # a CSV from another source, with country names instead of codes
+    f = tmp_path / "map.csv"
+    f.write_text("Country,Year,Cases\nCôte d'Ivoire,2022,\"7,000,000\"\nAtlantis,2022,5\n")
+    res = B.import_csv(ctx.pg, str(f), "MAP")
+    assert res["rows"] == 1 and res["skipped"] == ["Atlantis"]
+
+
+def test_exports_in_every_format(loaded_db, tmp_path):
+    import io
+    import zipfile
+
+    from fastapi.testclient import TestClient
+    from openpyxl import load_workbook
+
+    from research_agent import cli
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.api import main as api
+    from research_agent.exports import FORMATS, blocks, export
+
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    got = {}
+    for fmt in FORMATS:
+        if fmt == "burden_chart":
+            continue   # needs burden data; covered in the burden test
+        data, name, media = export(rid, fmt)
+        assert data and name.startswith(rid[:8]), fmt
+        got[fmt] = data
+    assert zipfile.is_zipfile(io.BytesIO(got["docx"])) and zipfile.is_zipfile(io.BytesIO(got["xlsx"]))
+    wb = load_workbook(io.BytesIO(got["xlsx"]))
+    assert {"Papers", "Reported results", "Associations", "Claims", "Screening", "PRISMA"} <= set(wb.sheetnames)
+    assert wb["Papers"].max_row > 1 and wb["Claims"].max_row > 1
+    bib = got["bib"].decode()
+    from research_agent.db import get_conn
+    with get_conn() as pg:
+        n_papers = pg.execute("SELECT count(*) n FROM run_papers WHERE run_id=%s", (rid,)).fetchone()["n"]
+    assert bib.count("\n@") + bib.startswith("@") == n_papers
+    assert "archivePrefix = {arXiv}" in bib and got["ris"].decode().count("ER  - ") == bib.count("@")
+    assert "<table>" in got["html"].decode() and 'class="mermaid"' in got["html"].decode()
+    assert got["protocol"].decode().startswith("# Review protocol")
+    kinds = [b[0] for b in blocks("## A\n\nText **bold**.\n\n- one\n- two\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```mermaid\nx\n```")]
+    assert kinds == ["h", "p", "ul", "table", "code"]
+    # API and terminal
+    client = TestClient(api.app)
+    r = client.get(f"/runs/{rid}/export/docx")
+    assert r.status_code == 200 and "attachment" in r.headers["content-disposition"]
+    assert client.get(f"/runs/{rid}/export/exe").status_code == 404
+    out = tmp_path / "r.bib"
+    assert cli.main(["export", rid, "-f", "bib", "-o", str(out)]) in (0, None) and out.read_text().startswith("@")
+
+
+def test_job_queue_claims_retries_and_recovers(loaded_db, monkeypatch):
+    import uuid
+
+    from research_agent import jobs
+    from research_agent.db import get_conn
+
+    with get_conn() as pg:
+        pg.execute("UPDATE jobs SET status='done' WHERE status IN ('queued','running')")
+    monkeypatch.setattr(jobs, "_llm_factory", lambda strong=False: FakeLLM())
+    monkeypatch.setattr(jobs, "RETRY_DELAY_SECONDS", 0)
+    # two workers never get the same job
+    a, b = jobs.enqueue("noop", {}), jobs.enqueue("noop", {})
+    c1, c2 = jobs.connect(), jobs.connect()
+    try:
+        j1, j2 = jobs.Worker("w1").claim(c1), jobs.Worker("w2").claim(c2)
+        assert {j1["id"], j2["id"]} == {a, b} and j1["id"] != j2["id"]
+        assert jobs.Worker("w3").claim(c1) is None
+    finally:
+        c1.close(); c2.close()
+    # a failing job is retried once, then marked failed along with its follow-up
+    run_id = str(uuid.uuid4())
+    with get_conn() as pg:
+        pg.execute("INSERT INTO runs (run_id, question, status) VALUES (%s,'q','done')", (run_id,))
+        ans = pg.execute("INSERT INTO followups (run_id, role, status) VALUES (%s,'assistant','pending') RETURNING id",
+                         (run_id,)).fetchone()["id"]
+    bad = jobs.enqueue("followup", {"run_id": run_id, "question": "x", "answer_id": ans})
+    monkeypatch.setattr(jobs, "execute", lambda kind, payload, attempt: (_ for _ in ()).throw(RuntimeError("boom")))
+    w = jobs.Worker("w4")
+    with get_conn() as pg:
+        pg.execute("UPDATE jobs SET status='done' WHERE id IN (%s,%s)", (a, b))
+    assert w.run_once() and w.run_once() and not w.run_once()
+    with get_conn() as pg:
+        job = pg.execute("SELECT status, attempts, error FROM jobs WHERE id=%s", (bad,)).fetchone()
+        f = pg.execute("SELECT status FROM followups WHERE id=%s", (ans,)).fetchone()
+    assert (job["status"], job["attempts"]) == ("failed", 2) and "boom" in job["error"] and f["status"] == "failed"
+    # a worker that stops sending heartbeats: its job goes back to the queue
+    stale = jobs.enqueue("run", {"run_id": run_id, "question": "q"})
+    with get_conn() as pg:
+        pg.execute("UPDATE jobs SET status='running', attempts=1, heartbeat_at=now() - interval '1 hour' WHERE id=%s", (stale,))
+        assert jobs.requeue_stale(pg) == 1
+        assert pg.execute("SELECT status FROM jobs WHERE id=%s", (stale,)).fetchone()["status"] == "queued"
+        pg.execute("UPDATE jobs SET status='done' WHERE id=%s", (stale,))
+
+
+def test_queued_run_is_worked_and_a_retry_resumes(loaded_db, monkeypatch):
+    import uuid
+
+    from research_agent import jobs
+    from research_agent.db import get_conn
+
+    with get_conn() as pg:
+        pg.execute("UPDATE jobs SET status='done' WHERE status IN ('queued','running')")
+    monkeypatch.setattr(jobs, "_llm_factory", lambda strong=False: FakeLLM())
+    run_id = str(uuid.uuid4())
+    with get_conn() as pg:
+        pg.execute("INSERT INTO runs (run_id, question, status) VALUES (%s,%s,'queued')",
+                   (run_id, "What ML methods are used for malaria forecasting?"))
+    jobs.enqueue("run", {"run_id": run_id, "question": "What ML methods are used for malaria forecasting?",
+                         "mode": "pipeline"})
+    assert jobs.Worker("w").run_once()
+    with get_conn() as pg:
+        run = pg.execute("SELECT status, report_md FROM runs WHERE run_id=%s", (run_id,)).fetchone()
+    assert run["status"] == "done" and run["report_md"]
+    # attempt 2 of the same run resumes it rather than starting a new one
+    calls = []
+    import research_agent.agents.orchestrator as O
+    monkeypatch.setattr(O, "run_research", lambda *a, **k: calls.append(k))
+    jobs.execute("run", {"run_id": run_id, "question": "q", "mode": "pipeline"}, attempt=2)
+    assert calls and calls[0]["resume"] == run_id
+
+
+def test_drafts_a_proposal_and_a_review_manuscript(loaded_db, monkeypatch, tmp_path):
+    import dataclasses
+    import io
+    import zipfile
+
+    from fastapi.testclient import TestClient
+
+    from research_agent import cli, jobs
+    from research_agent.agents import draft as D
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.api import main as api
+    from research_agent.db import get_conn
+    from research_agent.exports import export_draft
+
+    fake = lambda strong=False: FakeLLM()   # noqa: E731
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline", llm_factory=fake)["run_id"]
+    with get_conn() as pg:
+        before = pg.execute("SELECT status, report_md, finished_at FROM runs WHERE run_id=%s", (rid,)).fetchone()
+
+    # proposal, with the number check off so the untraced number stays visible as [unverified]
+    monkeypatch.setattr(D, "settings", dataclasses.replace(D.settings, number_check=False))
+    did = D.start(rid, "proposal", "External validation of malaria forecasts in the settings that use them")
+    md = D.run_draft(did, llm_factory=fake)["content_md"]
+    assert md.startswith("# Validating malaria forecasts")
+    order = [md.index(f"## {h}") for h in ("Summary", "Background and rationale", "The evidence gap",
+                                           "Proposed methods", "Workplan and timeline", "Budget")]
+    assert order == sorted(order)                                      # summary first, written last
+    assert "—" not in md and "0000.00000" not in md and "citation removed" in md
+    assert "7 of 9 [unverified]" in md and "[to be confirmed: number of districts]" in md
+    assert "applicant's proposal, not findings" in md
+    assert "## Evidence behind the numbers" in md and "## References (" in md
+    d = D.get_draft(did)
+    assert d["status"] == "done" and d["meta"]["new_claims"] and d["meta"]["cited_papers"]
+    with get_conn() as pg:
+        agent = pg.execute("SELECT agent FROM claims WHERE id=%s", (int(d["meta"]["new_claims"][0][1:]),)).fetchone()
+        after = pg.execute("SELECT status, report_md, finished_at FROM runs WHERE run_id=%s", (rid,)).fetchone()
+    assert agent["agent"] == "draft" and after == before              # the run and its report are untouched
+
+    # review manuscript, with the number check on
+    monkeypatch.setattr(D, "settings", dataclasses.replace(D.settings, number_check=True))
+    rev = D.run_draft(D.start(rid, "review", ""), llm_factory=fake)["content_md"]
+    for h in ("Abstract", "Introduction", "Methods", "Results: study selection and characteristics", "Discussion",
+              "Conclusions", "Declarations"):
+        assert f"## {h}" in rev, h
+    assert "Note on automation" in rev and rev.index("## Abstract") < rev.index("## Introduction")
+
+    # exports: Word opens, references hold exactly the cited papers
+    data, name, _ = export_draft(did, "docx")
+    assert zipfile.is_zipfile(io.BytesIO(data)) and name.startswith(f"proposal_{did}_")
+    bib = export_draft(did, "bib")[0].decode()
+    assert bib.count("@") == len(d["meta"]["cited_papers"])
+    assert "<h1>" in export_draft(did, "html")[0].decode()
+
+    # web: directions, a queued draft worked by the queue, downloads
+    monkeypatch.setattr(jobs, "_llm_factory", fake)
+    client = TestClient(api.app)
+    assert client.get(f"/runs/{rid}/directions").status_code == 200
+    assert client.post(f"/runs/{rid}/drafts", json={"kind": "grant"}).status_code == 422
+    assert client.post(f"/runs/{rid}/drafts", json={"kind": "proposal", "about": ["X; DROP"]}).status_code == 422
+    assert client.post("/runs/00000000-0000-0000-0000-000000000000/drafts", json={"kind": "review"}).status_code == 404
+    r = client.post(f"/runs/{rid}/drafts", json={"kind": "proposal", "direction": "Probabilistic forecasts"})
+    assert r.status_code == 202
+    assert jobs.Worker(name="test").run_once()
+    got = client.get(f"/drafts/{r.json()['draft_id']}").json()["draft"]
+    assert got["status"] == "done" and got["content_md"].startswith("# ")
+    assert [x["id"] for x in client.get(f"/runs/{rid}/drafts").json()["drafts"]][0] == got["id"]
+    assert client.get(f"/drafts/{got['id']}/export/ris").status_code == 200
+    assert client.get(f"/drafts/{got['id']}/export/pdf").status_code == 404
+    # terminal
+    assert cli.main(["draft", rid, "--directions"]) == 0
+    out = tmp_path / "p.md"
+    assert cli.main(["draft", "--export", str(did), "-f", "md", "-o", str(out)]) == 0
+    assert out.read_text().startswith("# Validating")

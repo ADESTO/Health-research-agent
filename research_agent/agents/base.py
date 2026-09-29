@@ -226,7 +226,7 @@ class Agent:
             messages.append({"role": "user", "content": [{"type": "text", "text": text}]})
 
     def run(self, ctx, task: str) -> dict:
-        llm = ctx.llm_factory(strong=self.strong_model)
+        llm = ctx.llm_factory(strong=self.strong_model, step=self.name)
         _label(llm, self.name)
         tools_by_name = {t.name: t for t in self.tools}
         specs = self._tool_specs()

@@ -13,6 +13,7 @@ from research_agent.config import settings
 from research_agent.db import connect
 from research_agent.ingestion.fulltext import fetch_fulltext, select_for_reading
 from research_agent.tools.base import INT, STR, STRS, Tool, obj
+from research_agent.tools.results import STRUCT_FIELDS, STRUCT_SCHEMA
 
 LIST_FIELDS = ["task_types", "health_domains", "data_modalities", "datasets", "geography",
                "methods", "evaluation_metrics", "limitations"]
@@ -59,6 +60,7 @@ EXTRACTION_TOOL = {
             "code_or_data_available": {"type": "string", "enum": ENUM_FIELDS["code_or_data_available"]},
             "key_findings": {"type": "string", "description": "Main result in <= 2 sentences, with numbers if given"},
             "limitations": {**_list, "description": "Limitations the AUTHORS state. Do not invent any."},
+            **STRUCT_SCHEMA,
             "evidence": {
                 "type": "object",
                 "description": "For each of these fields that has a value, 1-2 short passages (up to 25 words "
@@ -67,7 +69,7 @@ EXTRACTION_TOOL = {
                 "properties": {f: _list for f in EVIDENCE_FIELDS},
             },
         },
-        "required": ALL_FIELDS + ["evidence"],
+        "required": ALL_FIELDS + STRUCT_FIELDS + ["evidence"],
     },
 }
 

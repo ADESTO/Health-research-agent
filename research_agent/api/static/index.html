@@ -34,11 +34,14 @@
   .agent { color: var(--accent); }
   .err { color: var(--bad); }
   .done { color: var(--ok); }
-  #report { line-height: 1.6; }
-  #report h2 { font-size: 17px; margin: 22px 0 8px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
-  #report table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0; display: block; overflow-x: auto; }
-  #report th, #report td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
-  #report code { background: var(--bg); padding: 1px 4px; border-radius: 4px; font-size: 13px; }
+  #report, #dbody { line-height: 1.6; }
+  #report h2, #dbody h2 { font-size: 17px; margin: 22px 0 8px; border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+  #dbody h1 { font-size: 21px; margin: 8px 0 12px; }
+  #report table, #dbody table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 10px 0; display: block; overflow-x: auto; }
+  #report th, #report td, #dbody th, #dbody td { border: 1px solid var(--line); padding: 6px 8px; text-align: left; vertical-align: top; }
+  #report code, #dbody code { background: var(--bg); padding: 1px 4px; border-radius: 4px; font-size: 13px; }
+  #ddir { max-width: 100%; flex: 1 1 260px; }
+  #draftView { border-top: 1px solid var(--line); margin-top: 14px; padding-top: 10px; }
   .v-supported { color: var(--ok); font-weight: 600; }
   .v-unsupported, .v-rejected { color: var(--bad); font-weight: 600; }
   .flag { color: var(--warn); }
@@ -87,7 +90,17 @@
   <div class="card" id="reportCard" hidden>
     <div class="row" style="justify-content: space-between; margin: 0 0 8px">
       <span class="pill" id="reportMeta"></span>
-      <button id="download">Download .md</button>
+      <span>
+        <select id="expfmt" aria-label="Export format">
+          <option value="docx">Word (.docx)</option><option value="html">Web page (.html)</option>
+          <option value="md">Markdown (.md)</option><option value="xlsx">Data workbook (.xlsx)</option>
+          <option value="csv">Extraction table (.csv)</option><option value="bib">References (BibTeX)</option>
+          <option value="ris">References (RIS)</option><option value="protocol">Protocol and PRISMA (.md)</option>
+          <option value="screening">Screening log (.csv)</option><option value="burden">Research vs burden (.csv)</option>
+          <option value="burden_chart">Research vs burden chart (.png)</option>
+        </select>
+        <button id="download">Export</button>
+      </span>
     </div>
     <div id="report"></div>
   </div>
@@ -102,6 +115,41 @@
       <button class="primary" id="fgo">Ask</button>
       <span class="status" id="fabout"></span>
       <span class="status" id="fstatus"></span>
+    </div>
+  </div>
+
+  <div class="card" id="draftCard" hidden>
+    <div class="pill">Draft a proposal or review manuscript</div>
+    <p class="hint">Turns this run into a first draft. A proposal argues for a gap or direction and sets out aims,
+      methods and a workplan; a review manuscript writes the run up as a literature review with its PRISMA record.
+      Statements about the literature are checked like the report; aims and methods are marked as your plan.
+      Takes a few minutes.</p>
+    <div class="row">
+      <select id="dkind" aria-label="Draft type">
+        <option value="proposal">Research proposal</option><option value="review">Review manuscript</option>
+      </select>
+      <select id="ddir" aria-label="Gap or direction"><option value="">Pick a gap or direction from this run…</option></select>
+    </div>
+    <textarea id="dtext" placeholder="…or describe the direction in your own words (optional for a review manuscript)"></textarea>
+    <div class="row">
+      <button class="primary" id="dgo">Draft</button>
+      <span class="status" id="dstatus"></span>
+    </div>
+    <ul class="runs" id="drafts"></ul>
+    <div id="draftView" hidden>
+      <div class="row" style="justify-content: space-between; margin: 0 0 8px">
+        <span class="pill" id="dmeta"></span>
+        <span>
+          <select id="dfmt" aria-label="Draft export format">
+            <option value="docx">Word (.docx)</option><option value="html">Web page (.html)</option>
+            <option value="md">Markdown (.md)</option><option value="bib">Cited references (BibTeX)</option>
+            <option value="ris">Cited references (RIS)</option>
+          </select>
+          <button id="ddown">Export</button>
+          <button id="dclose">Close</button>
+        </span>
+      </div>
+      <div id="dbody"></div>
     </div>
   </div>
 
@@ -136,8 +184,20 @@ function md(src) {
   const closeList = () => { if (list) { out.push(`</${list}>`); list = null; } };
   const closeTable = () => { if (table) { out.push("</tbody></table>"); table = null; } };
 
+  let fence = null;
   for (const raw of lines) {
     const line = raw.trimEnd();
+    if (line.startsWith("```")) {                     // fenced block: diagrams render in the HTML export
+      if (fence === null) { closeList(); closeTable(); fence = { lang: line.slice(3).trim(), body: [] }; }
+      else {
+        out.push(fence.lang === "mermaid"
+          ? '<p class="hint">Flow diagram: open the Web page (.html) export to see it drawn.</p>'
+          : `<pre>${esc(fence.body.join("\n"))}</pre>`);
+        fence = null;
+      }
+      continue;
+    }
+    if (fence) { fence.body.push(raw); continue; }
     if (/^\|.*\|$/.test(line)) {
       const cells = line.slice(1, -1).split("|");
       if (/^[\s|:-]+$/.test(line)) continue;
@@ -202,6 +262,10 @@ async function poll() {
   for (const e of data.events) { renderEvent(e); lastEvent = Math.max(lastEvent, e.id); }
   const run = data.run;
   $("#status").textContent = `${run.status} · ${data.shortlist_size} papers shortlisted`;
+  const job = data.job;
+  if (run.status === "queued" && job && job.status === "queued" && Date.now() - new Date(job.created_at) > 20000)
+    $("#status").textContent = "queued: waiting for a worker (start one with: python -m research_agent.cli worker)";
+  if (job && job.attempts > 1 && run.status !== "done") $("#status").textContent += ` · attempt ${job.attempts}, resuming`;
   if (run.status === "done" || run.has_report) {
     clearInterval(timer); timer = null;
     const rep = await api(`/runs/${currentRun}/report`);
@@ -220,6 +284,8 @@ function showReport(markdown, run) {
   $("#report").innerHTML = md(markdown);
   $("#followCard").hidden = false;
   loadFollowups();
+  $("#draftCard").hidden = false; $("#draftView").hidden = true;
+  loadDirections(); loadDrafts();
   $("#reportCard").hidden = false;
   $("#reportMeta").textContent = `${(run && run.provider) || ""} ${(run && run.model) || ""}`;
   $("#reportCard").scrollIntoView({ behavior: "smooth", block: "start" });
@@ -244,6 +310,7 @@ $("#go").onclick = async () => {
   const question = $("#q").value.trim();
   if (question.length < 10) { $("#status").textContent = "Write a longer question."; return; }
   $("#go").disabled = true; $("#log").innerHTML = ""; $("#reportCard").hidden = true;
+  $("#followCard").hidden = true; $("#draftCard").hidden = true;
   lastEvent = 0; $("#status").textContent = "starting…";
   try {
     const res = await api("/runs", {
@@ -305,11 +372,91 @@ $("#fgo").onclick = async () => {
   } catch (e) { $("#fstatus").textContent = e.message; $("#fgo").disabled = false; }
 };
 
-$("#download").onclick = () => {
-  const blob = new Blob([reportText], { type: "text/markdown" });
+$("#download").onclick = async () => {
+  if (!currentRun) return;
+  const r = await fetch(`/runs/${currentRun}/export/${$("#expfmt").value}`);
+  if (!r.ok) { $("#fstatus").textContent = (await r.json().catch(() => ({}))).detail || "export failed"; return; }
+  const name = (r.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/);
   const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${currentMode === "map" ? "map" : "report"}_${currentRun ? currentRun.slice(0, 8) : "health"}.md`;
+  a.href = URL.createObjectURL(await r.blob());
+  a.download = name ? name[1] : `export_${currentRun.slice(0, 8)}`;
+  a.click();
+};
+
+// ---------------------------------------------------------------- drafts
+let dtimer = null, directionsList = [], openDraft = null;
+
+async function loadDirections() {
+  const runId = currentRun;
+  directionsList = [];
+  $("#ddir").innerHTML = '<option value="">Pick a gap or direction from this run…</option>';
+  try { directionsList = (await api(`/runs/${runId}/directions`)).directions; } catch (e) { return; }
+  if (runId !== currentRun) return;
+  $("#ddir").innerHTML += directionsList.map((d, i) =>
+    `<option value="${i}">${esc((d.id ? d.id + " · " : "") + d.kind + ": " + d.label).slice(0, 140)}</option>`).join("");
+  $("#ddir").hidden = !directionsList.length;
+}
+
+$("#ddir").onchange = () => {
+  const d = directionsList[+$("#ddir").value];
+  if (d) $("#dtext").value = d.label;
+};
+
+async function loadDrafts() {
+  if (!currentRun) return;
+  const { drafts } = await api(`/runs/${currentRun}/drafts`);
+  $("#drafts").innerHTML = drafts.map(d => `
+    <li><span class="pill">${d.kind === "review" ? "review" : "proposal"} · ${d.status}</span>
+    ${d.status === "done" ? `<a href="#" data-draft="${d.id}">${esc(d.title || d.direction || "draft " + d.id)}</a>`
+      : `<span class="${d.status === "failed" ? "err" : "status"}">${esc((d.direction || "draft").slice(0, 90))}${
+        d.status === "failed" ? " (failed)" : ": planning and writing…"}</span>`}</li>`).join("");
+  $("#drafts").querySelectorAll("a[data-draft]").forEach(a => a.onclick = ev => { ev.preventDefault(); showDraft(+a.dataset.draft); });
+  const pending = drafts.some(d => d.status === "pending" || d.status === "running");
+  $("#dgo").disabled = pending;
+  $("#dstatus").textContent = pending ? "drafting… you can leave this page and come back" : "";
+  if (pending && !dtimer) dtimer = setInterval(() => loadDrafts().catch(() => {}), 4000);
+  if (!pending && dtimer) { clearInterval(dtimer); dtimer = null; }
+}
+
+async function showDraft(id) {
+  const { draft } = await api(`/drafts/${id}`);
+  openDraft = id;
+  const a = (draft.meta || {}).audit || {};
+  $("#dmeta").textContent = `${draft.kind} #${id} · ${((draft.meta || {}).cited_papers || []).length} papers cited`
+    + (a.unverified_numbers ? ` · ${a.unverified_numbers} numbers [unverified]` : "");
+  $("#dbody").innerHTML = md(draft.content_md || "");
+  $("#draftView").hidden = false;
+  $("#draftView").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+$("#dclose").onclick = () => { $("#draftView").hidden = true; openDraft = null; };
+
+$("#dgo").onclick = async () => {
+  if (!currentRun) return;
+  const kind = $("#dkind").value, direction = $("#dtext").value.trim();
+  if (kind === "proposal" && direction.length < 5) {
+    $("#dstatus").textContent = "Pick a gap or describe the direction the proposal should argue for."; return;
+  }
+  const d = directionsList[+$("#ddir").value];
+  const about = d && d.id && direction === d.label ? [d.id] : [];
+  $("#dgo").disabled = true;
+  try {
+    await api(`/runs/${currentRun}/drafts`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ kind, direction, about, provider: $("#provider").value }),
+    });
+    await loadDrafts();
+  } catch (e) { $("#dstatus").textContent = e.message; $("#dgo").disabled = false; }
+};
+
+$("#ddown").onclick = async () => {
+  if (!openDraft) return;
+  const r = await fetch(`/drafts/${openDraft}/export/${$("#dfmt").value}`);
+  if (!r.ok) { $("#dstatus").textContent = (await r.json().catch(() => ({}))).detail || "export failed"; return; }
+  const name = (r.headers.get("Content-Disposition") || "").match(/filename="([^"]+)"/);
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(await r.blob());
+  a.download = name ? name[1] : `draft_${openDraft}`;
   a.click();
 };
 

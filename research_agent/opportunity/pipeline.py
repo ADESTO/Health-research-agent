@@ -96,6 +96,17 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
 
         # 8. render ------------------------------------------------------------------------------
         md = render_map(question, protocol, m, reasoning, designs, {"dropped": dropped})
+        from research_agent.tools.results import results_markdown
+
+        from research_agent.tools.review import prisma_markdown
+
+        from research_agent.tools.citations import citation_markdown
+
+        from research_agent.tools.burden import burden_markdown
+
+        extra = results_markdown(ctx) + citation_markdown(ctx) + burden_markdown(ctx) + prisma_markdown(ctx)
+        if extra:
+            md += "\n" + "\n".join(extra)
         cited = []
         for sec in ("established", "emerging", "gaps"):
             for it in m[sec]:

@@ -27,7 +27,13 @@ Rules:
 - geography = where the data was collected, not where authors work.
 - evidence: for each field listed under evidence that has a value, copy 1-2 short passages (up to 25 words)
   WORD FOR WORD from this paper's text. Code checks every passage against the text; a value whose passages
-  are not found is discarded. Do not paraphrase.{protocol_rules}
+  are not found is discarded. Do not paraphrase.
+- reported_results: every performance number the paper reports for its models (RMSE, MAE, AUC, accuracy,
+  R2...), one entry per number, with the model it belongs to and whether that model is a baseline. The quote
+  must contain the number exactly as written. Look in results sections and tables.
+- reported_associations: effects the paper itself reports between a driver (rainfall, temperature, bed nets,
+  NDVI, wealth...) and malaria, with direction and lag. Background statements about other studies do not
+  count.{protocol_rules}
 - {source_note}"""
 
 PROTOCOL_RULES = """
@@ -50,7 +56,9 @@ def _schema(protocol: dict | None, include_base: bool) -> tuple[dict, list[str]]
     if include_base:
         base = EXTRACTION_TOOL["input_schema"]["properties"]
         props.update({k: v for k, v in base.items() if k != "evidence"})
-        required += ALL_FIELDS
+        from research_agent.tools.results import STRUCT_FIELDS
+
+        required += ALL_FIELDS + STRUCT_FIELDS
         ev_fields += EVIDENCE_FIELDS
     if protocol and protocol.get("fields"):
         pt = protocol_tool(protocol)["input_schema"]["properties"]
@@ -84,6 +92,13 @@ def _verify(args: dict, text: str, protocol: dict | None, include_base: bool) ->
 
     evidence = args.get("evidence") if isinstance(args.get("evidence"), dict) else {}
     base = check_evidence(normalise(args), evidence, text) if include_base else None
+    if base is not None:
+        from research_agent.tools.results import verify_structured
+
+        found, dropped = verify_structured(args, text)   # results and associations carry their own quotes
+        base.update(found)
+        if dropped:
+            base["_unverified"] = {**(base.get("_unverified") or {}), **dropped}
     proto = None
     if protocol and protocol.get("fields"):
         names = [f["name"] for f in protocol["fields"]]
@@ -146,7 +161,7 @@ def read_papers(ctx, papers: list[dict], protocol: dict | None, include_base: bo
                 step: str = "extraction") -> tuple[dict[str, dict], list[dict], str]:
     """Read each paper once. `papers`: [{paper_id, title, abstract, fulltext or None}].
     Returns ({paper_id: {source, base, protocol}}, failures, model name)."""
-    llm = ctx.llm_factory()
+    llm = ctx.llm_factory(step=step)
     setattr(llm, "_step", step)
     full = [p for p in papers if p.get("fulltext")]
     abstract = [p for p in papers if not p.get("fulltext")]

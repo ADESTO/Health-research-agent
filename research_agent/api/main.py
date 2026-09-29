@@ -6,7 +6,7 @@ Map instead of a written report; it is shown and downloaded the same way.
 """
 from __future__ import annotations
 
-import threading
+import re
 import time
 from collections import defaultdict, deque
 from contextlib import asynccontextmanager
@@ -17,6 +17,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from research_agent.config import settings
 from research_agent.db import get_conn
 
 STATIC = Path(__file__).parent / "static"
@@ -30,7 +31,14 @@ async def _lifespan(_app):
         init_schema()
     except Exception as exc:   # the server should still start; endpoints report their own errors
         print(f"database migration failed: {exc}")
+    workers = []
+    if settings.embedded_workers > 0:   # single-machine setup: the server works its own queue
+        from research_agent.jobs import start_embedded
+
+        workers = start_embedded(settings.embedded_workers)
     yield
+    for w in workers:
+        w.stop()
 
 
 app = FastAPI(title="Health Research Intelligence API", version="0.1.0", lifespan=_lifespan)
@@ -84,26 +92,15 @@ def start_run(req: RunRequest, request: Request):
 
     import uuid
 
-    from research_agent.agents.orchestrator import run_research
-    from research_agent.opportunity.pipeline import run_map
+    from research_agent.jobs import enqueue
 
     run_id = str(uuid.uuid4())
     with get_conn() as pg:
         pg.execute("INSERT INTO runs (run_id, question, status) VALUES (%s,%s,'queued')", (run_id, req.question))
-
-    def worker():
-        try:
-            if req.mode == "map":
-                run_map(req.question, provider=req.provider, run_id=run_id)
-            else:
-                run_research(req.question, mode=req.mode, provider=req.provider, run_id=run_id)
-        except Exception as exc:  # recorded on the run row; make sure it never stays 'queued'
-            with get_conn() as pg:
-                pg.execute("UPDATE runs SET status='failed', error=coalesce(error, %s) WHERE run_id=%s",
-                           (str(exc)[:500], run_id))
-
-    threading.Thread(target=worker, daemon=True).start()
-    return {"run_id": run_id, "mode": req.mode, "poll": f"/runs/{run_id}"}
+    # a durable job: it survives a server restart, and a worker that dies mid-run is replaced
+    job = enqueue("map" if req.mode == "map" else "run",
+                  {"run_id": run_id, "question": req.question, "mode": req.mode, "provider": req.provider})
+    return {"run_id": run_id, "mode": req.mode, "job_id": job, "poll": f"/runs/{run_id}"}
 
 
 @app.get("/runs/{run_id}")
@@ -117,7 +114,9 @@ def get_run(run_id: str, after_event: int = 0):
         events = pg.execute("SELECT id, agent, kind, payload, ts FROM run_events WHERE run_id=%s AND id > %s "
                             "ORDER BY id LIMIT 500", (run_id, after_event)).fetchall()
         n_short = pg.execute("SELECT count(*) n FROM run_papers WHERE run_id=%s", (run_id,)).fetchone()["n"]
-    return {"run": run, "shortlist_size": n_short, "events": events}
+    from research_agent.jobs import job_for_run
+
+    return {"run": run, "shortlist_size": n_short, "events": events, "job": job_for_run(run_id)}
 
 
 @app.get("/runs/{run_id}/report")
@@ -168,6 +167,108 @@ def list_followups(run_id: str):
     return {"messages": [{"id": r["id"], "role": r["role"], "content": r["content"], "status": r["status"],
                           "about": (r["meta"] or {}).get("focus"), "new_claims": (r["meta"] or {}).get("new_claims", []),
                           "ts": r["ts"]} for r in history(run_id, limit=200)]}
+
+
+class DraftRequest(BaseModel):
+    kind: str = Field(pattern="^(proposal|review)$")
+    direction: str = Field(default="", max_length=1500)
+    about: list[str] = Field(default_factory=list, max_length=6)
+    provider: str | None = Field(default=None, pattern="^(anthropic|groq|deepseek)$")
+
+
+_DRAFTS_PER_HOUR = 6
+_dhits: dict[str, deque] = defaultdict(deque)
+_ITEM_ID = re.compile(r"^[CGNERWHDcgnerwhd][0-9]{1,6}$")
+
+
+@app.get("/runs/{run_id}/directions")
+def get_directions(run_id: str):
+    """Gaps and directions a draft can argue for (map gaps, untried combinations, designs, reported gaps)."""
+    from research_agent.agents.draft import directions
+    from research_agent.runstate import RunContext
+
+    try:
+        ctx = RunContext.attach(run_id, llm_factory=lambda strong=False: None)
+    except ValueError:
+        raise HTTPException(404, "no such run")
+    try:
+        return {"directions": directions(ctx)}
+    finally:
+        ctx.close()
+
+
+@app.post("/runs/{run_id}/drafts", status_code=202)
+def start_draft(run_id: str, req: DraftRequest, request: Request):
+    """Draft a research proposal or a review manuscript from a finished run. Written in the background."""
+    from research_agent.agents import draft
+
+    if any(not _ITEM_ID.match(a) for a in req.about):
+        raise HTTPException(422, "about: item ids like G2, N1 or D1")
+    ip = request.client.host if request.client else "unknown"
+    q, now = _dhits[ip], time.time()
+    while q and now - q[0] > 3600:
+        q.popleft()
+    if len(q) >= _DRAFTS_PER_HOUR:
+        raise HTTPException(429, "Draft limit reached; try again later.")
+    with get_conn() as pg:
+        run = pg.execute("SELECT status, report_md IS NOT NULL AS has_report FROM runs WHERE run_id=%s",
+                         (run_id,)).fetchone()
+    if not run:
+        raise HTTPException(404, "no such run")
+    if run["status"] != "done" or not run["has_report"]:
+        raise HTTPException(409, "Drafts are written from a finished run with a report or map.")
+    q.append(now)
+    ids = draft.draft_in_background(run_id, req.kind, req.direction, [a.upper() for a in req.about], req.provider)
+    return {**ids, "poll": f"/drafts/{ids['draft_id']}"}
+
+
+@app.get("/runs/{run_id}/drafts")
+def run_drafts(run_id: str):
+    from research_agent.agents.draft import list_drafts
+
+    return {"drafts": list_drafts(run_id)}
+
+
+@app.get("/drafts/{draft_id}")
+def get_draft(draft_id: int):
+    from research_agent.agents.draft import get_draft as fetch
+
+    d = fetch(draft_id)
+    if not d:
+        raise HTTPException(404, "no such draft")
+    return {"draft": d}
+
+
+@app.get("/drafts/{draft_id}/export/{fmt}")
+def export_draft(draft_id: int, fmt: str):
+    """Download a draft as md, docx, html, or its cited references as bib or ris."""
+    from fastapi.responses import Response
+
+    from research_agent.exports import DRAFT_FORMATS, export_draft as build
+
+    if fmt not in DRAFT_FORMATS:
+        raise HTTPException(404, f"unknown format; choose from {', '.join(DRAFT_FORMATS)}")
+    try:
+        data, name, media = build(draft_id, fmt)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return Response(data, media_type=media, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.get("/runs/{run_id}/export/{fmt}")
+def export_run(run_id: str, fmt: str):
+    """Download a run as md, docx, html, bib, ris, csv, xlsx, protocol, screening, burden or burden_chart."""
+    from fastapi.responses import Response
+
+    from research_agent.exports import FORMATS, export
+
+    if fmt not in FORMATS:
+        raise HTTPException(404, f"unknown format; choose from {', '.join(FORMATS)}")
+    try:
+        data, name, media = export(run_id, fmt)
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+    return Response(data, media_type=media, headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 
 @app.get("/runs/{run_id}/claims")

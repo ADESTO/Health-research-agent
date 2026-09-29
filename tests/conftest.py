@@ -16,6 +16,8 @@ os.environ["PAPER_TEXT_GLOB"] = str(FIXTURES / "paper_text" / "*.parquet")
 os.environ["MIN_YEAR"] = "2015"
 os.environ["MAX_FULLTEXT"] = "5"
 os.environ["RA_ENV_FILE"] = "/nonexistent"
+os.environ["CITATIONS"] = "0"
+os.environ["EMBEDDED_WORKERS"] = "0"   # tests run queued jobs themselves   # no calls to the real OpenAlex; citation tests use a mock server
 
 import psycopg  # noqa: E402
 import pytest  # noqa: E402

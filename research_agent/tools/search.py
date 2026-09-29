@@ -60,6 +60,9 @@ def hybrid_search(ctx, query: str, keywords: str | None = None, year_from: int |
     ORDER BY f.score DESC LIMIT %(lim)s
     """
     rows = ctx.pg.execute(sql, params).fetchall()
+    from research_agent.tools.review import log_identified
+
+    log_identified(ctx, [r["paper_id"] for r in rows], f"search: {query}")
     return {"query": query, "keywords": keywords or query, "n": len(rows), "results": rows}
 
 
@@ -101,6 +104,9 @@ def coverage_probe(ctx, topic: str, concepts: list[str], limit: int = 6, source:
                 ORDER BY ts_rank_cd(tsv, ({t_sql}) && ({c_sql})) DESC, year DESC LIMIT %(lim)s""",
             params).fetchall()
         ctx.emit("coverage_probe", "count", {"n": n, "total": topic_total, "keywords": f"{topic} + {concept}"})
+        from research_agent.tools.review import log_identified
+
+        log_identified(ctx, [m["paper_id"] for m in missing], f"coverage probe: {concept}")
         under = n >= 5 and on < 0.3 * n
         out.append({"concept": concept, "corpus_papers": n, "on_shortlist": on,
                     "under_covered": under, "not_shortlisted_examples": missing})
@@ -116,6 +122,9 @@ def find_similar(ctx, paper_id: str, limit: int = 10) -> dict:
            WHERE s.paper_id = %s AND p.paper_id <> s.paper_id
            ORDER BY p.embedding <=> s.embedding LIMIT %s""",
         (paper_id, max(1, min(int(limit), 30)))).fetchall()
+    from research_agent.tools.review import log_identified
+
+    log_identified(ctx, [r["paper_id"] for r in rows], f"similar to {paper_id}")
     return {"paper_id": paper_id, "similar": rows}
 
 
@@ -177,6 +186,17 @@ def add_to_shortlist(ctx, paper_ids: list[str], reason: str, _agent: str = "disc
         added += cur.rowcount
         shortlist[pid] = new
     out = {"added": added, "shortlist_size": len(shortlist), "max_shortlist": settings.max_shortlist}
+    from research_agent.tools.review import log_decision, log_identified
+
+    log_identified(ctx, list(rows), "added directly")
+    log_decision(ctx, [p for p in shortlist if p in rows], "included", reason)
+    for d in duplicates:
+        log_decision(ctx, [d["paper_id"]], "duplicate", f"same work as {d['same_work_as']}")
+    for r in replaced:
+        log_decision(ctx, [r["removed_preprint"]], "duplicate", f"preprint of {r['kept_published']}")
+    if full:
+        log_decision(ctx, [p for p in rows if p not in shortlist and p not in {d["paper_id"] for d in duplicates}],
+                     "over_limit", "shortlist full")
     if unknown:
         out["unknown_ids"] = unknown
     if duplicates:
@@ -191,6 +211,9 @@ def add_to_shortlist(ctx, paper_ids: list[str], reason: str, _agent: str = "disc
 def remove_from_shortlist(ctx, paper_ids: list[str], reason: str = "") -> dict:
     cur = ctx.pg.execute("DELETE FROM run_papers WHERE run_id=%s AND paper_id = ANY(%s)",
                          (ctx.run_id, list(paper_ids)))
+    from research_agent.tools.review import log_decision
+
+    log_decision(ctx, list(paper_ids), "excluded", reason or "judged off-topic")
     return {"removed": cur.rowcount, "shortlist_size": len(ctx.shortlist_ids())}
 
 

@@ -13,7 +13,6 @@ The conversation is kept per run (table `followups`), so a researcher can come b
 from __future__ import annotations
 
 import json
-import threading
 from dataclasses import dataclass
 
 from research_agent.agents.base import Agent
@@ -25,6 +24,9 @@ from research_agent.tools.base import INT, STR, STRS, Tool, obj
 from research_agent.tools.claims import PREDICATE_DOC, TEST_TOOL, propose_claim, verify_claims
 from research_agent.tools.extraction import ANALYSIS_TOOLS, _rows, protocol_of
 from research_agent.tools.recheck import RECHECK_TOOL, _passages
+from research_agent.tools.burden import BURDEN_TOOL
+from research_agent.tools.citations import CITATION_INFO_TOOL, CITATION_TOOLS
+from research_agent.tools.results import RESULT_TOOLS
 
 HISTORY_TURNS = 6          # earlier exchanges given to the agent
 _schema_ready = False
@@ -304,7 +306,8 @@ FOLLOWUP = FollowupAgent(
     role="Answers a researcher's follow-up questions about a finished run.",
     system=FOLLOWUP_SYSTEM,
     tools=[OVERVIEW_TOOL, ITEM_TOOL, READ_TOOL, READ_IN_FULL_TOOL, TEST_TOOL, ADD_CLAIM_TOOL, RECHECK_TOOL]
-    + [t for t in ANALYSIS_TOOLS if t.name in ("value_counts", "cross_tab", "list_extractions")],
+    + [t for t in ANALYSIS_TOOLS if t.name in ("value_counts", "cross_tab", "list_extractions")] + RESULT_TOOLS
+    + [CITATION_INFO_TOOL, BURDEN_TOOL] + [t for t in CITATION_TOOLS if t.name == "citation_graph"],
     finish_schema=obj({"answer": {**STR, "description": "The answer in Markdown, with citations"}}, ["answer"]),
     max_turns=12,
 )
@@ -403,12 +406,10 @@ def answer(run_id: str, question: str, focus: str | None = None, provider: str |
 
 
 def answer_in_background(run_id: str, question: str, focus: str | None = None, provider: str | None = None) -> dict:
-    q, a = start(run_id, question, focus)
+    """Queue the answer as a durable job (see research_agent.jobs)."""
+    from research_agent.jobs import enqueue
 
-    def work():
-        try:
-            answer(run_id, question, focus, provider=provider, answer_id=a)
-        except Exception:
-            pass   # the failure is stored on the answer row
-    threading.Thread(target=work, daemon=True).start()
-    return {"question_id": q, "answer_id": a}
+    q, a = start(run_id, question, focus)
+    job = enqueue("followup", {"run_id": run_id, "question": question, "focus": focus, "provider": provider,
+                               "answer_id": a})
+    return {"question_id": q, "answer_id": a, "job_id": job}

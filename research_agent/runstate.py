@@ -16,6 +16,29 @@ def _dumps(obj: Any) -> str:
     return json.dumps(obj, default=str, ensure_ascii=False)
 
 
+def _routing_factory(base, clients: list):
+    """Client factory for a run: passes the step name through for model routing (test and custom factories
+    that take only `strong` still work), and keeps every client so usage can be totalled per step."""
+    import inspect
+
+    try:
+        takes_step = "step" in inspect.signature(base).parameters
+    except (TypeError, ValueError):
+        takes_step = False
+
+    def factory(strong: bool = False, step: str | None = None):
+        client = base(strong=strong, step=step) if takes_step else base(strong=strong)
+        if step:
+            try:
+                client._step = step
+            except Exception:
+                pass
+        clients.append(client)
+        return client
+    factory._routed = True
+    return factory
+
+
 def usage_cost(u: dict) -> float | None:
     """USD cost from token counts, using PRICE_* settings (per million tokens). None when prices are unset."""
     pi, pc, po = settings.price_input_per_m, settings.price_cached_input_per_m, settings.price_output_per_m
@@ -35,17 +58,24 @@ class RunContext:
     clients: list = field(default_factory=list)   # every LLM client created in this run (for token totals)
     _llm: LLMClient | None = field(default=None, repr=False)
 
+    def __post_init__(self):
+        if self.llm_factory is not None and not getattr(self.llm_factory, "_routed", False):
+            object.__setattr__(self, "llm_factory", _routing_factory(self.llm_factory, self.clients))
+
+    def __setattr__(self, name, value):
+        # a factory assigned later (tests, custom code) gets the same step routing and usage accounting
+        if (name == "llm_factory" and value is not None and not getattr(value, "_routed", False)
+                and "clients" in self.__dict__):
+            value = _routing_factory(value, self.clients)
+        object.__setattr__(self, name, value)
+
     # --- lifecycle -------------------------------------------------------------------------
     @classmethod
     def create(cls, question: str, provider: str | None = None, llm_factory=None, on_event=None,
                run_id: str | None = None) -> "RunContext":
-        base = llm_factory or (lambda strong=False: get_llm(provider, strong=strong))
+        base = llm_factory or (lambda strong=False, step=None: get_llm(provider, strong=strong, step=step))
         clients: list = []
-
-        def factory(strong: bool = False):
-            client = base(strong=strong)
-            clients.append(client)
-            return client
+        factory = _routing_factory(base, clients)
 
         ctx = cls(run_id=run_id or str(uuid.uuid4()), question=question, llm_factory=factory,
                   pg=connect(), on_event=on_event, clients=clients)
@@ -67,13 +97,9 @@ class RunContext:
         if not row:
             pg.close()
             raise ValueError(f"No run with id {run_id}")
-        base = llm_factory or (lambda strong=False: get_llm(provider, strong=strong))
+        base = llm_factory or (lambda strong=False, step=None: get_llm(provider, strong=strong, step=step))
         clients: list = []
-
-        def factory(strong: bool = False):
-            client = base(strong=strong)
-            clients.append(client)
-            return client
+        factory = _routing_factory(base, clients)
 
         ctx = cls(run_id=run_id, question=row["question"], llm_factory=factory, pg=pg, on_event=on_event,
                   clients=clients)

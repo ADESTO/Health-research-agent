@@ -53,6 +53,9 @@ class Settings:
     deepseek_model: str = os.getenv("DEEPSEEK_MODEL", "deepseek-flash")
     deepseek_model_strong: str = os.getenv("DEEPSEEK_MODEL_STRONG", "")
 
+    # Per-step model routing, e.g. "cheap=deepseek:deepseek-flash; strong=anthropic:claude-sonnet-4-5"
+    model_routes: str = os.getenv("MODEL_ROUTES", "")
+
     # Run limits (cost guards)
     max_shortlist: int = int(os.getenv("MAX_SHORTLIST", "60"))
     max_fulltext: int = int(os.getenv("MAX_FULLTEXT", "20"))
@@ -75,6 +78,10 @@ class Settings:
     price_output_per_m: float = float(os.getenv("PRICE_OUTPUT_PER_M", "0") or 0)
     # ask runs also get question-specific fields (the map's protocol step)
     ask_protocol: bool = os.getenv("ASK_PROTOCOL", "1") != "0"
+    # job workers inside the web server (0 = none; then start `python -m research_agent.cli worker`)
+    embedded_workers: int = int(os.getenv("EMBEDDED_WORKERS", "1"))
+    # citation graph from OpenAlex (set OPENALEX_API_KEY, free, for a 10x larger daily allowance)
+    citations: bool = os.getenv("CITATIONS", "1") != "0"
     # focused quoted re-checks when a rarity count is contradicted by the papers' own text
     recheck: bool = os.getenv("RECHECK", "1") != "0"
     # after the report is written, an agent backs, corrects or removes numbers code could not trace
@@ -88,7 +95,8 @@ class Settings:
     context_budget_chars: int = int(os.getenv("CONTEXT_BUDGET_CHARS", "60000"))
 
     # v2 adds evidence quotes; v1 extractions are not reused because their fields were never checked
-    extraction_schema_version: str = "health-v2"
+    # v3 adds reported results and associations (what papers found); v2 records are read again when needed
+    extraction_schema_version: str = "health-v3"
     extra: dict = field(default_factory=dict)
 
 

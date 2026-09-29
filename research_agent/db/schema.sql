@@ -177,3 +177,67 @@ CREATE TABLE IF NOT EXISTS followups (
     ts       timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS followups_run_idx ON followups (run_id, id);
+
+-- Drafts written from a finished run: research proposals and review manuscripts
+CREATE TABLE IF NOT EXISTS drafts (
+    id         bigserial PRIMARY KEY,
+    run_id     uuid NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    kind       text NOT NULL,                 -- proposal | review
+    direction  text NOT NULL DEFAULT '',      -- the gap or direction it argues for
+    about      text[],                        -- map items it builds on (G2, N1, D1...)
+    status     text NOT NULL DEFAULT 'pending', -- pending | running | done | failed
+    title      text,
+    content_md text,
+    meta       jsonb,                         -- audit, cited papers and claims, new claims
+    created_at timestamptz DEFAULT now(),
+    finished_at timestamptz
+);
+CREATE INDEX IF NOT EXISTS drafts_run_idx ON drafts (run_id, id);
+
+-- Screening log for systematic-review reporting (PRISMA): every paper discovery saw, and what happened to it.
+CREATE TABLE IF NOT EXISTS screening (
+    run_id   uuid NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    paper_id text NOT NULL,
+    stage    text NOT NULL,          -- identified | included | excluded | duplicate | over_limit
+    reason   text,
+    found_by text,                   -- the search, similarity or citation step that surfaced it
+    ts       timestamptz DEFAULT now(),
+    PRIMARY KEY (run_id, paper_id)
+);
+
+-- Citation graph from OpenAlex (cached; refreshed after CITATION_MAX_AGE_DAYS)
+CREATE TABLE IF NOT EXISTS openalex_works (
+    paper_id          text PRIMARY KEY,
+    openalex_id       text,               -- NULL: looked up, not found
+    cited_by_count    int,
+    referenced_works  jsonb,              -- OpenAlex ids this paper cites
+    fetched_at        timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS openalex_works_oa_idx ON openalex_works (openalex_id);
+
+-- Disease burden estimates by country and year (WHO GHO or an imported CSV)
+CREATE TABLE IF NOT EXISTS burden (
+    iso3        text NOT NULL,
+    year        int NOT NULL,
+    cases       double precision,
+    deaths      double precision,
+    source      text NOT NULL DEFAULT '',
+    PRIMARY KEY (iso3, year, source)
+);
+
+-- Durable job queue (runs, maps, follow-ups). Workers claim jobs with FOR UPDATE SKIP LOCKED.
+CREATE TABLE IF NOT EXISTS jobs (
+    id            bigserial PRIMARY KEY,
+    kind          text NOT NULL,                 -- run | map | followup
+    payload       jsonb NOT NULL,
+    status        text NOT NULL DEFAULT 'queued', -- queued | running | done | failed
+    attempts      int NOT NULL DEFAULT 0,
+    max_attempts  int NOT NULL DEFAULT 2,
+    run_at        timestamptz NOT NULL DEFAULT now(),
+    locked_by     text,
+    heartbeat_at  timestamptz,
+    error         text,
+    created_at    timestamptz DEFAULT now(),
+    finished_at   timestamptz
+);
+CREATE INDEX IF NOT EXISTS jobs_queue_idx ON jobs (status, run_at, id);

@@ -53,6 +53,12 @@ def run_specialist(ctx: RunContext, agent_name: str, task: str) -> dict:
         out = agent.run(child, task)
         if agent_name == "literature" and "error" not in out:
             _extract_question_fields(child)
+        if agent_name == "discovery" and settings.citations:
+            from research_agent.tools.citations import ensure
+
+            problem = ensure(child)   # cache citation links among the shortlisted papers (a few requests)
+            if problem:
+                child.emit("citations", "message", {"text": problem})
         if agent_name == "discovery" and not child.shortlist_ids():
             # Common model failure: it searches, sees results, then finishes without shortlisting.
             # Give it one explicit second chance before concluding the corpus has nothing.

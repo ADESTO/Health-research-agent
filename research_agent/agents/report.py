@@ -52,6 +52,27 @@ def get_brief(ctx) -> dict:
     out = {"question": ctx.question,
            "run_facts": {**facts, "note": "years = shortlist years; corpus_years = whole corpus"},
            "claims": compact, "papers": papers}
+    # What papers found, computed by code (older runs may lack it). Added before the notes are sized, so
+    # the notes shrink to fit instead of the claims.
+    try:
+        from research_agent.tools.results import contradictions, results_table
+
+        rt = results_table(ctx, limit=0)
+        out["reported_performance"] = {"per_metric": rt["summary"], "note": rt["note"]}
+        out["contradictions"] = [{"driver": c["driver"], "positive": [x["paper_id"] for x in c["positive"]],
+                                  "negative": [x["paper_id"] for x in c["negative"]],
+                                  "separating_attributes": c["separating_attributes"][:3]}
+                                 for c in contradictions(ctx)["contradictions"]]
+        from research_agent.tools.citations import citation_graph
+
+        g = citation_graph(ctx, fetch=False)
+        if g["matched_in_openalex"]:
+            out["citations"] = {k: g[k] for k in ("matched_in_openalex", "links_between_papers", "isolated")}
+            out["citations"]["most_cited_within_set"] = [
+                {k: p[k] for k in ("paper_id", "cited_by_papers_in_set", "cited_by_all_literature")}
+                for p in g["most_cited_within_set"][:6]]
+    except Exception:
+        pass
     notes_src = {k: v for k, v in ctx.notes().items() if k not in ("synthesis", "orchestrator")}
     room = BRIEF_CHARS - len(json.dumps(out, default=str, ensure_ascii=False)) - 200
     per_note = max(300, room // max(1, len(notes_src)))
@@ -248,7 +269,31 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
         (list(shortlist),)).fetchall()}
 
     lo, hi = facts["years"]
-    lines = [body.strip(), "", "## Run facts (computed by code)", "",
+    try:
+        from research_agent.tools.results import results_markdown
+
+        computed = results_markdown(ctx)
+    except Exception:
+        computed = []
+    try:
+        from research_agent.tools.citations import citation_markdown
+
+        computed += citation_markdown(ctx)
+    except Exception:
+        pass
+    try:
+        from research_agent.tools.burden import burden_markdown
+
+        computed += burden_markdown(ctx)
+    except Exception:
+        pass
+    try:
+        from research_agent.tools.review import prisma_markdown
+
+        review_record = prisma_markdown(ctx)
+    except Exception:
+        review_record = []
+    lines = [body.strip(), "", *computed, "## Run facts (computed by code)", "",
              f"- Papers analysed: {facts['shortlist']} "
              f"(read in full: {facts['fulltext']}, abstract only: {facts['abstract_only']})",
              f"- Publication years of analysed papers: {lo}–{hi}" if lo else "- Publication years: n/a",
@@ -264,7 +309,7 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
                 f"{number_check.get('removed', 0)} removed because they could not be measured"
                 + (f" ({number_check['refused']} proposed fixes refused by the checks)"
                    if number_check.get("refused") else "")] if number_check else []),
-             "", "## Evidence table", "",
+             "", *review_record, "## Evidence table", "",
              "| Claim | Statement | Verdict | Evidence |", "|---|---|---|---|"]
     for cid, c in claims.items():
         r = c["result"] or {}

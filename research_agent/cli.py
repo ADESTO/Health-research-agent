@@ -142,6 +142,27 @@ def main(argv: list[str] | None = None) -> int:
     p_chat.add_argument("--question", "-q", help="ask one question and exit")
     p_chat.add_argument("--about", help="the item the question is about, e.g. C512 or G2")
     p_chat.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
+    p_exp = sub.add_parser("export", help="export a finished run (report, references, data, review record)")
+    p_exp.add_argument("run_id")
+    p_exp.add_argument("--format", "-f", default="docx",
+                       help="md, docx, html, bib, ris, csv, xlsx, protocol, screening, burden, burden_chart")
+    p_exp.add_argument("--out", "-o", help="file to write (default: a name based on the run and format)")
+    p_dr = sub.add_parser("draft", help="draft a research proposal or review manuscript from a finished run")
+    p_dr.add_argument("run_id", nargs="?", help="the run to build on (not needed with --export)")
+    p_dr.add_argument("--type", "-t", choices=["proposal", "review"], default="proposal", dest="kind")
+    p_dr.add_argument("--direction", "-d", default="", help="the gap or direction to argue for, in your words")
+    p_dr.add_argument("--about", default="", help="map items it builds on, e.g. G2 or G2,D1")
+    p_dr.add_argument("--directions", action="store_true", help="list the run's gaps and directions, then exit")
+    p_dr.add_argument("--list", action="store_true", help="list the run's drafts, then exit")
+    p_dr.add_argument("--export", metavar="DRAFT_ID", type=int, help="export an existing draft instead")
+    p_dr.add_argument("--format", "-f", default="docx", choices=["md", "docx", "html", "bib", "ris"])
+    p_dr.add_argument("--out", "-o", help="file to write")
+    p_dr.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
+    p_w = sub.add_parser("worker", help="work the job queue (runs, maps, follow-ups started from the web page)")
+    p_w.add_argument("--concurrency", "-c", type=int, default=1)
+    sub.add_parser("burden-fetch", help="download WHO estimates of malaria cases and deaths by country")
+    p_bi = sub.add_parser("burden-import", help="import burden estimates from a CSV (iso3 or country, year, cases)")
+    p_bi.add_argument("path"); p_bi.add_argument("--source", default="CSV")
     p_use = sub.add_parser("usage", help="tokens (and cost) per step for a finished run")
     p_use.add_argument("run_id")
     sub.add_parser("runs", help="list recent runs (to find a run_id to resume)")
@@ -239,6 +260,48 @@ def main(argv: list[str] | None = None) -> int:
             Path(args.out).write_text(res["report"]); print(f"saved to {args.out}")
     elif args.cmd == "chat":
         return chat(args.run_id, args.question, args.about, args.provider)
+    elif args.cmd == "draft":
+        return draft_cmd(args, ap)
+    elif args.cmd == "worker":
+        import threading as _t
+
+        from research_agent.db import init_schema
+        from research_agent.jobs import Worker
+
+        init_schema()
+        workers = [Worker() for _ in range(max(1, args.concurrency))]
+        print(f"{len(workers)} worker(s) waiting for jobs. Ctrl+C to stop.")
+        threads = [_t.Thread(target=w.run_forever, daemon=True) for w in workers]
+        for t in threads:
+            t.start()
+        try:
+            while any(t.is_alive() for t in threads):
+                for t in threads:
+                    t.join(timeout=1)
+        except KeyboardInterrupt:
+            for w in workers:
+                w.stop()
+            print("stopping (a job in progress resumes from its last finished step when a worker next starts)")
+    elif args.cmd == "export":
+        from research_agent.exports import export
+
+        try:
+            data, name, _ = export(args.run_id, args.format)
+        except Exception as exc:
+            print(f"Export failed: {exc}"); return 1
+        Path(args.out or name).write_bytes(data)
+        print(f"saved {args.out or name} ({len(data):,} bytes)")
+    elif args.cmd in ("burden-fetch", "burden-import"):
+        from research_agent.db import get_conn, init_schema
+        from research_agent.tools import burden
+
+        init_schema()
+        with get_conn() as pg:
+            try:
+                res = burden.fetch_who(pg) if args.cmd == "burden-fetch" else burden.import_csv(pg, args.path, args.source)
+            except Exception as exc:
+                print(f"Could not load burden data: {exc}"); return 1
+        print(f"Loaded {res}")
     elif args.cmd == "usage":
         from research_agent.db import get_conn
 
@@ -266,6 +329,59 @@ def main(argv: list[str] | None = None) -> int:
         with get_conn() as pg:
             row = pg.execute("SELECT status, report_md, error FROM runs WHERE run_id=%s", (args.run_id,)).fetchone()
         print(row["report_md"] if row and row["report_md"] else row)
+    return 0
+
+
+def draft_cmd(args, ap) -> int:
+    from research_agent.agents import draft
+    from research_agent.exports import export_draft
+
+    if args.export:
+        try:
+            data, name, _ = export_draft(args.export, args.format)
+        except Exception as exc:
+            print(f"Export failed: {exc}"); return 1
+        Path(args.out or name).write_bytes(data)
+        print(f"saved {args.out or name} ({len(data):,} bytes)")
+        return 0
+    if not args.run_id:
+        ap.error("give the run_id to draft from (or --export DRAFT_ID)")
+    if args.list:
+        for d in draft.list_drafts(args.run_id):
+            print(f"#{d['id']:<5} {d['kind']:<9} {d['status']:<8} {d['created_at']:%Y-%m-%d %H:%M}  "
+                  f"{d['title'] or d['direction'][:70]}")
+        return 0
+    if args.directions:
+        from research_agent.runstate import RunContext
+
+        ctx = RunContext.attach(args.run_id, llm_factory=lambda strong=False: None)
+        try:
+            items = draft.directions(ctx)
+        finally:
+            ctx.close()
+        for it in items:
+            print(f"{(it['id'] or '-'):<5} {it['kind']:<20} {it['label']}")
+        if not items:
+            print("No gaps recorded for this run; give your own --direction.")
+        return 0
+    about = [a for a in args.about.replace(";", ",").split(",") if a.strip()]
+    if not args.direction and not about:
+        print("Tip: --direction \"...\" or --about G2 says what the draft should argue for; "
+              "without it the draft builds on the run's main gap.")
+    did = draft.start(args.run_id, args.kind, args.direction, about)
+    print(f"Drafting {args.kind} #{did} (planning, then one section at a time; this takes a few minutes)...")
+    try:
+        out = draft.run_draft(did, provider=args.provider)
+    except Exception as exc:
+        print(f"\n✖ Draft failed: {exc}"); return 1
+    a = out["meta"]["audit"]
+    print(f"\n{out['content_md']}\n")
+    print(f"draft #{did}: {len(out['meta']['cited_papers'])} papers cited, "
+          f"{len(out['meta']['new_claims'])} new counts, {a['unverified_numbers']} numbers marked [unverified], "
+          f"{len(a['removed_paper_citations'])} citations removed")
+    data, name, _ = export_draft(did, args.format)
+    Path(args.out or name).write_bytes(data)
+    print(f"saved {args.out or name}")
     return 0
 
 

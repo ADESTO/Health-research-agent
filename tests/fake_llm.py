@@ -39,6 +39,14 @@ def fake_extraction(text: str) -> dict:
                                  "climate/environmental": "rainfall"}[m] for m in data["data_modalities"]],
             "validation_level": ["validation"] if data["validation_level"] != "not_stated" else []}
     data["evidence"] = {f: [q for q in (_quote(text, v) for v in vals[:2]) if q] for f, vals in keys.items()}
+    sentences = re.split(r"(?<=[.!?])\s+", text.replace("\n", " "))
+    data["reported_results"] = [
+        {"metric": "AUROC", "value": m.group(1), "model": "proposed model", "is_baseline": False,
+         "split": "test_or_holdout", "quote": next(s for s in sentences if m.group(1) in s)}
+        for m in re.finditer(r"AUROC(?: of)? (\d\.\d+)", text)]
+    data["reported_associations"] = [
+        {"driver": "rainfall", "outcome": "cases", "direction": "positive",
+         "quote": next(s for s in sentences if "driven by rainfall" in s)}] if "driven by rainfall" in text else []
     return data
 
 
@@ -137,6 +145,9 @@ class FakeLLM:
             return self._resp([_call("record_readings", records=records)])
         if force_tool == "record_check":
             return self._resp([_call("record_check", **fake_recheck(messages[0]["content"][0]["text"], tools))])
+        if not tools and "Draft writer" in system:
+            text = self._draft_section(messages[0]["content"])
+            return LLMResponse(text, [], [{"type": "text", "text": text}], "stop", {})
         agent = self._agent(system)
         step = sum(1 for m in messages if m["role"] == "assistant")
         last = self._last_results(messages)
@@ -158,7 +169,8 @@ class FakeLLM:
                           ("Literature Analyst", "literature"), ("Methods agent", "methods"),
                           ("Trend agent", "trends"), ("Research Gap agent", "gaps"),
                           ("Evidence agent", "evidence"), ("Synthesis agent", "synthesis"),
-                          ("Number Check agent", "number_check"), ("Follow-up agent", "followup")):
+                          ("Number Check agent", "number_check"), ("Follow-up agent", "followup"),
+                          ("Draft Planner agent", "draft_plan")):
             if key in system:
                 return name
         raise AssertionError("unknown agent prompt")
@@ -301,6 +313,37 @@ class FakeLLM:
             f"{'As discussed before, ' if remembered else ''}the claim you asked about is "
             f"{self._looked_up.get('status', 'an overview')}. Surveillance counts appear in {self._n} of {self._d} papers "
             f"[C{new}]. One more study [arXiv:0000.00000] reports 7 of 9 sites."))]
+
+    def _draft_plan(self, step, last, messages):
+        """Orients, counts one thing for the argument, and returns an outline citing it."""
+        if step == 0:
+            return [_call("run_overview")]
+        if step == 1:
+            return [_call("test_claim", claim_type="prevalence",
+                          predicate={"field": "validation_level", "any_of": ["external"], "min_count": 1})]
+        if step == 2:
+            self._n, self._d = last[0]["n_matching"], last[0]["denominator"]
+            return [_call("add_claim", text=f"External validation is reported by {self._n} of {self._d} papers.",
+                          claim_type="prevalence",
+                          predicate={"field": "validation_level", "any_of": ["external"], "min_count": 1})]
+        cid = f"C{last[0]['claim_id']}"
+        return [_call("finish", title="Validating malaria forecasts where they are used",
+                      argument="Few studies validate externally, so reported skill may not transfer.",
+                      sections=[{"key": "gap", "points": ["external validation is rare"], "claims": [cid]}],
+                      caveats=["small evidence base"])]
+
+    def _draft_section(self, blocks) -> str:
+        """Writes a section from the pack: one real claim and paper, plus an invented paper id, an untraced
+        number and an em dash, which the checks must catch."""
+        pack = json.loads(blocks[0]["text"].split("EVIDENCE PACK (JSON):\n", 1)[1])
+        supported = [c["claim"] for c in pack["claims"] if c["status"] == "supported"]
+        paper = pack["papers"][0]["id"]
+        cite = f"[arXiv:{paper}]" if not paper.startswith("PMC") else f"[{paper}]"
+        task = blocks[-1]["text"]
+        heading = re.search(r'section "([^"]+)"', task).group(1)
+        return (f"## {heading}\n\nMalaria forecasting draws on climate data {cite} — a common design. "
+                f"The key count is cited [{supported[-1]}]. A further study [arXiv:0000.00000] reports 7 of 9 "
+                f"sites. We will use [to be confirmed: number of districts] districts.")
 
     def _number_check(self, step, last, messages):
         """Measures the first untraced number with a claim, drops the second, keeps the rest."""

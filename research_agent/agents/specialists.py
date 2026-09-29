@@ -4,6 +4,9 @@ from __future__ import annotations
 from research_agent.agents.base import Agent
 from research_agent.agents.report import REPORT_TOOLS
 from research_agent.config import settings
+from research_agent.tools.results import RESULT_TOOLS
+from research_agent.tools.burden import BURDEN_TOOL
+from research_agent.tools.citations import CITATION_TOOLS
 from research_agent.tools.recheck import RECHECK_TOOL
 from research_agent.tools.base import STR, STRS, obj
 from research_agent.tools.claims import TEST_TOOL, EVIDENCE_TOOLS, PREDICATE_DOC, PROPOSE_TOOL
@@ -36,7 +39,9 @@ Method:
 2. Use hybrid_search. Read titles and snippets critically — rank position is not relevance.
 3. Use corpus_count to size facets, and find_similar on your best papers to catch what keywords miss.
 4. Add only papers that are on-topic, with a specific reason. Remove any you later judge off-topic.
-5. Before finishing, run coverage_probe with the question's topic and the method families and data types
+5. Run snowball on your 5-10 most central papers: studies they cite, and studies citing them, that are in
+   the corpus but were not found by keywords. Add the relevant ones.
+6. Before finishing, run coverage_probe with the question's topic and the method families and data types
    the question names or implies, plus close alternatives (e.g. transformer OR attention; entomological OR
    mosquito OR vector; satellite OR "remote sensing"). For each under_covered concept, read the examples and
    add the relevant ones. Say in coverage_notes which concepts you probed and what you added.
@@ -48,7 +53,7 @@ Rules:
 - Be efficient: aim to finish within about 6-8 tool rounds. Never repeat a search you have already run;
   several searches can go in one round.
 If the corpus has little on the topic, keep the shortlist small and say so: that is a finding, not a failure.""",
-    tools=SEARCH_TOOLS + SHORTLIST_TOOLS,
+    tools=SEARCH_TOOLS + SHORTLIST_TOOLS + [t for t in CITATION_TOOLS if t.name == "snowball"],
     finish_schema=obj({
         "search_log": {**ARR, "description": "[{query, keywords, useful_results}]"},
         "shortlist_size": {"type": "integer"},
@@ -92,6 +97,9 @@ Use value_counts, cross_tab and list_extractions over the extracted records to d
 Then propose 3-6 checkable claims about prevalence with propose_claim ({PREDICATE_DOC}).
 Put every synonym in any_of. Prefer claims that matter for the research question.
 Report counts exactly as tools return them.
+Papers' reported results are extracted too. Use results_table to see what performance is reported, and
+method_comparison for fair tests of one method family against another (same paper, same data, same metric):
+say how many head-to-heads there are and what they show; never rank methods from numbers across papers.
 The general extraction form under-records some things (attention and transformer layers, entomological or
 vector data, newer data sources). Before you describe any method family or data type as rare or absent, run
 recheck_field on it with its synonyms: papers that mention it get a quoted yes/no check, and confirmed uses
@@ -104,7 +112,7 @@ a number into a claim before you have measured it. Examples:
 - bad: text "Most papers use deep learning" written first, then the test returns 6 of 46.
 - good: test_claim says x5.32; text "In PMC, ML malaria papers rose about 5-fold (x5.3) between 2015-2017
   and 2023-2025". bad: "roughly 9-fold", written before measuring.""",
-    tools=ANALYSIS_TOOLS + [TEST_TOOL, PROPOSE_TOOL, RECHECK_TOOL],
+    tools=ANALYSIS_TOOLS + RESULT_TOOLS + [TEST_TOOL, PROPOSE_TOOL, RECHECK_TOOL],
     finish_schema=obj({
         "method_families": {**ARR, "description": "[{family, members:[...], n_papers, example_ids:[...]}]"},
         "data_landscape": {**STR, "description": "modalities and datasets, with counts"},
@@ -155,6 +163,10 @@ concentration, and limitations authors repeatedly state.
   holds beyond the shortlist.
 - Back every gap with at least one propose_claim ({PREDICATE_DOC}) — often max_share or max_count.
 - Distinguish 'not reported' (field not stated) from 'absent'.
+- Run research_vs_burden: high-burden countries with few studies are a gap of their own (only when burden
+  data has been loaded; otherwise it shows where studies come from).
+- Run contradictions: a driver whose effect papers report in opposite directions is a gap in understanding.
+  Report it with the attributes that separate the two sides as candidate explanations, not conclusions.
 - Before calling a method or data type rare or absent, run recheck_field on it with its synonyms: the general
   extraction form under-records some things, and a re-check turns "mentioned but not recorded" into a count.
 How to write claims: first call test_claim on each candidate predicate (you can test several in one turn),
@@ -165,7 +177,8 @@ a number into a claim before you have measured it. Examples:
 - bad: text "Most papers use deep learning" written first, then the test returns 6 of 46.
 - good: test_claim says x5.32; text "In PMC, ML malaria papers rose about 5-fold (x5.3) between 2015-2017
   and 2023-2025". bad: "roughly 9-fold", written before measuring.""",
-    tools=ANALYSIS_TOOLS + [RECHECK_TOOL] + [t for t in SEARCH_TOOLS if t.name == "corpus_count"]
+    tools=ANALYSIS_TOOLS + [RECHECK_TOOL, BURDEN_TOOL] + [t for t in RESULT_TOOLS if t.name == "contradictions"]
+          + [t for t in SEARCH_TOOLS if t.name == "corpus_count"]
           + [t for t in TREND_TOOLS if t.name == "topic_trend"] + [TEST_TOOL, PROPOSE_TOOL],
     finish_schema=obj({
         "gaps": {**ARR, "description": "[{gap, why_it_matters, claim_ids:[...], confidence:'high'|'medium'|'low', caveats}]"},
@@ -220,6 +233,9 @@ Style:
 - Calibrate claims to the evidence: "indicates", "is consistent with" and "suggests" for single or small
   findings; "is established" only for patterns that are frequent and consistent across sources. Distinguish
   absence of evidence (not reported) from evidence of absence.
+- Reported performance and conflicting findings are in the brief (reported_performance, contradictions). Say
+  what the within-paper comparisons show about which approaches work, and discuss where studies disagree and
+  what might explain it. A table of both is appended by code, so do not reproduce it.
 - Interpret as well as describe: explain what each finding implies for model validity, transferability or
   use in decision-making, and link findings so the report builds one argument rather than a list of facts.
 - State uncertainty explicitly ("this rests on seven preprints and should be treated as provisional").
