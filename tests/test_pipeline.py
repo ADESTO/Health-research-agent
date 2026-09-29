@@ -1774,3 +1774,42 @@ def test_followups_work_on_a_database_from_before_followups(loaded_db):
         with get_conn() as pg:
             assert pg.execute("SELECT to_regclass('followups') AS t").fetchone()["t"] is not None
         assert started.get(f"/runs/{rid}/followups").status_code == 200
+
+
+def test_followup_reads_abstract_only_papers_in_full_and_recounts(loaded_db):
+    from research_agent.agents import followup
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.db import get_conn
+    from research_agent.runstate import RunContext
+
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: FakeLLM())
+    try:
+        c = ctx.pg.execute("""SELECT id, result FROM claims WHERE run_id=%s AND claim_type='prevalence'
+                              AND predicate->'where' IS NULL ORDER BY id LIMIT 1""", (rid,)).fetchone()
+        abstract_before = ctx.pg.execute(
+            """SELECT count(*) n FROM run_papers rp JOIN extractions e USING (paper_id)
+               WHERE rp.run_id=%s AND e.source='abstract'""", (rid,)).fetchone()["n"]
+        out = followup.read_in_full(ctx, f"C{c['id']}", limit=20)
+        # papers whose full text cannot be downloaded here (PMC needs the network) are reported, not fatal
+        assert out["read_in_full_now"] + len(out["no_full_text_available"]) + len(out["failed"]) == \
+            min(abstract_before, 20) and out["read_in_full_now"] > 0
+        abstract_after = ctx.pg.execute(
+            """SELECT count(*) n FROM run_papers rp JOIN extractions e USING (paper_id)
+               WHERE rp.run_id=%s AND e.source='abstract'""", (rid,)).fetchone()["n"]
+        assert abstract_after == abstract_before - out["read_in_full_now"]
+        # the original claim keeps its result; the re-count is a separate follow-up claim
+        orig = ctx.pg.execute("SELECT result FROM claims WHERE id=%s", (c["id"],)).fetchone()["result"]
+        new = ctx.pg.execute("SELECT agent, status, result FROM claims WHERE id=%s",
+                             (int(out["recount_claim"][1:]),)).fetchone()
+        assert orig == c["result"] and new["agent"] == "followup" and new["status"] in ("supported", "unsupported")
+        assert out["after"] == f"{new['result']['n_matching']} of {new['result']['denominator']}"
+        # nothing left to read the second time
+        again = followup.read_in_full(ctx, f"C{c['id']}")
+        assert again.get("note") or again["read_in_full_now"] == 0
+        assert "error" in followup.read_in_full(ctx, "C999999")
+    finally:
+        ctx.close()
+    with get_conn() as pg:
+        assert pg.execute("SELECT report_md IS NOT NULL AS r FROM runs WHERE run_id=%s", (rid,)).fetchone()["r"]

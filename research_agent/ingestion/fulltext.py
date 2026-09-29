@@ -118,8 +118,13 @@ def fetch_fulltext(pg, paper_ids: list[str]) -> dict[str, str]:
         if pmc_ids:
             from research_agent.ingestion import pmc
 
-            have.update(pmc.fetch_fulltext(pg, pmc_ids))
-            todo = [pid for pid in todo if pid not in have]
+            try:
+                have.update(pmc.fetch_fulltext(pg, pmc_ids))
+            except Exception as exc:
+                # NCBI unreachable or refusing: skip these PMC papers for now (they are not marked missing,
+                # so a later call retries them) and still fetch the arXiv ones, which come from local files
+                print(f"PMC full-text download failed, {len(pmc_ids)} papers skipped for now: {str(exc)[:160]}")
+            todo = [pid for pid in todo if pid not in have and pid not in set(pmc_ids)]
     if todo:
         from research_agent.ingestion.load import duck
 

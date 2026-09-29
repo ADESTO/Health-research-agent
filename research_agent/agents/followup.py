@@ -117,11 +117,11 @@ def get_item(ctx, item_id: str) -> dict:
 def read_paper(ctx, paper_id: str, terms: list[str] | None = None, max_chars: int = 12000) -> dict:
     """One analysed paper: its extracted record with quotes, and its text. With `terms`, only the passages
     that mention them; otherwise the most informative sections (methods, data, results, limitations)."""
-    from research_agent.ingestion.fulltext import fetch_fulltext, select_for_reading
+    from research_agent.ingestion.fulltext import select_for_reading
 
     if paper_id not in set(ctx.shortlist_ids()):
         return {"error": f"{paper_id} is not one of the papers analysed in this run"}
-    fetch_fulltext(ctx.pg, [paper_id])
+    fetch_error = _fetch(ctx, [paper_id])
     p = ctx.pg.execute(
         """SELECT p.paper_id, p.title, p.year, p.abstract, p.source, f.clean_text, f.sections FROM papers p
            LEFT JOIN paper_fulltext f ON f.paper_id = p.paper_id AND f.status='ok' WHERE p.paper_id=%s""",
@@ -136,8 +136,101 @@ def read_paper(ctx, paper_id: str, terms: list[str] | None = None, max_chars: in
         else:
             out["full_text_sections"] = select_for_reading(p["sections"] or [], budget=max(2000, min(int(max_chars), 20000)))
     else:
-        out["full_text"] = "not available for this paper; answer from the abstract and extracted record"
+        out["full_text"] = ("could not be retrieved right now (" + fetch_error + "); answer from the abstract"
+                            if fetch_error else "not available for this paper; answer from the abstract and "
+                            "extracted record")
     return out
+
+
+def _fetch(ctx, paper_ids: list[str]) -> str | None:
+    """Download full texts not yet stored (arXiv from the local files, PMC from NCBI). A network problem
+    must not break a follow-up: it is reported, and the papers that did arrive are used."""
+    from research_agent.ingestion.fulltext import fetch_fulltext
+
+    try:
+        fetch_fulltext(ctx.pg, paper_ids)
+        return None
+    except Exception as exc:
+        return f"full-text download failed: {str(exc)[:160]}"
+
+
+MAX_READ_IN_FULL = 20      # papers read in full per request (each is one careful model read)
+
+
+def read_in_full(ctx, claim_id: str, limit: int = 12) -> dict:
+    """Check a count against full texts: read the claim's abstract-only papers in full (papers the count
+    missed first, since that is where under-counting hides), update their records, and count again.
+    The original claim is left as it was; the new count is recorded as a follow-up claim."""
+    from research_agent.config import settings
+    from research_agent.ingestion.fulltext import select_for_reading
+    from research_agent.tools import claims as C
+    from research_agent.tools.extraction import known_fields
+    from research_agent.tools.reading import read_papers
+
+    cid = int(str(claim_id).upper().lstrip("C"))
+    c = ctx.pg.execute("SELECT id, text, claim_type, predicate, status, result FROM claims WHERE run_id=%s AND id=%s",
+                       (ctx.run_id, cid)).fetchone()
+    if not c:
+        return {"error": f"C{cid} is not a claim of this run"}
+    if c["claim_type"] != "prevalence":
+        return {"error": "only counts over the analysed papers can be re-checked with full texts (trends are "
+                         "measured over the whole corpus)"}
+    p = c["predicate"]
+    _, enums = known_fields(ctx)
+    where = p.get("where") or []
+    where = [where] if isinstance(where, dict) else where
+    population = [r for r in C._rows(ctx) if all(C.row_matches(r, w, enums) for w in where)]
+    needles = [C._norm(x) for x in p["any_of"]]
+    exact = p["field"] in enums
+    abstract_only = [r for r in population if r["source"] == "abstract"]
+    missed = [r for r in abstract_only if not C._hits(r, p["field"], needles, exact)]
+    counted = [r for r in abstract_only if r not in missed]
+    todo = (missed + counted)[:max(1, min(int(limit), MAX_READ_IN_FULL))]
+    if not todo:
+        return {"claim": f"C{cid}", "note": "every paper this claim counts over was already read in full",
+                "counted": _counted(c["result"])}
+
+    ids = [r["paper_id"] for r in todo]
+    fetch_error = _fetch(ctx, ids)
+    texts = {r["paper_id"]: select_for_reading(r["sections"] or [], budget=settings.fulltext_read_chars)
+             for r in ctx.pg.execute("SELECT paper_id, sections FROM paper_fulltext WHERE paper_id = ANY(%s) "
+                                     "AND status='ok'", (ids,)).fetchall()}
+    papers = {r["paper_id"]: r for r in ctx.pg.execute(
+        "SELECT paper_id, title, abstract FROM papers WHERE paper_id = ANY(%s)", (ids,)).fetchall()}
+    items = [{**papers[pid], "fulltext": texts[pid]} for pid in ids if texts.get(pid)]
+    before = {r["paper_id"]: bool(C._hits(r, p["field"], needles, exact)) for r in todo}
+    results, failed, model = read_papers(ctx, items, protocol_of(ctx), include_base=True, step="followup_reading")
+    for pid, res in results.items():
+        ctx.pg.execute(
+            "INSERT INTO extractions (paper_id, schema_version, source, data, model) VALUES (%s,%s,%s,%s::jsonb,%s) "
+            "ON CONFLICT (paper_id, schema_version) DO UPDATE SET source=EXCLUDED.source, data=EXCLUDED.data, "
+            "model=EXCLUDED.model, created_at=now()",
+            (pid, ctx.extraction_version, res["source"], json.dumps(res["base"]), model))
+        if res.get("protocol") is not None:
+            ctx.pg.execute(
+                "INSERT INTO protocol_extractions (run_id, paper_id, source, data) VALUES (%s,%s,%s,%s::jsonb) "
+                "ON CONFLICT (run_id, paper_id) DO UPDATE SET source=EXCLUDED.source, data=EXCLUDED.data",
+                (ctx.run_id, pid, res["source"], json.dumps(res["protocol"])))
+    after_rows = {r["paper_id"]: r for r in C._rows(ctx)}
+    changed = [{"paper_id": pid, "title": papers[pid]["title"],
+                "now_counted": bool(C._hits(after_rows[pid], p["field"], needles, exact)),
+                "quotes": (after_rows[pid]["data"].get("evidence") or {}).get(p["field"], [])[:2]}
+               for pid in results if pid in after_rows
+               and bool(C._hits(after_rows[pid], p["field"], needles, exact)) != before[pid]]
+    # the re-count is a new claim, so the report's evidence table keeps the original result
+    new = ctx.pg.execute(
+        "INSERT INTO claims (run_id, agent, text, claim_type, predicate) VALUES (%s,'followup',%s,'prevalence',%s::jsonb) "
+        "RETURNING id", (ctx.run_id, f"C{cid} re-counted after {len(results)} more of its papers were read in full.",
+                         json.dumps(p))).fetchone()["id"]
+    verify_claims(ctx, [new])
+    row = ctx.pg.execute("SELECT status, result FROM claims WHERE id=%s", (new,)).fetchone()
+    return {"claim": f"C{cid}", "before": _counted(c["result"]), "after": _counted(row["result"]),
+            "recount_claim": f"C{new}", "recount_status": row["status"],
+            "read_in_full_now": len(results), "no_full_text_available": [pid for pid in ids if not texts.get(pid)],
+            "failed": failed, "papers_that_changed": changed,
+            **({"fetch_problem": fetch_error} if fetch_error else {}),
+            "still_abstract_only": max(0, len(abstract_only) - len(results)),
+            "note": "Records of papers read in full are updated for this run and later runs."}
 
 
 def add_claim(ctx, text: str, claim_type: str, predicate: dict) -> dict:
@@ -161,6 +254,12 @@ READ_TOOL = Tool("read_paper", "Read one analysed paper: its extracted record wi
                  "terms to get only the passages that mention them.",
                  obj({"paper_id": STR, "terms": STRS, "max_chars": INT}, ["paper_id"]), read_paper, read_only=True,
                  max_chars=16000)
+READ_IN_FULL_TOOL = Tool(
+    "read_in_full", "Check a claim against full texts: read its abstract-only papers in full (papers the count "
+    "missed first), update their records, and count again. Returns the count before and after, the papers whose "
+    "status changed with quotes, and a new claim id for the re-count. Costs one careful read per paper; "
+    f"at most {MAX_READ_IN_FULL} per call.",
+    obj({"claim_id": STR, "limit": INT}, ["claim_id"]), read_in_full)
 ADD_CLAIM_TOOL = Tool("add_claim", "Count something new and record it as a claim, verified immediately. Use "
                       "test_claim first, then write the text from the measured numbers. Predicate formats: "
                       + PREDICATE_DOC + ".",
@@ -185,7 +284,11 @@ its results: a claim, a gap, a paper, a number or a what-if. Answer from the run
 How to work:
 - Start with get_item for any id the question names (C12, G2, N1, H4, D1), or run_overview to orient.
 - To show which papers are behind a count, use get_item on the claim; to check what a paper says, read_paper
-  (with terms, to jump to the passages).
+  (with terms, to jump to the passages). read_paper also opens the full text of papers the run only read from
+  their abstract.
+- When a researcher doubts a count, or many of its papers were read from abstracts only ('read': 'abstract'
+  in get_item), use read_in_full on the claim: it reads those papers in full and counts again. Report the
+  count before and after, cite the re-count claim, and name papers whose status changed with their quotes.
 - For a new count or a what-if ("does it hold in PMC only?", "what if LSTMs count as deep learning?"), use
   test_claim, then add_claim with text written from the measured numbers, and cite it. Use `where` for
   subgroups. Before calling something rare, run recheck_field.
@@ -200,7 +303,7 @@ FOLLOWUP = FollowupAgent(
     name="followup",
     role="Answers a researcher's follow-up questions about a finished run.",
     system=FOLLOWUP_SYSTEM,
-    tools=[OVERVIEW_TOOL, ITEM_TOOL, READ_TOOL, TEST_TOOL, ADD_CLAIM_TOOL, RECHECK_TOOL]
+    tools=[OVERVIEW_TOOL, ITEM_TOOL, READ_TOOL, READ_IN_FULL_TOOL, TEST_TOOL, ADD_CLAIM_TOOL, RECHECK_TOOL]
     + [t for t in ANALYSIS_TOOLS if t.name in ("value_counts", "cross_tab", "list_extractions")],
     finish_schema=obj({"answer": {**STR, "description": "The answer in Markdown, with citations"}}, ["answer"]),
     max_turns=12,
