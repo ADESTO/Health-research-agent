@@ -152,12 +152,39 @@ def main(argv: list[str] | None = None) -> int:
     p_dr.add_argument("--type", "-t", choices=["proposal", "review"], default="proposal", dest="kind")
     p_dr.add_argument("--direction", "-d", default="", help="the gap or direction to argue for, in your words")
     p_dr.add_argument("--about", default="", help="map items it builds on, e.g. G2 or G2,D1")
+    p_dr.add_argument("--style", choices=["author-year", "numbered"], default="author-year",
+                      help="citation style: author-year (Smith et al., 2021) or numbered (Vancouver)")
     p_dr.add_argument("--directions", action="store_true", help="list the run's gaps and directions, then exit")
     p_dr.add_argument("--list", action="store_true", help="list the run's drafts, then exit")
     p_dr.add_argument("--export", metavar="DRAFT_ID", type=int, help="export an existing draft instead")
     p_dr.add_argument("--format", "-f", default="docx", choices=["md", "docx", "html", "bib", "ris"])
     p_dr.add_argument("--out", "-o", help="file to write")
     p_dr.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
+    p_rs = sub.add_parser("research", help="an open-ended researcher working on a finished run")
+    rs = p_rs.add_subparsers(dest="rcmd", required=True)
+    r_start = rs.add_parser("start", help="start a researcher (its cycles run on the worker)")
+    r_start.add_argument("run_id")
+    r_start.add_argument("--goal", "-g", required=True)
+    r_start.add_argument("--scope", default="")
+    r_start.add_argument("--out-of-bounds", default="", help="comma-separated topics it must not pursue")
+    r_start.add_argument("--max-cycles", type=int, default=20)
+    r_start.add_argument("--daily-tokens", type=int, default=2_000_000)
+    r_start.add_argument("--total-tokens", type=int, default=10_000_000)
+    r_start.add_argument("--split", choices=["random", "year"], default="random")
+    r_start.add_argument("--split-year", type=int)
+    r_start.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
+    r_start.add_argument("--here", action="store_true", help="run the cycles in this terminal instead of the worker")
+    r_cyc = rs.add_parser("cycle", help="run cycles now, in this terminal")
+    r_cyc.add_argument("researcher_id", type=int)
+    r_cyc.add_argument("-n", type=int, default=1)
+    r_st = rs.add_parser("status", help="agenda, findings and notebook")
+    r_st.add_argument("researcher_id", type=int)
+    for name in ("pause", "resume", "stop"):
+        rs.add_parser(name).add_argument("researcher_id", type=int)
+    r_ap = rs.add_parser("approve", help="approve (or --decline) a question waiting for approval")
+    r_ap.add_argument("researcher_id", type=int)
+    r_ap.add_argument("agenda_id", type=int)
+    r_ap.add_argument("--decline", action="store_true")
     p_w = sub.add_parser("worker", help="work the job queue (runs, maps, follow-ups started from the web page)")
     p_w.add_argument("--concurrency", "-c", type=int, default=1)
     sub.add_parser("burden-fetch", help="download WHO estimates of malaria cases and deaths by country")
@@ -262,6 +289,8 @@ def main(argv: list[str] | None = None) -> int:
         return chat(args.run_id, args.question, args.about, args.provider)
     elif args.cmd == "draft":
         return draft_cmd(args, ap)
+    elif args.cmd == "research":
+        return research_cmd(args)
     elif args.cmd == "worker":
         import threading as _t
 
@@ -368,7 +397,7 @@ def draft_cmd(args, ap) -> int:
     if not args.direction and not about:
         print("Tip: --direction \"...\" or --about G2 says what the draft should argue for; "
               "without it the draft builds on the run's main gap.")
-    did = draft.start(args.run_id, args.kind, args.direction, about)
+    did = draft.start(args.run_id, args.kind, args.direction, about, args.style)
     print(f"Drafting {args.kind} #{did} (planning, then one section at a time; this takes a few minutes)...")
     try:
         out = draft.run_draft(did, provider=args.provider)
@@ -376,12 +405,72 @@ def draft_cmd(args, ap) -> int:
         print(f"\n✖ Draft failed: {exc}"); return 1
     a = out["meta"]["audit"]
     print(f"\n{out['content_md']}\n")
-    print(f"draft #{did}: {len(out['meta']['cited_papers'])} papers cited, "
+    print(f"draft #{did}: {len(out['meta']['cited_in_text'])} studies cited in the text "
+          f"({len(out['meta']['cited_papers'])} in the references), "
           f"{len(out['meta']['new_claims'])} new counts, {a['unverified_numbers']} numbers marked [unverified], "
           f"{len(a['removed_paper_citations'])} citations removed")
     data, name, _ = export_draft(did, args.format)
     Path(args.out or name).write_bytes(data)
     print(f"saved {args.out or name}")
+    return 0
+
+
+def research_cmd(args) -> int:
+    from research_agent.research import researcher as R
+
+    if args.rcmd == "start":
+        kw = dict(scope=args.scope, out_of_bounds=[x for x in args.out_of_bounds.split(",") if x.strip()],
+                  max_cycles=args.max_cycles, daily_tokens=args.daily_tokens, total_tokens=args.total_tokens,
+                  split=args.split, split_year=args.split_year, provider=args.provider)
+        if args.here:
+            rid = R.create(args.run_id, args.goal, **kw)
+            print(f"researcher #{rid} started; running its cycles here (Ctrl+C to stop, it can be resumed)")
+            return _research_loop(rid, args.max_cycles)
+        out = R.start_in_background(args.run_id, args.goal, **kw)
+        print(f"researcher #{out['researcher_id']} started; its cycles run on the worker "
+              "(python -m research_agent.cli worker). Follow it with: research status "
+              f"{out['researcher_id']}")
+        return 0
+    if args.rcmd == "cycle":
+        return _research_loop(args.researcher_id, args.n)
+    if args.rcmd in ("pause", "resume", "stop"):
+        R.set_status(args.researcher_id, {"pause": "paused", "resume": "active", "stop": "stopped"}[args.rcmd],
+                     f"{args.rcmd}d from the terminal")
+        print(f"researcher #{args.researcher_id}: {args.rcmd}d")
+        return 0
+    if args.rcmd == "approve":
+        R.decide_question(args.researcher_id, args.agenda_id, not args.decline)
+        print("declined" if args.decline else "approved")
+        return 0
+    g = R.get(args.researcher_id)
+    if not g:
+        print("no such researcher"); return 1
+    r = g["researcher"]
+    print(f"#{r['id']} {r['status']}{' (' + r['status_note'] + ')' if r['status_note'] else ''}  "
+          f"cycles {r['cycles_done']}/{r['max_cycles']}  tokens {r['tokens_used']:,}/{r['total_tokens']:,}  "
+          f"today {g['tokens_today']:,}/{r['daily_tokens']:,}  patterns tested {g['tests']}")
+    print(f"goal: {r['charter']['goal']}\n\nAgenda:")
+    for a in g["agenda"]:
+        print(f"  [{a['status']:<14}] Q{a['id']} {a['question']}" + (f"  ({a['status_note']})" if a['status_note'] else ""))
+    print("\nFindings (the researcher's own; graded by code):")
+    for f in g["findings"]:
+        print(f"  [{f['grade']:<11}] F{f['id']} {f['statement']}")
+        for reason in (f["reasons"] or [])[:4]:
+            print(f"      - {reason}")
+    return 0
+
+
+def _research_loop(rid: int, n: int) -> int:
+    from research_agent.research import researcher as R
+
+    for _ in range(max(1, n)):
+        try:
+            out = R.run_cycle(rid)
+        except KeyboardInterrupt:
+            print("stopped; resume with: research cycle", rid); return 1
+        print(json.dumps(out, default=str))
+        if any(k in out for k in ("skipped", "finished", "paused", "waiting")):
+            break
     return 0
 
 

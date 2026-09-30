@@ -28,11 +28,12 @@ RETRY_DELAY_SECONDS = 30
 _llm_factory = None        # tests plug a fake model in here
 
 
-def enqueue(kind: str, payload: dict, max_attempts: int = 2) -> int:
+def enqueue(kind: str, payload: dict, max_attempts: int = 2, delay_seconds: int = 0) -> int:
     conn = connect()
     try:
-        return conn.execute("INSERT INTO jobs (kind, payload, max_attempts) VALUES (%s,%s::jsonb,%s) RETURNING id",
-                            (kind, json.dumps(payload), max_attempts)).fetchone()["id"]
+        return conn.execute(
+            "INSERT INTO jobs (kind, payload, max_attempts, run_at) VALUES (%s,%s::jsonb,%s, now() + %s * interval '1 second') "
+            "RETURNING id", (kind, json.dumps(payload), max_attempts, int(delay_seconds))).fetchone()["id"]
     finally:
         conn.close()
 
@@ -68,9 +69,16 @@ def _mark_failed(conn, kind: str, payload: dict, error: str) -> None:
     elif kind == "followup":
         conn.execute("UPDATE followups SET status='failed', content=%s WHERE id=%s",
                      (f"The follow-up failed: {error[:300]}", payload["answer_id"]))
+    elif kind == "research_cycle":
+        from research_agent.research import researcher
+
+        researcher.run_cycle(payload["researcher_id"], llm_factory=factory, schedule_next=True)
     elif kind == "draft":
         conn.execute("UPDATE drafts SET status='failed', content_md=%s, finished_at=now() WHERE id=%s",
                      (f"The draft failed: {error[:300]}", payload["draft_id"]))
+    elif kind == "research_cycle":
+        conn.execute("UPDATE researchers SET status='paused', status_note=%s, updated_at=now() WHERE id=%s",
+                     (f"a cycle failed: {error[:300]}", payload["researcher_id"]))
 
 
 def execute(kind: str, payload: dict, attempt: int) -> None:
@@ -97,6 +105,10 @@ def execute(kind: str, payload: dict, attempt: int) -> None:
 
         followup.answer(payload["run_id"], payload["question"], payload.get("focus"), provider=payload.get("provider"),
                         llm_factory=factory, answer_id=payload["answer_id"])
+    elif kind == "research_cycle":
+        from research_agent.research import researcher
+
+        researcher.run_cycle(payload["researcher_id"], llm_factory=factory, schedule_next=True)
     elif kind == "draft":
         from research_agent.agents import draft
 

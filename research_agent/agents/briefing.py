@@ -25,7 +25,7 @@ def brief(ctx, for_agent: str | None = None, note_chars: int = 2500) -> str:
             f"{f['name']} ({'values: ' + ', '.join(f['values']) if f.get('values') else 'free text'}): "
             f"{f.get('definition', '')[:160]}" for f in protocol["fields"]))
     for agent, content in notes.items():
-        if agent in (for_agent, "orchestrator", "synthesis", "protocol", "fulltext_index", "number_check"):
+        if agent in (for_agent, "orchestrator", "synthesis", "protocol", "fulltext_index", "number_check", "mode", "usage"):
             continue
         text = json.dumps(content, ensure_ascii=False, default=str)
         if len(text) > note_chars:

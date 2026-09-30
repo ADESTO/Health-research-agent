@@ -40,6 +40,12 @@ def _ensure_schema() -> None:
 
         init_schema()
         _schema_ready = True
+
+
+def schema_is_ready() -> None:
+    """The web server sets up the schema at start-up; requests then need not do it again."""
+    global _schema_ready
+    _schema_ready = True
 MAP_PREFIXES = ("E", "R", "W", "G", "N", "H", "D")
 
 
@@ -329,8 +335,12 @@ def audit_answer(ctx, text: str) -> tuple[str, dict]:
     for cid in bad_claims:
         text = text.replace(f"[C{cid}]", f"[C{cid}, not verified]")
     text, unverified = audit_numbers(text, allowed_counts(ctx, claims))
+    from research_agent.tools.citing import check_attributions
+
+    text, attributions = check_attributions(ctx.pg, text)   # places, methods and numbers credited to a paper
     return text, {"removed_paper_citations": bad_papers, "flagged_claim_citations": bad_claims,
-                  "unverified_numbers": unverified, "claim_citation_fixes": fixes}
+                  "unverified_numbers": unverified, "unverified_attributions": attributions,
+                  "claim_citation_fixes": fixes}
 
 
 def history(run_id: str, limit: int = 50) -> list[dict]:

@@ -128,6 +128,25 @@ python -m research_agent.cli export <run_id> -f docx     # md, docx, html, bib, 
 ```
 The web page has the same list under the report (Export).
 
+### Map of a run: graph view and mind map
+
+The web page opens a finished run in tabs: Report, Map, Ask (follow-ups) and Draft. The Map tab draws the run two
+ways, built from the database with no model calls:
+
+- **Graph** (like Obsidian's graph view) answers "how is this literature connected?": papers, the concepts they
+  share (methods, data, settings, design), claims, gaps (drawn as rings), designs and disputed drivers. Drag,
+  pan, zoom, search and filter; citations between papers are dashed links.
+- **Mind map** answers "what does it contain, what supports it, where does it disagree, where are the gaps?".
+  Sections: Methods, Data, Study settings, Forecast (or study) design, Evidence, Research gaps. Concepts show
+  "3/12 papers"; each opens into its papers, and each paper into its setting, design and data. A gap opens into
+  its evidence, how the papers are distributed on that point, and the designs that address it; a claim into the
+  papers counted and not counted. It opens at the overview with the gaps expanded; "Show" steps to concepts,
+  papers or everything. On a phone it becomes an indented outline.
+
+The detail panel beside both views can compare papers side by side (differences stand out), show the quoted
+evidence for a concept, ask a follow-up about an item, or start a proposal draft on a gap. The data is at
+`GET /runs/<run_id>/graph`.
+
 ### Drafts: research proposals and review manuscripts
 
 A finished run (report or map) can be turned into a first draft:
@@ -138,6 +157,25 @@ A finished run (report or map) can be turned into a first draft:
 - **Review manuscript**: the run written up as a literature review: structured abstract, introduction,
   methods (from the review record), results with the PRISMA flow as Figure 1 and the computed tables, discussion
   and conclusions. It states that screening and extraction were automated.
+
+Drafts cite the studies themselves, not only counts: each statement about the literature names the studies it
+rests on and what they did or found (setting, method, data, reported results, from their verified records), a
+section that cites too few studies is rewritten once, and a number attributed to a study must appear in that
+study's own text or it is marked [unverified]. Citations are rendered for readers outside the tool, author-year
+("Okello et al., 2021") or numbered (Vancouver), with a full reference list; Appendix A lists every count with
+the studies it covers. Choose the style with `--style` or on the web page.
+
+Checks on what is credited to a study, in reports, follow-up answers and drafts: places (countries, their
+adjectives, known regions and cities) and method families named in a clause must appear in the study that clause
+cites, and decimals or percentages must appear in the cited study's own text; anything else is marked
+[unverified]. Counts written in words ("two of 39", "12 of the 49") are checked like digits. A count that comes out
+rare triggers a re-check of the studies' own text even when the claim did not say "rare", and counting test
+designs in the metric-names field (or covariates in the datasets field) is refused. Trends over PMC papers carry a
+caveat (the PMC part of the corpus is topic slices) and are not contrasted with arXiv. When fewer than a quarter
+of the studies were read in full, reports and drafts say so at the top.
+
+Each run records the extraction schema version it was read with, so opening an older run after a schema change
+(follow-ups, the map, drafts, exports) uses its own records instead of looking under the new version.
 
 A planner agent first counts what the argument needs (new claims, verified by code), then each section is
 written in its own call and the whole draft goes through the report's checks: untraced numbers are measured,
@@ -153,6 +191,41 @@ python -m research_agent.cli draft --export <draft_id> -f bib             # md, 
 ```
 On the web page, the Draft panel sits under the follow-up questions. A draft costs about as much as writing
 a report: one planning pass and one call per section, sharing a cached evidence pack.
+
+### Open-ended researcher
+
+A researcher works on a finished run or map on its own initiative, within a charter you set (goal, scope, what is
+out of bounds). It keeps an agenda of questions and a notebook, works one question per cycle in the background,
+and proposes patterns as specs code can count (a difference between groups, what goes with what, what is rare,
+which method wins within the same papers, a change over time). It chooses the questions; code decides what counts.
+
+Judgment, enforced by code:
+- it sees only a **discovery half** of the studies; a finding must replicate on the **hidden half**, at a threshold
+  that tightens with every finding it proposes (it learns the verdict, never the hidden counts);
+- **subgroup tests** run automatically (corpus, read depth, period, leading places);
+- a **trap library** catches known artifacts: field misfit, absence in abstracts, PMC topic slices, small cells,
+  overlapping groups, groups from different places, text that contradicts a rarity count;
+- a separate **critic** proposes rival explanations as testable specs; confounders are tested with a
+  Mantel-Haenszel adjusted analysis;
+- the **grade is computed** (strong, moderate, provisional, rejected) from those results. Findings are labelled as
+  the researcher's own hypotheses and never enter a report.
+
+Drift, prevented by code: the charter is re-read every cycle; new questions must hang under existing ones;
+duplicates are refused; questions far from the charter (embedding similarity below `RESEARCH_SCOPE_MIN`) or
+touching what is out of bounds wait for your approval; re-running a tested pattern returns the notebook's result;
+a question that stalls or uses its cycles is parked; a supervisor reviews the agenda every few cycles; token
+budgets per day and in total, a cycle limit, and pause / stop at any time.
+
+```bash
+python -m research_agent.cli research start <run_id> -g "Find under-explored directions in how malaria forecasts are validated" \
+    --scope "forecast design, data, validation" --out-of-bounds "clinical treatment" --max-cycles 20
+python -m research_agent.cli research status <researcher_id>
+python -m research_agent.cli research approve <researcher_id> <question_id>     # or --decline
+python -m research_agent.cli research pause|resume|stop <researcher_id>
+```
+Its cycles run on the job worker (the web server runs one; or `python -m research_agent.cli worker`). On the web
+page, the Research tab of a run starts one and shows its agenda, notebook and findings with their evidence trail.
+It does not run code of its own yet (no sandbox): it works with counts, tests and reading.
 
 ### Model routing
 

@@ -170,7 +170,8 @@ class FakeLLM:
                           ("Trend agent", "trends"), ("Research Gap agent", "gaps"),
                           ("Evidence agent", "evidence"), ("Synthesis agent", "synthesis"),
                           ("Number Check agent", "number_check"), ("Follow-up agent", "followup"),
-                          ("Draft Planner agent", "draft_plan")):
+                          ("Draft Planner agent", "draft_plan"), ("Research Supervisor agent", "research_supervisor"),
+                          ("Critic agent", "critic"), ("Researcher agent", "researcher")):
             if key in system:
                 return name
         raise AssertionError("unknown agent prompt")
@@ -332,6 +333,55 @@ class FakeLLM:
                       sections=[{"key": "gap", "points": ["external validation is rare"], "claims": [cid]}],
                       caveats=["small evidence base"])]
 
+    # ------------------------------------------------------------------ open-ended researcher
+    def _researcher(self, step, last, messages):
+        """Seeds an agenda (one question out of bounds), or tests a pattern, re-tests it (the notebook must
+        return the earlier result), proposes it as a finding and adds a sub-question."""
+        first = messages[0]["content"][0]["text"]
+        if "The agenda is empty" in first:
+            plan = [[_call("research_overview")],
+                    [_call("add_question", question="Which forecasting methods are used in studies from Malawi?",
+                           why="methods by setting", priority=80),
+                     _call("add_question", question="How is external validation reported across forecasting studies?",
+                           why="validation practice", priority=60),
+                     _call("add_question", question="How should clinical treatment doses be adjusted for children?",
+                           why="off the charter", priority=40)],
+                    [_call("finish", progress="some", summary="agenda seeded")]]
+            return plan[min(step, len(plan) - 1)]
+        spec = {"kind": "difference", "outcome": [{"field": "methods", "any_of": ["random forest"]}],
+                "group_a": [{"field": "geography", "any_of": ["Malawi"]}]}
+        if step == 0:
+            return [_call("research_overview")]
+        if step == 1:
+            return [_call("test_pattern", spec=spec, description="random forest in Malawi vs elsewhere")]
+        if step == 2:
+            self._test_id = last[0].get("test_id")
+            return [_call("test_pattern", spec=spec)]
+        if step == 3:
+            self._repeat = last[0]
+            return [_call("propose_finding", test_id=self._test_id,
+                          statement="Random forest studies cluster in Malawi more than in other settings.")]
+        if step == 4:
+            self._verdict = last[0]
+            return [_call("add_question", question="Do the Malawi random forest studies share their data sources?",
+                          why="follow the cluster")]
+        return [_call("finish", progress="some", summary="tested one pattern", next_step="check data sources")]
+
+    def _critic(self, step, last, messages):
+        return [_call("finish", alternatives=[
+            {"explanation": "The corpus could explain it.", "kind": "stratify", "field": "corpus", "any_of": ["arxiv"]},
+            {"explanation": "A looser definition of the method.", "kind": "redefine", "side": "outcome",
+             "any_of": ["forest"]}])]
+
+    def _research_supervisor(self, step, last, messages):
+        if step == 0:
+            return [_call("research_overview")]
+        if step == 1:
+            open_items = [a for a in last[0]["agenda"] if a["status"] == "open"]
+            return [_call("set_priority", agenda_id=open_items[-1]["id"], priority=95)] if open_items else \
+                [_call("finish", assessment="nothing open", keep_going=True)]
+        return [_call("finish", assessment="on charter; keep going", keep_going=True)]
+
     def _draft_section(self, blocks) -> str:
         """Writes a section from the pack: one real claim and paper, plus an invented paper id, an untraced
         number and an em dash, which the checks must catch."""
@@ -339,11 +389,13 @@ class FakeLLM:
         supported = [c["claim"] for c in pack["claims"] if c["status"] == "supported"]
         paper = pack["papers"][0]["id"]
         cite = f"[arXiv:{paper}]" if not paper.startswith("PMC") else f"[{paper}]"
-        task = blocks[-1]["text"]
+        task = next(b["text"] for b in reversed(blocks) if b["text"].startswith("Write the section"))
         heading = re.search(r'section "([^"]+)"', task).group(1)
+        second = pack["papers"][1]["id"] if len(pack["papers"]) > 1 else paper
         return (f"## {heading}\n\nMalaria forecasting draws on climate data {cite} — a common design. "
                 f"The key count is cited [{supported[-1]}]. A further study [arXiv:0000.00000] reports 7 of 9 "
-                f"sites. We will use [to be confirmed: number of districts] districts.")
+                f"sites, and another (arXiv:{second}) reported an error of 9.99 on its holdout. "
+                f"We will use [to be confirmed: number of districts] districts.")
 
     def _number_check(self, step, last, messages):
         """Measures the first untraced number with a claim, drops the second, keeps the rest."""

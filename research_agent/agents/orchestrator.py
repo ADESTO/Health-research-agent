@@ -213,6 +213,7 @@ def run_research(question: str | None = None, mode: str = "orchestrated", provid
     if on_event:
         on_event("system", "run", {"run_id": ctx.run_id, "resumed": bool(resume)})
     try:
+        ctx.save_note("mode", {"mode": mode})
         if settings.ask_protocol:
             # Question-specific fields: the general extraction form cannot anticipate every concept a
             # question turns on (vector data, attention models...). A failed protocol never stops the run.

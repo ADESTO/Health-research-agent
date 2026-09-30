@@ -57,6 +57,7 @@ class RunContext:
     on_event: Callable[[str, str, dict], None] | None = None
     clients: list = field(default_factory=list)   # every LLM client created in this run (for token totals)
     _llm: LLMClient | None = field(default=None, repr=False)
+    _ev: str | None = field(default=None, repr=False)   # extraction schema version this run was read with
 
     def __post_init__(self):
         if self.llm_factory is not None and not getattr(self.llm_factory, "_routed", False):
@@ -86,6 +87,7 @@ class RunContext:
             (ctx.run_id, question, llm.provider, llm.model),
         )
         ctx._prepare_session()
+        ctx._pin_version()
         return ctx
 
     @classmethod
@@ -104,6 +106,7 @@ class RunContext:
         ctx = cls(run_id=run_id, question=row["question"], llm_factory=factory, pg=pg, on_event=on_event,
                   clients=clients)
         ctx._prepare_session()
+        ctx._pin_version()
         return ctx
 
     @classmethod
@@ -122,8 +125,30 @@ class RunContext:
     def child(self) -> "RunContext":
         """Same run, separate DB connection + LLM client — lets sub-agents run in parallel threads."""
         c = RunContext(self.run_id, self.question, self.llm_factory, connect(), self.on_event, self.clients)
+        c._ev = self._ev
         c._prepare_session()
         return c
+
+    def _pin_version(self) -> None:
+        """Every run keeps the extraction schema version it was read with. A run opened later (follow-ups, map,
+        drafts, exports, resume) must read the same records, not look for them under a newer version that a
+        schema change introduced. Runs from before this was recorded get the version that covers most of their
+        papers (ties go to the version with more full-text reads, then to the current one)."""
+        try:
+            row = self.pg.execute("SELECT extraction_version FROM runs WHERE run_id=%s", (self.run_id,)).fetchone()
+        except Exception:        # a database from before the column: the current version, as before
+            self._ev = settings.extraction_schema_version
+            return
+        version = row["extraction_version"] if row else None
+        if not version:
+            current = settings.extraction_schema_version
+            rows = self.pg.execute(
+                """SELECT e.schema_version v, count(*) n, sum((e.source = 'fulltext')::int) ft
+                   FROM run_papers rp JOIN extractions e USING (paper_id) WHERE rp.run_id=%s GROUP BY 1""",
+                (self.run_id,)).fetchall()
+            version = max(rows, key=lambda r: (r["n"], r["ft"], r["v"] == current))["v"] if rows else current
+            self.pg.execute("UPDATE runs SET extraction_version=%s WHERE run_id=%s", (version, self.run_id))
+        self._ev = version
 
     def _prepare_session(self) -> None:
         # HNSW + WHERE filters: widen the candidate pool, and on pgvector >= 0.8 keep scanning
@@ -211,4 +236,4 @@ class RunContext:
 
     @property
     def extraction_version(self) -> str:
-        return settings.extraction_schema_version
+        return self._ev or settings.extraction_schema_version

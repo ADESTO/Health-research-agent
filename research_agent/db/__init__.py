@@ -33,7 +33,17 @@ def get_conn(url: str | None = None) -> Iterator[psycopg.Connection]:
         conn.close()
 
 
+_SCHEMA_LOCK = __import__("threading").Lock()
+_SCHEMA_KEY = 7423011        # one Postgres advisory lock: the server, workers and CLI never set up at the same time
+
+
 def init_schema(url: str | None = None, dim: int | None = None) -> None:
+    """Create or upgrade tables and indexes. Serialised within this process and across processes, because
+    concurrent DDL on the same tables can deadlock (several web requests arriving together, a worker starting)."""
     sql = SCHEMA_PATH.read_text().replace("{dim}", str(dim or settings.embedding_dim))
-    with psycopg.connect(url or settings.database_url, autocommit=True) as conn:
-        conn.execute(sql)
+    with _SCHEMA_LOCK, psycopg.connect(url or settings.database_url, autocommit=True) as conn:
+        conn.execute("SELECT pg_advisory_lock(%s)", (_SCHEMA_KEY,))
+        try:
+            conn.execute(sql)
+        finally:
+            conn.execute("SELECT pg_advisory_unlock(%s)", (_SCHEMA_KEY,))

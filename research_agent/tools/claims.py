@@ -47,6 +47,29 @@ def _validate_where(p: dict, lists: list[str], enums: dict) -> str | None:
     return None
 
 
+# Some concepts are never recorded in some fields, so counting them there measures the form, not the papers.
+# evaluation_metrics holds metric names (RMSE, AUC); how a model was tested lives in validation_level or a
+# question-specific field. datasets holds named datasets, not the covariates a model uses.
+_MISFIT = {
+    "evaluation_metrics": (re.compile(r"cross[- ]?valid|out[- ]of[- ]sample|hold[- ]?out|test (set|period|data)|"
+                                      r"train(ing)?[- /]test|split|spatial|temporal|external|prospective|"
+                                      r"leave[- ]one|rolling|backtest|walk[- ]forward", re.I),
+                           "evaluation_metrics lists metric names such as RMSE or AUC; how a model was tested is "
+                           "not recorded there. Use validation_level or a question-specific field, or read the "
+                           "papers (read_paper) before claiming a test design is rare."),
+    "datasets": (re.compile(r"ndvi|evi\b|rainfall|precipitation|temperature|humidity|vegetation|covariate", re.I),
+                 "datasets lists named datasets, not the covariates a model uses. Count covariates in "
+                 "data_modalities or a question-specific field, or re-check with recheck_field."),
+}
+
+
+def field_misfit(field: str, any_of) -> str | None:
+    rule = _MISFIT.get(field)
+    if rule and any(rule[0].search(str(x)) for x in any_of or []):
+        return rule[1]
+    return None
+
+
 def _validate(claim_type: str, p: dict, ctx=None) -> str | None:
     if claim_type == "prevalence":
         lists, enums = known_fields(ctx) if ctx is not None else (LIST_FIELDS, ENUM_FIELDS)
@@ -58,6 +81,9 @@ def _validate(claim_type: str, p: dict, ctx=None) -> str | None:
             return "over must be 'all' or 'stated'"
         if all(p.get(k) is None for k in ("min_share", "max_share", "min_count", "max_count")):
             return "give at least one bound (min_share/max_share/min_count/max_count) so the claim is testable"
+        misfit = field_misfit(p["field"], p["any_of"])
+        if misfit:
+            return misfit
         return _validate_where(p, lists, enums)
     if claim_type == "trend":
         for k in ("keywords", "early", "late", "direction"):
@@ -378,7 +404,9 @@ def _absence_problem(ctx, p: dict, rows: list[dict], n: int, denom: int, exact: 
     """'0 of 100 list bed nets as a data source' can be an artifact: the extraction field may simply not
     record that kind of thing. For a rarity claim on a free-text field, count how many of the same papers
     mention the terms in their title or abstract; if many do, absence is not established."""
-    if exact or not rows or not _asserts_rarity(p, denom):
+    # a count that comes out rare is checked even when the claim's wording did not assert rarity
+    # ("a minority use NDVI" measured at 0 of 49 reads as absence in any report that quotes it)
+    if exact or not rows or not (_asserts_rarity(p, denom) or (denom and n / denom <= 0.1)):
         return None
     from research_agent.tools.recheck import _terms, mentioning, verdicts
 
@@ -416,9 +444,19 @@ def evaluate_trend(ctx, p: dict) -> dict:
     else:
         ok = ratio >= min_ratio if p["direction"] == "increase" else ratio <= 1 / min_ratio
     total = sum(s["matching"] for s in series)
+    src = (p.get("source") or "all").lower()
+    caveats = [] if total >= 10 else ["fewer than 10 matching papers, too few to call a trend"]
+    if src in ("pmc", "all") and not within:
+        caveats.append(PMC_TREND_CAVEAT)
     return {"supported": ok and total >= 10, "window": w, "min_ratio": min_ratio, "total_matching_papers": total,
-            "source": (p.get("source") or "all").lower(), "within": within,
-            "caveat": "" if total >= 10 else "fewer than 10 matching papers — too few to call a trend"}
+            "source": src, "within": within, "caveat": "; ".join(caveats)}
+
+
+# The PMC part of the corpus is made of topic slices chosen when it was loaded (e.g. malaria), so the share of
+# PMC papers on a topic tracks what was loaded, not the published literature. arXiv is loaded whole.
+PMC_TREND_CAVEAT = ("PMC papers in this corpus were loaded as topic slices, so their shares over time reflect what "
+                    "was loaded rather than the published literature; do not compare them with arXiv trends or "
+                    "present them as field-wide")
 
 
 _WORDING = [  # (pattern, test on the observed share, what the words promise)

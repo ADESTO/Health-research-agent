@@ -16,7 +16,7 @@ CHEAP_STEPS = {"extraction", "protocol_fields", "recheck", "followup_reading", "
                "literature", "evidence"}
 # Judgement and writing: worth a stronger model.
 STRONG_STEPS = {"synthesis", "orchestrator", "gap_reasoning", "design", "followup", "contradictions",
-                "draft_plan", "draft"}
+                "draft_plan", "draft", "research", "critic", "research_supervisor"}
 
 
 def parse_routes(text: str) -> dict[str, tuple[str, str]]:

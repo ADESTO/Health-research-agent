@@ -34,6 +34,7 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
         ctx = RunContext.create(question, provider=provider, llm_factory=llm_factory, on_event=on_event,
                                 run_id=run_id)
     question = ctx.question
+    ctx.save_note("mode", {"mode": "map"})       # lets the web page label the run before the map exists
     if on_event:
         on_event("system", "run", {"run_id": ctx.run_id, "resumed": bool(resume)})
     dropped: list[str] = []

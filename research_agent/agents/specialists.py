@@ -273,6 +273,9 @@ Rules:
 - Take claim ids ONLY from the `claims` list in the brief, matching the claim's text and numbers. Agent outputs
   may mention outdated ids; never cite those.
 - run_facts.years are the shortlist's years; run_facts.corpus_years are the whole corpus. Do not confuse them.
+- A trend claim's caveat applies wherever you use it. Trends over PMC papers describe the topic slices that
+  were loaded, not published research at large: never contrast them with arXiv trends ("the two corpora move
+  in opposite directions").
 - Cite arXiv papers as [arXiv:ID] and PMC papers as [PMC1234567], using ids from the brief. Never invent
   ids or numbers. The reference list marks papers under non-commercial licences.
 - Do not write a references section or an evidence table — they are appended automatically.""",

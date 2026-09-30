@@ -207,14 +207,15 @@ def _sign_test_p(wins: int, losses: int) -> float:
     return min(1.0, 2 * tail)
 
 
-def method_comparison(ctx, method_a: list[str], method_b: list[str], metric: str | None = None) -> dict:
+def method_comparison(ctx, method_a: list[str], method_b: list[str], metric: str | None = None,
+                      rows: list[dict] | None = None) -> dict:
     """Head-to-head: papers that report the SAME metric for a model of family A and a model of family B
     (same data, same split). Counts how often A beats B, with a two-sided sign test."""
     a_terms = [t.lower() for t in method_a if t.strip()]
     b_terms = [t.lower() for t in method_b if t.strip()]
     want = metric_key(metric)[0] if metric else None
     pairs = []
-    for r in _rows(ctx):
+    for r in (rows if rows is not None else _rows(ctx)):
         items = [it for it in r["data"].get("reported_results") or [] if it.get("value_num") is not None
                  and it.get("higher_is_better") is not None and (not want or it["metric"] == want)]
         for m in {it["metric"] for it in items}:

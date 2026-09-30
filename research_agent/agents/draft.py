@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from research_agent.agents.base import Agent
 from research_agent.agents.followup import (ITEM_TOOL, OVERVIEW_TOOL, READ_TOOL, _counted, _ensure_schema,
                                             audit_answer, get_item)
-from research_agent.agents.report import _CITE_CLAIM, _clean_author, _cited_ids, get_brief, run_facts
+from research_agent.agents.report import _CITE_CLAIM, get_brief, run_facts
 from research_agent.config import settings
 from research_agent.db import connect
 from research_agent.runstate import RunContext
@@ -105,6 +105,10 @@ REVIEW_LAST = ("abstract", "Abstract", "evidence",
                "A structured abstract with bold run-in labels: **Background.** **Methods.** **Results.** "
                "**Conclusions.** One short paragraph each, with the key counts.", 300)
 
+# distinct papers a section must cite; a section below this is rewritten once with suggested papers
+MIN_CITES = {"background": 5, "gap": 3, "methods": 3, "risks": 1, "summary": 2,
+             "introduction": 5, "results_selection": 4, "results_synthesis": 6, "discussion": 5, "abstract": 0}
+
 KINDS = {"proposal": ("Research proposal", PROPOSAL, PROPOSAL_LAST),
          "review": ("Review manuscript", REVIEW, REVIEW_LAST)}
 
@@ -167,7 +171,10 @@ def _outline_schema(keys: list[str]) -> dict:
             "key": {"type": "string", "enum": keys},
             "points": {**STRS, "description": "2-6 short points for this section"},
             "claims": {**STRS, "description": "Claim ids (C12) that back the points"},
-            "papers": {**STRS, "description": "Paper ids to cite in this section"}}, ["key", "points"])},
+            "papers": {"type": "array", "description": "Papers to cite here, each with what it contributes",
+                       "items": obj({"paper_id": STR, "use": {**STR, "description": "What to cite it for, from its "
+                                     "record: its setting, method, data, validation, or a reported result"}},
+                                    ["paper_id"])}}, ["key", "points"])},
         "caveats": {**STRS, "description": "Where the evidence for the argument is thin or mixed"},
     }, ["title", "argument", "sections"])
 
@@ -185,14 +192,25 @@ How to work:
   the analysed papers do X, in which settings or years, with `where` for subgroups). Before calling anything
   rare or absent, run recheck_field. Aim for 3 to 8 new claims that carry the argument; do not re-count what an
   existing supported claim already says.
+- Before an argument rests on something being rare or absent, make sure it is measured where it is recorded:
+  evaluation_metrics holds metric names (RMSE, AUC), not how models were tested; datasets holds named datasets,
+  not covariates. Then look at the studies themselves: list_extractions and read_paper on the likeliest ones,
+  and their titles. A study titled "forecasting at a rural district hospital" is facility-level whatever a count
+  of a field says. Run recheck_field on the terms. If the full picture weakens the gap, say so.
+- Check the claims in run_overview before adding one, and never count the same studies again under another
+  field or wording: one count per finding.
 - Use research_vs_burden to show where research is thin relative to disease burden, results_table and
   method_comparison for what works, contradictions for open questions, and read_paper to confirm what key
   papers did before you plan to cite them for it.
 - If the evidence does not support the direction (the "gap" is well covered, or rests on very few papers),
   say so in `argument` and `caveats` and reframe the direction honestly. Do not plan around claims that were
   not supported.
-- In the outline, give every section its points and the claim ids and paper ids behind them. Use only ids the
-  tools gave you.
+- The draft must cite the actual studies, not only counts: a reader of the exported document cannot see the
+  counts' papers. For every section that discusses the literature, choose 3 to 8 papers and say what each is
+  cited for ("monthly surveillance counts with rainfall in Malawi; RMSE 3.2 on a 2018 holdout"). Take this from
+  read_paper, list_extractions or results_table, never from memory. For a count, pick 1 to 3 example papers
+  from the papers it counted (get_item on the claim lists them).
+- Use only ids the tools gave you.
 
 Sections of this draft (keys): {sections}"""
 
@@ -223,15 +241,16 @@ def _planner(kind: str, direction: str, about: list[str]) -> DraftPlanner:
 
 
 # ---------------------------------------------------------------- the evidence pack every section sees
-PACK_CHARS = 60000
-CARD_CHARS = 32000
+PACK_CHARS = 80000
+CARD_CHARS = 42000
 
 
 def _card(r: dict) -> dict:
     d = r["data"]
     ev = d.get("evidence") or {}
-    card = {"id": r["paper_id"], "title": (r["title"] or "")[:160], "year": r["year"], "corpus": r.get("corpus"),
-            "read": r["source"]}
+    card = {"id": r["paper_id"], "title": (r["title"] or "")[:160], "year": r["year"],
+            "kind": "published article (PMC)" if r.get("corpus") == "pmc" else "preprint (arXiv)",
+            "read": "full text" if r["source"] == "fulltext" else "abstract only"}
     for f in ("methods", "datasets", "data_modalities", "geography", "limitations"):
         if d.get(f):
             card[f] = d[f][:6]
@@ -239,15 +258,18 @@ def _card(r: dict) -> dict:
         card["validation"] = d["validation_level"]
     if d.get("key_findings"):
         card["findings"] = str(d["key_findings"])[:260]
-    res = [f"{x['metric']} {x['value']} ({x['model']})" for x in (d.get("reported_results") or [])[:3]]
+    res = [{"result": f"{x['metric']} {x['value']} ({x['model']}{', baseline' if x.get('is_baseline') else ''})",
+            "quote": str(x.get("quote") or "")[:180]} for x in (d.get("reported_results") or [])[:3]]
     if res:
         card["results"] = res
-    assoc = [f"{x['driver']}: {x['direction']}" for x in (d.get("reported_associations") or [])[:3]]
+    assoc = [{"association": f"{x['driver']}: {x['direction']}" + (f", lag {x['lag']}" if x.get("lag") else ""),
+              "quote": str(x.get("quote") or "")[:180]} for x in (d.get("reported_associations") or [])[:3]]
     if assoc:
         card["associations"] = assoc
-    quote = next((q for f in ("methods", "data_modalities", "validation_level") for q in (ev.get(f) or [])), None)
-    if quote:
-        card["quote"] = quote[:200]
+    quotes = [q[:200] for f in ("methods", "data_modalities", "geography", "validation_level", "datasets")
+              for q in (ev.get(f) or [])[:1]][:3]
+    if quotes:
+        card["quotes_verified"] = quotes
     return card
 
 
@@ -265,11 +287,33 @@ def _cards(ctx, first: list[str]) -> list[dict]:
     return out
 
 
+def _dedupe_claims(claims: list[dict], matched: dict[str, list]) -> list[dict]:
+    """Two supported counts over (nearly) the same studies say the same thing; a draft that cites both ends up
+    writing "14 to 15 of 49". Keep the first, and point the other at it."""
+    kept: list[dict] = []
+    for c in claims:
+        ids = set(matched.get(c["claim"]) or [])
+        twin = next((k for k in kept if k["status"] == "supported" and c["status"] == "supported" and ids
+                     and (m := set(matched.get(k["claim"]) or [])) and len(ids & m) / len(ids | m) >= 0.8), None)
+        if twin:
+            twin.setdefault("same_as", []).append(c["claim"])
+            continue
+        kept.append(c)
+    return kept
+
+
 def evidence_pack(ctx, kind: str, outline: dict, about: list[str], captions: list[str] | None = None) -> str:
     brief = get_brief(ctx)
     brief.pop("papers", None)            # the paper records below replace the bare title list
     notes = brief.pop("agent_outputs", {}) or {}
-    pack = {"question": ctx.question, "run_facts": brief.pop("run_facts"), "claims": brief.pop("claims")}
+    claims = brief.pop("claims")
+    matched = {f"C{r['id']}": (r["result"] or {}).get("matched_paper_ids") or [] for r in ctx.pg.execute(
+        "SELECT id, result FROM claims WHERE run_id=%s", (ctx.run_id,)).fetchall()}
+    claims = _dedupe_claims(claims, matched)
+    for c in claims:
+        if matched.get(c["claim"]):
+            c["example_papers"] = matched[c["claim"]][:5]
+    pack = {"question": ctx.question, "run_facts": brief.pop("run_facts"), "claims": claims}
     pack.update(brief)                   # reported performance, contradictions, citations
     try:
         from research_agent.tools.burden import research_vs_burden
@@ -290,7 +334,8 @@ def evidence_pack(ctx, kind: str, outline: dict, about: list[str], captions: lis
     if captions:
         pack["figures_and_tables"] = {"appended_by_code": captions,
                                       "note": "Refer to these by number; do not reproduce them."}
-    outline_papers = [p for s in outline.get("sections", []) for p in s.get("papers") or []]
+    outline_papers = [p for s in outline.get("sections", []) for p in _paper_ids(s)]
+    outline_papers += [p for c in claims if c["status"] == "supported" for p in c.get("example_papers", [])[:2]]
     pack["papers"] = _cards(ctx, outline_papers)
     text = json.dumps(pack, ensure_ascii=False, default=str)
     room = PACK_CHARS - len(text)
@@ -298,6 +343,15 @@ def evidence_pack(ctx, kind: str, outline: dict, about: list[str], captions: lis
         pack["agent_notes_unverified"] = json.dumps(notes, ensure_ascii=False, default=str)[:room - 500]
         text = json.dumps(pack, ensure_ascii=False, default=str)
     return text
+
+
+def _paper_ids(section: dict) -> list[str]:
+    out = []
+    for p in section.get("papers") or []:
+        pid = p.get("paper_id") if isinstance(p, dict) else p
+        if pid:
+            out.append(str(pid).removeprefix("arXiv:").strip("[] "))
+    return out
 
 
 def _outline_text(outline: dict, sections) -> str:
@@ -311,8 +365,10 @@ def _outline_text(outline: dict, sections) -> str:
         lines += [f"- {p}" for p in s.get("points") or []]
         if s.get("claims"):
             lines.append("  claims: " + ", ".join(s["claims"]))
-        if s.get("papers"):
-            lines.append("  papers: " + ", ".join(s["papers"]))
+        for p in s.get("papers") or []:
+            pid = p.get("paper_id") if isinstance(p, dict) else p
+            use = p.get("use") if isinstance(p, dict) else ""
+            lines.append(f"  cite {pid}" + (f": {use}" if use else ""))
     return "\n".join(lines)
 
 
@@ -325,16 +381,38 @@ WHO READS IT: {reader}. Write in a measured scientific register: flowing, argued
 where the evidence is thin, never breathless. Paragraphs, not bullet lists, unless the section asks for a list
 or a table. Do not use em dashes; use commas, colons, semicolons or full stops.
 
-Evidence rules (statements about the literature are checked by code after you write):
-- Every quantitative statement about the literature comes from a SUPPORTED claim in the pack: quote its
-  counted numbers (e.g. "31 of 58 studies") and cite it as [C12]. Mention unsupported claims only as not
-  supported, without brackets ("claim C42, not supported"); never use numbers from rejected claims.
+Citing the studies (the document will be read by people who cannot see this system):
+- Ground every statement about the literature in the specific studies it rests on, and say what those studies
+  did or found, using their records in the pack: setting, method, data, validation, reported results and the
+  verified quotes. For example: "A random-forest model trained on monthly surveillance counts and rainfall in
+  southern Malawi reported an RMSE of 3.2 on a held-out year [arXiv:1602.00002]."
+- Cite as [arXiv:2401.00001] or [PMC1234567], with plain square brackets, only ids from the pack, and only for
+  what that paper's record shows. Several at once: [arXiv:2401.00001] [PMC1234567]. Do not write author names or
+  years: code turns the ids into formatted references.
+- A number you attribute to a paper (a score, a percentage, a sample size) must appear in that paper's record.
+- Counts across the included studies come from SUPPORTED claims: quote the counted numbers ("31 of 58
+  studies") and cite the claim as [C12], then name one to three of its example_papers as illustrations, e.g.
+  "only 3 of 58 studies tested models on districts withheld from training [C12], among them a Kenyan study of
+  weekly admissions [arXiv:2101.00001]". A count never stands alone in a paragraph without cited studies.
+- Mention unsupported claims only as not supported, without brackets ("claim C42, not supported"); never use
+  numbers from rejected claims.
 - Counts about the review itself (papers analysed, read in full, PRISMA stages) come from run_facts or the
   review record. Numbers in agent_notes_unverified are not verified: describe them in words.
 - Never add counts together, and never turn a count into a larger claim than it is.
-- Cite papers as [arXiv:2401.00001] or [PMC1234567], only ids from the pack, and only for what their record
-  shows. Plain square brackets.
-- Say which findings rest on preprints (arXiv) and which on published articles (PMC) when it matters.
+- Say which findings rest on preprints and which on published articles when it matters (each record's
+  "kind").
+- How many studies were read in full comes only from run_facts. When few were, say so where it matters:
+  absence in an abstract is not absence in the study.
+- A trend claim's caveat applies wherever you use it; trends over PMC papers describe the topic slices that were
+  loaded, so never contrast them with arXiv trends.
+
+Writing for readers outside this system:
+- Say "the included studies" or "the studies analysed". Never write "shortlist", "extraction", "field",
+  "predicate", "denominator" or "claim C42". Describe a finding that was not supported in words ("a comparable
+  rise was not observed among published articles").
+- State each count in full once, in the section where it carries the argument. Later, refer back in words ("the
+  scarcity of facility-level studies described above") instead of repeating the numbers. The list of counts
+  already given is in the message.
 {plan_rules}"""
 
 PLAN_RULES = """
@@ -349,12 +427,32 @@ READERS = {"proposal": "a funding panel and peer reviewers: scientists from this
            "review": "journal reviewers and readers: researchers and practitioners in global health and data science"}
 
 
+_PLAIN = [
+    (re.compile(r"\b(\d+)-(?:paper|study) shortlist\b"), r"\1 included studies"),
+    (re.compile(r"\b(?:in|from|of|across) the shortlist\b", re.I), lambda m: m.group(0).split()[0] + " the included studies"),
+    (re.compile(r"\bthe shortlist\b"), "the set of included studies"),
+    (re.compile(r"\bThe shortlist\b"), "The set of included studies"),
+    (re.compile(r"\bshortlisted (papers|studies)\b"), "included studies"),
+    (re.compile(r"\bshortlisted\b"), "included"),
+    (re.compile(r"\bthe extraction\b"), "the automated reading of the studies"),
+    (re.compile(r"\s*\(?\bclaim C\d+,?\s*\(?(?:not supported|unsupported|rejected)\)?\)?"),
+     " (not supported by the counts)"),
+]
+
+
+def plain_words(text: str) -> str:
+    """Internal vocabulary a reader outside the system cannot follow, replaced as a safety net."""
+    for rx, rep_ in _PLAIN:
+        text = rx.sub(rep_, text)
+    return text
+
+
 def _clean(text: str, heading: str) -> str:
     text = (text or "").strip()
     text = re.sub(r"^\s*#{1,3}\s+.*\n+", "", text) if re.match(r"^\s*#{1,3}\s", text) else text  # own heading
     text = re.sub(r"\s*—\s*", ", ", text)                    # em dashes (year ranges like 2015–2020 stay)
     text = re.sub(r"\s+–\s+", ", ", text)                    # spaced en dashes used as em dashes
-    return text.strip()
+    return plain_words(text).strip()
 
 
 def _trim_cut(text: str) -> str:
@@ -363,19 +461,55 @@ def _trim_cut(text: str) -> str:
     return "\n\n".join(parts[:-1]) if len(parts) > 1 else text
 
 
-def _write(llm, system: str, pack: str, outline: str, written: list[tuple[str, str]], sec: tuple) -> str:
+def _write(llm, system: str, pack: str, outline: str, written: list[tuple[str, str]], sec: tuple,
+           known: set[str] | None = None, suggest: list[str] | None = None, ctx=None) -> str:
+    """Write one section; if it cites fewer distinct studies than it needs, rewrite it once."""
+    text = _write_once(llm, system, pack, outline, written, sec)
+    need = MIN_CITES.get(sec[0], 0)
+    if known is not None and need:
+        from research_agent.tools.citing import cited_ids, normalise
+
+        have = {p for p in cited_ids(normalise(text, known)) if p in known}
+        if len(have) < min(need, len(known)):
+            if ctx is not None:
+                ctx.emit("draft", "message", {"text": f"{sec[1]}: {len(have)} studies cited, rewriting to cite more"})
+            fix = (f"Your draft of this section cites {len(have)} distinct studies; it needs at least "
+                   f"{min(need, len(known))}. Rewrite it so that each statement about the literature cites the "
+                   "specific studies that support it and says what they did or found, from their records. "
+                   + (f"Studies to consider: {', '.join(suggest[:10])}. " if suggest else "")
+                   + "Keep the argument. Your previous draft:\n\n" + text)
+            again = _write_once(llm, system, pack, outline, written, sec, extra=fix)
+            if len({p for p in cited_ids(normalise(again, known)) if p in known}) > len(have):
+                text = again
+    return text
+
+
+def _write_once(llm, system: str, pack: str, outline: str, written: list[tuple[str, str]], sec: tuple,
+                extra: str = "") -> str:
     key, heading, role, guidance, words = sec
     blocks = [{"type": "text", "text": "EVIDENCE PACK (JSON):\n" + pack},
               {"type": "text", "text": "OUTLINE:\n" + outline}]
     if written:
         blocks.append({"type": "text", "text": "SECTIONS WRITTEN SO FAR:\n\n"
                        + "\n\n".join(f"## {h}\n\n{t}" for h, t in written)})
+        given: dict[str, list[str]] = {}
+        for h, t in written:
+            for c in dict.fromkeys(_CITE_CLAIM.findall(t)):
+                given.setdefault(f"C{c}", []).append(h)
+        if given:
+            allow = (" This is the summary: it may restate the two or three counts that carry the argument, once "
+                     "each." if key in ("summary", "abstract") else "")
+            blocks.append({"type": "text", "text": "COUNTS ALREADY GIVEN (do not repeat their numbers; refer back "
+                           "in words):\n" + "\n".join(f"- {c}: in {', '.join(hs)}" for c, hs in given.items())
+                           + allow})
     kind = {"plan": "PLAN (the applicant's proposal)", "record": "RECORD (how the review was done)",
             "evidence": "EVIDENCE (statements about the literature)"}[role]
     blocks.append({"type": "text", "text": (
         f"Write the section \"{heading}\" [{key}], a {kind} section, now. {guidance} About {words} words. "
-        "Follow the outline's points for this section and cite what backs them. Start directly with the text: "
-        "no heading for the section itself, and no closing remarks about the draft.")})
+        "Follow the outline's points for this section and cite the studies that back them. Start directly with "
+        "the text: no heading for the section itself, and no closing remarks about the draft.")})
+    if extra:
+        blocks.append({"type": "text", "text": extra})
     resp = llm.chat(system, [{"role": "user", "content": blocks}], max_tokens=min(
         settings.long_output_max_tokens, max(1200, int(words * 3))))
     text = resp.text or ""
@@ -385,36 +519,25 @@ def _write(llm, system: str, pack: str, outline: str, written: list[tuple[str, s
 
 
 # ---------------------------------------------------------------- assembling and checking
-def _references(ctx, cited: list[str]) -> list[str]:
-    papers = {r["paper_id"]: r for r in ctx.pg.execute(
-        "SELECT paper_id, source, title, year, authors, doi FROM papers WHERE paper_id = ANY(%s)",
-        (cited or [""],)).fetchall()}
-    lines = []
-    for pid in cited:
-        p = papers.get(pid)
-        if not p:
-            continue
-        names = [a.strip() for a in re.split(r",|\band\b", p["authors"] or "") if a.strip()]
-        who = (_clean_author(names[0]) if names else "Unknown") + (" et al." if len(names) > 1 else "")
-        url = (f"https://pmc.ncbi.nlm.nih.gov/articles/{pid}/" if p["source"] == "pmc"
-               else f"https://arxiv.org/abs/{pid}")
-        label = pid if p["source"] == "pmc" else f"arXiv:{pid}"
-        lines.append(f"- **{label}**: {who} ({p['year']}). {p['title']}. {url}"
-                     + (" (preprint)" if p["source"] != "pmc" else ""))
-    return lines
-
-
-def _evidence_table(ctx, body: str) -> list[str]:
+def _appendix(ctx, body: str) -> list[str]:
+    """Appendix A: each count the text cites, with the studies it covers, so a reader can check it."""
     ids = sorted({int(c) for c in _CITE_CLAIM.findall(body)})
     if not ids:
         return []
     rows = ctx.pg.execute("SELECT id, text, status, result FROM claims WHERE run_id=%s AND id = ANY(%s) ORDER BY id",
                           (ctx.run_id, ids)).fetchall()
-    lines = ["## Evidence behind the numbers", "",
-             "Each [C] citation above is a count made by code over the papers analysed.", "",
-             "| Claim | Statement | Verdict | Counted |", "|---|---|---|---|"]
+    lines = ["## Appendix A. Counts behind the numbers", "",
+             "Numbers marked [C] in the text are counts over the studies included in this analysis, made by code "
+             "from quote-verified records of each study. Each row lists the studies a count covers.", "",
+             "| Count | Statement | Result | Studies counted |", "|---|---|---|---|"]
     for c in rows:
-        lines.append(f"| C{c['id']} | {c['text'].replace('|', '/')} | {c['status']} | {_counted(c['result']) or ''} |")
+        r = c["result"] or {}
+        matched = r.get("matched_paper_ids") or []
+        studies = " ".join(f"[arXiv:{p}]" if not p.startswith("PMC") else f"[{p}]" for p in matched[:8])
+        if len(matched) > 8:
+            studies += f" and {len(matched) - 8} more"
+        result = _counted(r) or ""
+        lines.append(f"| C{c['id']} | {c['text'].replace('|', '/')} | {result} ({c['status']}) | {studies or 'none'} |")
     return lines + [""]
 
 
@@ -449,8 +572,11 @@ def _figures(ctx, kind: str) -> tuple[list[str], list[str]]:
     return out, captions
 
 
-def write_draft(ctx, kind: str, direction: str, about: list[str] | None = None) -> dict:
+def write_draft(ctx, kind: str, direction: str, about: list[str] | None = None,
+                citation_style: str = "author-year") -> dict:
     """Plan, write and check one draft. Returns {title, content_md, meta}."""
+    from research_agent.tools import citing
+
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}")
     about = [a.strip().upper() for a in about or [] if a.strip()]
@@ -471,17 +597,34 @@ def write_draft(ctx, kind: str, direction: str, about: list[str] | None = None) 
                                   plan_rules=PLAN_RULES if kind == "proposal" else "")
     llm = ctx.llm_factory(strong=True, step="draft")
     setattr(llm, "_step", "draft")
+    known = set(ctx.shortlist_ids())
+    by_key = {x.get("key"): x for x in outline.get("sections") or [] if isinstance(x, dict)}
+    card_ids = [c["id"] for c in json.loads(pack)["papers"]]
+
+    matched = {r["id"]: (r["result"] or {}).get("matched_paper_ids") or [] for r in ctx.pg.execute(
+        "SELECT id, result FROM claims WHERE run_id=%s", (ctx.run_id,)).fetchall()}
+
+    def suggest(key: str) -> list[str]:
+        """Studies to offer a section that cited too few: its planned papers, examples of its counts, then any."""
+        sec = by_key.get(key) or {}
+        ids = _paper_ids(sec)
+        for cid in sec.get("claims") or []:
+            num = str(cid).upper().lstrip("C")
+            if num.isdigit():
+                ids += matched.get(int(num), [])[:3]
+        return [p for p in dict.fromkeys(ids + card_ids) if p in known]
+
     written: list[tuple[str, str]] = []
     for sec in sections:
         ctx.emit("draft", "message", {"text": f"writing {sec[1]}"})
-        text = _write(llm, system, pack, outline_txt, written, sec)
+        text = _write(llm, system, pack, outline_txt, written, sec, known=known, suggest=suggest(sec[0]), ctx=ctx)
         if kind == "review" and sec[0] == "methods":
             text = text + "\n\n" + AUTOMATION_NOTE
         written.append((sec[1], text))
-    opening = _write(llm, system, pack, outline_txt, written, last)
+    opening = _write(llm, system, pack, outline_txt, written, last, known=known, suggest=suggest(last[0]), ctx=ctx)
 
     parts = [(last[1], opening)] + written
-    body = "\n\n".join(f"## {h}\n\n{t}" for h, t in parts)
+    body = citing.normalise("\n\n".join(f"## {h}\n\n{t}" for h, t in parts), known)
     number_check = None
     if settings.number_check:
         try:
@@ -490,17 +633,19 @@ def write_draft(ctx, kind: str, direction: str, about: list[str] | None = None) 
             body, number_check = resolve_numbers(ctx, body)
         except Exception as exc:   # the check improves a draft; it must never lose one
             ctx.emit("number_check", "error", {"error": str(exc)[:300]})
-    body, audit = audit_answer(ctx, body)
-
-    shortlist = set(ctx.shortlist_ids())
-    cited = [p for p in dict.fromkeys(_cited_ids(body)) if p in shortlist]
+    body, audit = audit_answer(ctx, body)          # includes the check of what each cited study contains
+    body_ids = [p for p in dict.fromkeys(citing.cited_ids(body)) if p in known]
     facts = run_facts(ctx)
     title = (outline.get("title") or label).strip().strip("#").strip()
     date = datetime.now(timezone.utc).strftime("%d %B %Y")
-    notice = (f"*{label}, draft of {date}. Built from an analysis of {facts['shortlist']} papers "
+    notice = (f"*{label}, draft of {date}. Built from an analysis of {facts['shortlist']} studies "
               f"({facts['fulltext']} read in full) for the question: \"{ctx.question}\". Statements about the "
-              "literature were checked against those papers: citations to other papers were removed and numbers "
-              "no count supports are marked [unverified].")
+              "literature were checked against those studies: citations to other works were removed, and numbers "
+              "that neither a count nor the cited study's own text supports are marked [unverified]. Counts marked "
+              "[C] are listed with the studies behind them in Appendix A.")
+    from research_agent.agents.report import depth_warning
+
+    warning = depth_warning(facts)
     if kind == "proposal":
         notice += (" Aims, methods, outcomes, risks and the workplan are the applicant's proposal, not findings; "
                    "items in square brackets starting \"to be confirmed\" are for the applicant to decide.*")
@@ -509,19 +654,24 @@ def write_draft(ctx, kind: str, direction: str, about: list[str] | None = None) 
     tail = (["## Budget", "", "_To be completed by the applicant._", ""] if kind == "proposal" else
             ["## Declarations", "", "_Author contributions, funding, competing interests and data availability: "
              "to be completed by the authors._", ""])
-    content = "\n".join([f"# {title}", "", notice, "", body.strip(), "", *tail, *figures,
-                         *_evidence_table(ctx, body), f"## References ({len(cited)})", "",
-                         *_references(ctx, cited)]) + "\n"
+    if warning:
+        notice += f"\n\n> **Reading depth.** {warning}"
+    document = "\n".join([body.strip(), "", *tail, *figures, *_appendix(ctx, body)])
+    document, refs, cited = citing.render(ctx.pg, document, citation_style)
+    content = "\n".join([f"# {title}", "", notice, "", document, f"## References ({len(refs)})", "",
+                         *refs]) + "\n"
     new_claims = sorted(r["id"] for r in ctx.pg.execute("SELECT id FROM claims WHERE run_id=%s",
                                                         (ctx.run_id,)).fetchall() if r["id"] not in before)
     meta = {"audit": audit, "number_check": {k: v for k, v in (number_check or {}).items() if k != "log"},
-            "cited_papers": cited, "new_claims": [f"C{c}" for c in new_claims],
+            "cited_papers": cited, "cited_in_text": body_ids, "citation_style": citation_style,
+            "new_claims": [f"C{c}" for c in new_claims],
             "argument": outline.get("argument"), "caveats": outline.get("caveats") or []}
     return {"title": title, "content_md": content, "meta": meta}
 
 
 # ---------------------------------------------------------------- storing and running
-def start(run_id: str, kind: str, direction: str, about: list[str] | None = None) -> int:
+def start(run_id: str, kind: str, direction: str, about: list[str] | None = None,
+          citation_style: str = "author-year") -> int:
     _ensure_schema()
     if kind not in KINDS:
         raise ValueError(f"kind must be one of {', '.join(KINDS)}")
@@ -530,8 +680,12 @@ def start(run_id: str, kind: str, direction: str, about: list[str] | None = None
         run = conn.execute("SELECT status FROM runs WHERE run_id=%s", (run_id,)).fetchone()
         if not run:
             raise ValueError(f"No run with id {run_id}")
-        return conn.execute("INSERT INTO drafts (run_id, kind, direction, about) VALUES (%s,%s,%s,%s) RETURNING id",
-                            (run_id, kind, direction or "", about or None)).fetchone()["id"]
+        from research_agent.tools.citing import STYLES
+
+        return conn.execute("INSERT INTO drafts (run_id, kind, direction, about, citation_style) VALUES "
+                            "(%s,%s,%s,%s,%s) RETURNING id",
+                            (run_id, kind, direction or "", about or None,
+                             citation_style if citation_style in STYLES else "author-year")).fetchone()["id"]
     finally:
         conn.close()
 
@@ -541,7 +695,8 @@ def run_draft(draft_id: int, provider: str | None = None, llm_factory=None) -> d
     _ensure_schema()
     conn = connect()
     try:
-        d = conn.execute("SELECT id, run_id, kind, direction, about FROM drafts WHERE id=%s", (draft_id,)).fetchone()
+        d = conn.execute("SELECT id, run_id, kind, direction, about, citation_style FROM drafts WHERE id=%s",
+                         (draft_id,)).fetchone()
         if not d:
             raise ValueError(f"No draft {draft_id}")
         conn.execute("UPDATE drafts SET status='running' WHERE id=%s", (draft_id,))
@@ -549,7 +704,7 @@ def run_draft(draft_id: int, provider: str | None = None, llm_factory=None) -> d
         conn.close()
     ctx = RunContext.attach(str(d["run_id"]), provider=provider, llm_factory=llm_factory)
     try:
-        out = write_draft(ctx, d["kind"], d["direction"], d["about"] or [])
+        out = write_draft(ctx, d["kind"], d["direction"], d["about"] or [], d["citation_style"] or "author-year")
         ctx.pg.execute("UPDATE drafts SET status='done', title=%s, content_md=%s, meta=%s::jsonb, finished_at=now() "
                        "WHERE id=%s", (out["title"], out["content_md"], json.dumps(out["meta"], default=str), draft_id))
         return {"id": draft_id, **out}
@@ -562,10 +717,10 @@ def run_draft(draft_id: int, provider: str | None = None, llm_factory=None) -> d
 
 
 def draft_in_background(run_id: str, kind: str, direction: str, about: list[str] | None = None,
-                        provider: str | None = None) -> dict:
+                        provider: str | None = None, citation_style: str = "author-year") -> dict:
     from research_agent.jobs import enqueue
 
-    did = start(run_id, kind, direction, about)
+    did = start(run_id, kind, direction, about, citation_style)
     job = enqueue("draft", {"draft_id": did, "provider": provider})
     return {"draft_id": did, "job_id": job}
 
@@ -584,7 +739,7 @@ def get_draft(draft_id: int) -> dict | None:
     _ensure_schema()
     conn = connect()
     try:
-        return conn.execute("SELECT id, run_id, kind, direction, about, status, title, content_md, meta, created_at, "
+        return conn.execute("SELECT id, run_id, kind, direction, about, citation_style, status, title, content_md, meta, created_at, "
                             "finished_at FROM drafts WHERE id=%s", (draft_id,)).fetchone()
     finally:
         conn.close()

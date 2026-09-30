@@ -42,6 +42,8 @@ def get_brief(ctx) -> dict:
                 entry["why_not_supported"] = r["wording_problem"][:200]
         elif r:
             entry["numbers"] = r.get("window")
+            if r.get("caveat"):
+                entry["caveat"] = r["caveat"][:240]
         if c["review_note"] and c["status"] != "supported":
             entry["review_note"] = c["review_note"][:200]
         compact.append(entry)
@@ -73,7 +75,7 @@ def get_brief(ctx) -> dict:
                 for p in g["most_cited_within_set"][:6]]
     except Exception:
         pass
-    notes_src = {k: v for k, v in ctx.notes().items() if k not in ("synthesis", "orchestrator")}
+    notes_src = {k: v for k, v in ctx.notes().items() if k not in ("synthesis", "orchestrator", "mode", "usage")}
     room = BRIEF_CHARS - len(json.dumps(out, default=str, ensure_ascii=False)) - 200
     per_note = max(300, room // max(1, len(notes_src)))
     notes = {}
@@ -89,12 +91,18 @@ REPORT_TOOLS = [Tool("get_brief", "Everything you need: every claim (its id is t
                      max_chars=BRIEF_CHARS)]
 
 
-_N_OF_M = re.compile(r"\b(\d{1,3}(?:,\d{3})+|\d{1,6})\s*(?:of|/|out of)\s*(\d{1,3}(?:,\d{3})+|\d{1,6})"
-                     r"(?![\d,]*\d)(?!\s*\[unverified)")
+# "n of N" counts, including written-out numbers and "of the": "two of 39", "12 of the 49", "none of the 49"
+_WORDS = {w: i for i, w in enumerate("zero one two three four five six seven eight nine ten eleven twelve thirteen "
+                                    "fourteen fifteen sixteen seventeen eighteen nineteen twenty".split())}
+_WORDS.update({"none": 0, "thirty": 30, "forty": 40, "fifty": 50})
+_NUMW = "|".join(sorted(_WORDS, key=len, reverse=True))
+_N_OF_M = re.compile(rf"\b(\d{{1,3}}(?:,\d{{3}})+|\d{{1,6}}|(?i:{_NUMW}))\s*(?:of|/|out of)\s*(?:the\s+)?"
+                     r"(\d{1,3}(?:,\d{3})+|\d{1,6})(?![\d,]*\d)(?!\s*\[unverified)")
 
 
 def _int(x: str) -> int:
-    return int(x.replace(",", ""))
+    x = x.strip()
+    return _WORDS[x.lower()] if x.lower() in _WORDS else int(x.replace(",", ""))
 
 
 _SENTENCE = re.compile(r"(?<=[.!?])\s+(?=[A-Z*\[(_])|\n+")
@@ -243,6 +251,17 @@ def allowed_counts(ctx, claims: dict | None = None, facts: dict | None = None) -
     return allowed
 
 
+def depth_warning(facts: dict) -> str | None:
+    """A reader must know when most studies were read from their abstracts only: absence and rarity findings
+    then mean "not reported in the abstract" as often as "not done"."""
+    n, ft = facts.get("shortlist") or 0, facts.get("fulltext") or 0
+    if n >= 5 and ft < 0.25 * n:
+        return (f"Only {ft} of the {n} studies were read in full; the rest were read from their title and abstract. "
+                "Findings that something is rare or absent rest mainly on abstracts, which often omit methods and "
+                "validation details, and should be checked against the full papers.")
+    return None
+
+
 def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[str, dict]:
     """Validate citations and numbers, then append code-generated run facts, evidence table and references."""
     body = normalise_citations(body)
@@ -263,12 +282,18 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
         body = body.replace(f"[C{cid}]", f"[C{cid} — not verified]")
 
     body, unverified_numbers = audit_numbers(body, allowed)
+    from research_agent.tools.citing import check_attributions
+
+    body, unverified_attributions = check_attributions(ctx.pg, body)
     cited = [pid for pid in dict.fromkeys(_cited_ids(body)) if pid in shortlist]
     papers = {r["paper_id"]: r for r in ctx.pg.execute(
         "SELECT paper_id, source, title, year, authors, license FROM papers WHERE paper_id = ANY(%s)",
         (list(shortlist),)).fetchall()}
 
     lo, hi = facts["years"]
+    warning = depth_warning(facts)
+    if warning:
+        body = f"> **Reading depth.** {warning}\n\n" + body.strip()
     try:
         from research_agent.tools.results import results_markdown
 
@@ -304,6 +329,8 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
                                                           sorted(facts["shortlist_by_corpus"].items())) or "n/a"),
              f"- Numbers marked [unverified] in the text above: {unverified_numbers} "
              "(not backed by a supported claim or these facts)",
+             f"- Details credited to a cited paper but not found in it (marked [unverified]): "
+             f"{unverified_attributions}",
              *([f"- Numbers checked after writing: {number_check.get('backed', 0)} backed by a new count, "
                 f"{number_check.get('corrected', 0)} corrected to the measured count, "
                 f"{number_check.get('removed', 0)} removed because they could not be measured"
@@ -348,5 +375,6 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
                              f"https://arxiv.org/abs/{pid}")
     audit = {"removed_paper_citations": bad_papers, "flagged_claim_citations": bad_claims,
              "papers_cited": len(cited), "unverified_numbers": unverified_numbers,
+             "unverified_attributions": unverified_attributions,
              "claim_citation_fixes": citation_fixes}
     return "\n".join(lines), audit

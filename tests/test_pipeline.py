@@ -2187,9 +2187,16 @@ def test_drafts_a_proposal_and_a_review_manuscript(loaded_db, monkeypatch, tmp_p
     assert "—" not in md and "0000.00000" not in md and "citation removed" in md
     assert "7 of 9 [unverified]" in md and "[to be confirmed: number of districts]" in md
     assert "applicant's proposal, not findings" in md
-    assert "## Evidence behind the numbers" in md and "## References (" in md
+    # studies are cited as readers expect: author-year in the text, a full reference list, no internal ids left
+    assert re.search(r"\(Author and Author, (19|20)\d\d[a-z]?(; Author and Author, (19|20)\d\d[a-z]?)*\)", md)
+    assert "[arXiv:" not in md and "(arXiv:" not in md                       # "(arXiv:ID)" was normalised too
+    assert "9.99 [unverified]" in md                                          # a number the cited study lacks
+    assert "## Appendix A. Counts behind the numbers" in md and "## References (" in md
+    refs = md.split("## References (", 1)[1]
+    assert "https://arxiv.org/abs/" in refs and "[preprint]" in refs
     d = D.get_draft(did)
     assert d["status"] == "done" and d["meta"]["new_claims"] and d["meta"]["cited_papers"]
+    assert len(d["meta"]["cited_in_text"]) >= 2 and d["meta"]["audit"]["unverified_attributions"] >= 1
     with get_conn() as pg:
         agent = pg.execute("SELECT agent FROM claims WHERE id=%s", (int(d["meta"]["new_claims"][0][1:]),)).fetchone()
         after = pg.execute("SELECT status, report_md, finished_at FROM runs WHERE run_id=%s", (rid,)).fetchone()
@@ -2197,7 +2204,8 @@ def test_drafts_a_proposal_and_a_review_manuscript(loaded_db, monkeypatch, tmp_p
 
     # review manuscript, with the number check on
     monkeypatch.setattr(D, "settings", dataclasses.replace(D.settings, number_check=True))
-    rev = D.run_draft(D.start(rid, "review", ""), llm_factory=fake)["content_md"]
+    rev = D.run_draft(D.start(rid, "review", "", citation_style="numbered"), llm_factory=fake)["content_md"]
+    assert re.search(r"\[\d+(, \d+|-\d+)*\]", rev) and "\n1. Author A, Author B." in rev   # Vancouver
     for h in ("Abstract", "Introduction", "Methods", "Results: study selection and characteristics", "Discussion",
               "Conclusions", "Declarations"):
         assert f"## {h}" in rev, h
@@ -2230,3 +2238,330 @@ def test_drafts_a_proposal_and_a_review_manuscript(loaded_db, monkeypatch, tmp_p
     out = tmp_path / "p.md"
     assert cli.main(["draft", "--export", str(did), "-f", "md", "-o", str(out)]) == 0
     assert out.read_text().startswith("# Validating")
+
+
+def test_run_graph_and_mind_map(loaded_db):
+    from fastapi.testclient import TestClient
+
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.api import main as api
+    from research_agent.runstate import RunContext
+    from research_agent.tools.graph import build_graph
+
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: None)
+    try:
+        g = build_graph(ctx)
+        n_papers = len(ctx.shortlist_ids())
+    finally:
+        ctx.close()
+    by = {n["id"]: n for n in g["nodes"]}
+    types = {n["type"] for n in g["nodes"]}
+    assert {"question", "category", "concept", "paper", "claim"} <= types
+    assert sum(1 for n in g["nodes"] if n["type"] == "paper") == n_papers
+    assert all(l["source"] in by and l["target"] in by for l in g["links"])       # no dangling links
+    # a paper links to the concepts it uses, and each concept's count is the papers linked to it
+    for c in (n for n in g["nodes"] if n["type"] == "concept"):
+        users = {l["source"] for l in g["links"] if l["target"] == c["id"] and l["type"] == "uses"}
+        assert len(users) == c["papers"], c["label"]
+    # a supported claim links to the papers it counted
+    sup = next(n for n in g["nodes"] if n["type"] == "claim" and n["status"] == "supported")
+    assert any(l["source"] == sup["id"] and l["type"] == "counted" for l in g["links"])
+    # the mind map: question -> categories -> concepts -> papers, every ref a real node
+    tree = g["tree"]
+    refs = []
+
+    def walk(t):
+        if t.get("ref"):
+            refs.append(t["ref"])
+        for c in t.get("children", []):
+            walk(c)
+    walk(tree)
+    assert tree["ref"] == "question" and all(r in by for r in refs)
+    labels = [c["label"] for c in tree["children"]]
+    assert labels[0] == "Methods" and "Evidence" in labels and "Research gaps" in labels
+    assert labels.index("Evidence") < labels.index("Research gaps")          # gaps come last, after the evidence
+    assert tree["subtitle"].startswith("What ML methods") and tree["label"] != tree["subtitle"]   # short title
+    concept = next(c for s in tree["children"] if s["label"] == "Methods" for c in s["children"])
+    assert concept["count"].endswith(f"/{n_papers} papers")                  # "3/16 papers", not "(+3)"
+    assert concept["children"][0]["type"] == "paper" and concept["children"][0]["children"]   # paper -> attributes
+    evidence = next(s for s in tree["children"] if s["label"] == "Evidence")
+    sup_claim = next(c for g in evidence["children"] if g["label"] == "Supported claims" for c in g["children"])
+    assert any(k["label"] == "Papers counted" for k in sup_claim["children"])
+    client = TestClient(api.app)
+    assert client.get(f"/runs/{rid}/graph").json()["stats"]["papers"] == n_papers
+    assert client.get("/runs/00000000-0000-0000-0000-000000000000/graph").status_code == 404
+
+
+def test_old_runs_keep_the_extraction_version_they_were_read_with(loaded_db):
+    """A schema change must not make an old run look unread: follow-ups, maps, drafts and exports read the
+    records the run was built from."""
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.agents.report import run_facts
+    from research_agent.db import get_conn
+    from research_agent.runstate import RunContext
+
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    with get_conn() as pg:
+        assert pg.execute("SELECT extraction_version FROM runs WHERE run_id=%s", (rid,)).fetchone()[
+            "extraction_version"] == settings.extraction_schema_version
+        ids = [r["paper_id"] for r in pg.execute("SELECT paper_id FROM run_papers WHERE run_id=%s", (rid,)).fetchall()]
+        # the run's papers exist under an older version, all read in full; the current version has fewer rows
+        pg.execute("""INSERT INTO extractions (paper_id, schema_version, source, data, model)
+                      SELECT paper_id, 'health-old', 'fulltext', data, model FROM extractions
+                      WHERE schema_version=%s AND paper_id = ANY(%s)""", (settings.extraction_schema_version, ids))
+        pg.execute("DELETE FROM extractions WHERE schema_version=%s AND paper_id = %s",
+                   (settings.extraction_schema_version, ids[0]))
+        pg.execute("UPDATE runs SET extraction_version=NULL WHERE run_id=%s", (rid,))    # a run from before
+    try:
+        ctx = RunContext.attach(rid, llm_factory=lambda strong=False: FakeLLM())
+        try:
+            assert ctx.extraction_version == "health-old"
+            facts = run_facts(ctx)
+            assert facts["fulltext"] == facts["extracted"] == len(ids)
+            assert ctx.child().extraction_version == "health-old"
+        finally:
+            ctx.close()
+        with get_conn() as pg:   # pinned from now on
+            assert pg.execute("SELECT extraction_version FROM runs WHERE run_id=%s", (rid,)).fetchone()[
+                "extraction_version"] == "health-old"
+    finally:
+        with get_conn() as pg:
+            pg.execute("DELETE FROM extractions WHERE schema_version='health-old'")
+
+
+def test_details_credited_to_a_paper_must_be_in_it(loaded_db):
+    from research_agent.agents.report import _N_OF_M, _int, audit_numbers
+    from research_agent.db import get_conn
+    from research_agent.tools.citing import check_attributions
+
+    with get_conn() as pg:
+        a = pg.execute("SELECT paper_id FROM papers WHERE title ILIKE '%%malawi%%random forest%%' LIMIT 1").fetchone()["paper_id"]
+        b = pg.execute("SELECT paper_id FROM papers WHERE title ILIKE '%%kenya%%lstm%%' LIMIT 1").fetchone()["paper_id"]
+        text = (f"A random-forest model in Malawi [arXiv:{a}] and a gradient-boosting study in Ethiopia [arXiv:{b}]. "
+                f"A Kenyan study [arXiv:{b}]; an LSTM in Uganda [arXiv:{a}]. Counted [C12], among them a Malawian "
+                f"one [arXiv:{a}], reporting an error of 9.99 [arXiv:{a}]. We will work in [to be confirmed: Ethiopia].")
+        out, n = check_attributions(pg, text)
+    assert "gradient-boosting [unverified]" in out and "Ethiopia [unverified]" in out       # wrong for paper b
+    assert "LSTM [unverified]" in out and "Uganda [unverified]" in out                      # wrong for paper a
+    assert "Kenyan study [arXiv" in out and "Malawian one [arXiv" in out                    # right: untouched
+    assert "9.99 [unverified]" in out and "[to be confirmed: Ethiopia]" in out and n == 5
+    # counts written in words, and "of the"
+    t = "one of 49 papers, two of 39 report, 12 of the 49 were read, none of the 49 use it, one of the most common"
+    assert [(_int(m.group(1)), _int(m.group(2))) for m in _N_OF_M.finditer(t)] == [(1, 49), (2, 39), (12, 49), (0, 49)]
+    out, flagged = audit_numbers(t, {(1, 49), (0, 49)})
+    assert flagged == 2 and "two of 39 [unverified]" in out and "12 of the 49 [unverified]" in out
+
+
+def test_counts_must_be_measured_where_the_thing_is_recorded(ctx):
+    from research_agent.tools.claims import PMC_TREND_CAVEAT, evaluate_trend, field_misfit, propose_claim
+
+    assert field_misfit("evaluation_metrics", ["out-of-sample", "cross-validation"])
+    assert field_misfit("datasets", ["NDVI"]) and not field_misfit("evaluation_metrics", ["RMSE", "AUC"])
+    res = propose_claim(ctx, "Out-of-sample testing is rare.", "prevalence",
+                        {"field": "evaluation_metrics", "any_of": ["out-of-sample"], "max_share": 0.1}, _agent="test")
+    assert "error" in res and "metric names" in res["error"]
+    r = evaluate_trend(ctx, {"keywords": "malaria", "early": [2016, 2018], "late": [2021, 2023],
+                             "direction": "increase", "source": "pmc"})
+    assert PMC_TREND_CAVEAT in r["caveat"]
+    r = evaluate_trend(ctx, {"keywords": "malaria", "early": [2016, 2018], "late": [2021, 2023],
+                             "direction": "increase", "source": "arxiv"})
+    assert PMC_TREND_CAVEAT not in (r["caveat"] or "")
+
+
+def test_drafts_speak_to_outside_readers():
+    from research_agent.agents.draft import _dedupe_claims, plain_words
+    from research_agent.agents.report import depth_warning
+
+    t = plain_words("In the 49-paper shortlist, shortlisted papers use it; the shortlist is small. The rise was "
+                    "not seen (claim C264, not supported). The extraction is thin, but the extraction records it.")
+    assert "shortlist" not in t and "claim C264" not in t and "49 included studies" in t
+    assert "the set of included studies is small" in t and "(not supported by the counts)" in t
+    kept = _dedupe_claims([{"claim": "C1", "status": "supported"}, {"claim": "C2", "status": "supported"},
+                           {"claim": "C3", "status": "supported"}],
+                          {"C1": list("abcdefghijklmn"), "C2": list("abcdefghijklmno"), "C3": list("xyz")})
+    assert [c["claim"] for c in kept] == ["C1", "C3"] and kept[0]["same_as"] == ["C2"]      # 14 vs 15 of 49
+    assert depth_warning({"shortlist": 49, "fulltext": 0}).startswith("Only 0 of the 49 studies were read in full")
+    assert depth_warning({"shortlist": 49, "fulltext": 20}) is None
+
+
+# ---------------------------------------------------------------- open-ended researcher
+def _synthetic_literature(seed: int, n: int = 240):
+    """Studies with a real pattern (satellite data -> external validation, in every place and corpus), a
+    confounded one (LSTM studies are mostly Kenyan, and Kenyan studies validate externally more) and noise."""
+    import random
+
+    rng, rows = random.Random(seed), []
+    for i in range(n):
+        place = rng.choice(["Kenya", "Uganda", "Malawi"])
+        sat = rng.random() < 0.5
+        lstm = rng.random() < (0.7 if place == "Kenya" else 0.1)
+        p_ext = (0.55 if sat else 0.15) + (0.25 if place == "Kenya" else 0.0)
+        rows.append({"paper_id": f"s{i}", "source": "fulltext" if i % 3 else "abstract",
+                     "corpus": "pmc" if i % 2 else "arxiv", "year": 2012 + i % 12, "title": "t",
+                     "data": {"data_modalities": ["satellite"] if sat else ["surveillance counts"],
+                              "methods": ["LSTM"] if lstm else ["ARIMA"], "geography": [place],
+                              "validation_level": "external" if rng.random() < p_ext else "internal",
+                              "noise": [rng.choice(["alpha", "beta"])]}})
+    return rows
+
+
+def test_pattern_statistics():
+    from research_agent.research.patterns import (binom_tail, fisher_exact, mantel_haenszel, signature, validate,
+                                                  wilson)
+
+    assert round(fisher_exact(8, 2, 1, 5), 4) == 0.035 and round(fisher_exact(3, 1, 1, 3), 4) == 0.4857
+    assert [round(x, 3) for x in wilson(0, 49)] == [0.0, 0.073] and round(binom_tail(0, 49, 0.1, False), 4) == 0.0057
+    # a difference that exists only because of the strata disappears once they are held apart
+    confounded = mantel_haenszel([[30, 10, 15, 5], [2, 8, 10, 40]])          # within each stratum: equal rates
+    assert abs(confounded["adjusted_difference"]) < 0.01 and confounded["p"] > 0.5
+    real = mantel_haenszel([[30, 10, 5, 15], [15, 5, 3, 17]])
+    assert real["adjusted_difference"] > 0.4 and real["p"] < 0.001
+    a = {"kind": "difference", "outcome": [{"field": "methods", "any_of": ["LSTM", "GRU"]}],
+         "group_a": [{"field": "geography", "any_of": ["Kenya"]}]}
+    b = {"group_a": [{"any_of": ["kenya"], "field": "geography"}], "kind": "difference",
+         "outcome": [{"field": "methods", "any_of": ["gru", "lstm"]}]}
+    assert signature(a) == signature(b)                                       # same pattern, any order or case
+    lists = ["methods", "geography", "evaluation_metrics"]
+    assert validate(a, lists, {}) is None and "kind" in validate({"kind": "vibes"}, lists, {})
+    assert "metric names" in validate({"kind": "prevalence", "max_share": 0.1, "outcome": [
+        {"field": "evaluation_metrics", "any_of": ["out-of-sample"]}]}, lists, {})
+
+
+def test_gauntlet_confirms_real_patterns_and_stops_confounded_ones():
+    from collections import Counter
+
+    from research_agent.research import gauntlet as GT
+    from research_agent.research import patterns as P
+
+    enums = {"validation_level": ["internal", "external", "not_stated"]}
+    outcome = [{"field": "validation_level", "any_of": ["external"]}]
+    rivals = [{"explanation": "place", "kind": "stratify", "field": "geography", "any_of": ["Kenya"]},
+              {"explanation": "corpus", "kind": "stratify", "field": "corpus", "any_of": ["arxiv"]}]
+    grades = {k: Counter() for k in ("real", "confounded", "noise")}
+    for seed in range(12):
+        disc, hold = P.split_rows(_synthetic_literature(seed), f"k{seed}")
+        for name, group in (("real", {"field": "data_modalities", "any_of": ["satellite"]}),
+                            ("confounded", {"field": "methods", "any_of": ["LSTM"]}),
+                            ("noise", {"field": "noise", "any_of": ["alpha"]})):
+            spec = {"kind": "difference", "outcome": outcome, "group_a": [group]}
+            d = P.evaluate(spec, disc, enums)
+            g = GT.grade(d, GT.subgroup_tests(spec, disc, enums, d["direction"]), GT.traps(spec, disc, d, enums),
+                         [GT.test_alternative(spec, a, disc, enums, d) for a in rivals],
+                         GT.holdout_test(spec, hold, enums, d["direction"], 0.05))
+            grades[name][g["grade"]] += 1
+    assert set(grades["real"]) <= {"strong", "moderate"} and grades["real"]["strong"] >= 10
+    assert not (grades["confounded"]["strong"] or grades["confounded"]["moderate"])   # never confirmed
+    assert set(grades["noise"]) == {"rejected"}
+    # the rival that is the real cause is named as such
+    disc, hold = P.split_rows(_synthetic_literature(7), "s1")
+    spec = {"kind": "difference", "outcome": outcome, "group_a": [{"field": "methods", "any_of": ["LSTM"]}]}
+    d = P.evaluate(spec, disc, enums)
+    assert GT.test_alternative(spec, rivals[0], disc, enums, d)["verdict"] == "explains it"
+    # traps: a corpus comparison is refused outright; statements carry no numbers
+    corpus_spec = {"kind": "difference", "outcome": outcome, "group_a": [{"field": "corpus", "any_of": ["pmc"]}]}
+    cd = P.evaluate(corpus_spec, disc, enums)
+    assert any(t["status"] == "fail" for t in GT.traps(corpus_spec, disc, cd, enums))
+    assert GT.plain_statement_problem("Satellite studies validate externally in 42 of 58 cases.")
+
+
+def test_researcher_cycles_with_safeguards(loaded_db, monkeypatch):
+    import dataclasses
+
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.db import get_conn
+    from research_agent.research import researcher as R
+
+    monkeypatch.setattr(R, "settings", dataclasses.replace(R.settings, research_scope_min=0.0,
+                                                           research_checkpoint_every=3, research_question_cycles=2))
+    fake = lambda strong=False: FakeLLM()   # noqa: E731
+    run_id = run_research("What ML methods are used for malaria forecasting?", mode="pipeline", llm_factory=fake)["run_id"]
+    rid = R.create(run_id, "Understand how malaria forecasting studies choose methods and validation",
+                   scope="malaria forecasting", out_of_bounds=["clinical treatment"], max_cycles=6)
+    seeded = R.run_cycle(rid, llm_factory=fake)
+    assert seeded["seeded"] == 3
+    g = R.get(rid)
+    by_q = {a["question"][:30]: a for a in g["agenda"]}
+    assert by_q["How should clinical treatment "]["status"] == "needs_approval"          # out of bounds
+    assert sum(a["status"] == "open" for a in g["agenda"]) == 2
+    out = R.run_cycle(rid, llm_factory=fake)
+    assert out["agenda_id"] and out["new_findings"] == 1
+    g = R.get(rid)
+    assert g["tests"] == 1                                    # re-testing the same pattern did not add a test
+    finding = g["findings"][0]
+    assert finding["grade"] in ("rejected", "provisional", "moderate", "strong") and finding["evidence"]["holdout"]
+    child = [a for a in g["agenda"] if a["parent_id"]]
+    assert child and child[0]["parent_id"] == out["agenda_id"]                           # sub-questions hang under
+    # the researcher never sees the hidden half: reading one of its studies is refused
+    ctx, _ = R._open(rid, fake)
+    try:
+        hidden = next(iter({r["paper_id"] for r in ctx._research.hold}), None)
+        if hidden:
+            assert "held-out" in R.read_study(ctx, hidden)["error"]
+        # proposing the same tested pattern twice is refused; the verdict hides the held-out counts
+        again = R.propose_finding(ctx, finding["test_id"], "Random forest studies cluster in Malawi again, surely.")
+        assert "already judged" in again["error"]
+    finally:
+        ctx.close()
+    # a checkpoint runs on cycle 3; questions that used their cycles are parked with the reason
+    R.run_cycle(rid, llm_factory=fake)
+    g = R.get(rid)
+    assert any(n["kind"] == "checkpoint" for n in g["notebook"])
+    R.run_cycle(rid, llm_factory=fake)
+    R.run_cycle(rid, llm_factory=fake)        # parking is decided at the start of the cycle after the limit
+    g = R.get(rid)
+    assert any(a["status"] == "parked" and "cycles" in (a["status_note"] or "") for a in g["agenda"])
+    # pause stops cycles; approval opens a waiting question
+    R.set_status(rid, "paused", "test")
+    assert R.run_cycle(rid, llm_factory=fake) == {"skipped": "paused"}
+    waiting = next(a for a in g["agenda"] if a["status"] == "needs_approval")
+    R.decide_question(rid, waiting["id"], True)
+    assert next(a for a in R.get(rid)["agenda"] if a["id"] == waiting["id"])["status"] == "open"
+    # budgets: the daily cap makes the next cycle wait; the total cap finishes the researcher
+    with get_conn() as pg:
+        pg.execute("UPDATE researchers SET status='active', daily_tokens=1 WHERE id=%s", (rid,))
+    assert "waiting" in R.run_cycle(rid, llm_factory=fake)
+    with get_conn() as pg:
+        pg.execute("UPDATE researchers SET daily_tokens=100000000, total_tokens=1 WHERE id=%s", (rid,))
+    assert R.run_cycle(rid, llm_factory=fake) == {"finished": "total budget used"}
+    assert R.get(rid)["researcher"]["status"] == "finished"
+
+
+def test_researcher_scope_check_and_web(loaded_db, monkeypatch):
+    import dataclasses
+
+    from fastapi.testclient import TestClient
+
+    from research_agent import cli, jobs
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.api import main as api
+    from research_agent.db import get_conn
+    from research_agent.research import researcher as R
+
+    monkeypatch.setattr(R, "settings", dataclasses.replace(R.settings, research_scope_min=1.01))  # nothing is close
+    monkeypatch.setattr(jobs, "_llm_factory", lambda strong=False: FakeLLM())
+    run_id = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                          llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    client = TestClient(api.app)
+    assert client.post(f"/runs/{run_id}/researchers", json={"goal": "short"}).status_code == 422
+    r = client.post(f"/runs/{run_id}/researchers", json={"goal": "Find promising directions in malaria forecasting",
+                                                          "max_cycles": 3})
+    assert r.status_code == 202
+    rid = r.json()["researcher_id"]
+    assert jobs.Worker(name="t").run_once()                  # the first cycle seeds the agenda...
+    g = client.get(f"/researchers/{rid}").json()
+    assert g["agenda"] and all(a["status"] == "needs_approval" for a in g["agenda"])   # ...all far from the charter
+    with get_conn() as pg:                                    # ...and the next cycle was queued, after a pause
+        nxt = pg.execute("SELECT run_at > now() AS later FROM jobs WHERE kind='research_cycle' AND status='queued' "
+                         "AND payload->>'researcher_id' = %s", (str(rid),)).fetchone()
+    assert nxt and nxt["later"]
+    assert client.post(f"/researchers/{rid}/status", json={"action": "pause"}).json()["ok"]
+    assert client.get(f"/researchers/{rid}").json()["researcher"]["status"] == "paused"
+    aid = g["agenda"][0]["id"]
+    assert client.post(f"/researchers/{rid}/agenda/{aid}", json={"approve": True}).json()["ok"]
+    assert client.get(f"/runs/{run_id}/researchers").json()["researchers"][0]["id"] == rid
+    assert client.post(f"/researchers/{rid}/status", json={"action": "stop"}).json()["ok"]
+    assert client.post(f"/researchers/{rid}/status", json={"action": "resume"}).status_code == 409
+    assert cli.main(["research", "status", str(rid)]) == 0

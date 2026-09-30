@@ -29,6 +29,9 @@ async def _lifespan(_app):
 
     try:
         init_schema()
+        from research_agent.agents.followup import schema_is_ready
+
+        schema_is_ready()
     except Exception as exc:   # the server should still start; endpoints report their own errors
         print(f"database migration failed: {exc}")
     workers = []
@@ -47,7 +50,11 @@ app = FastAPI(title="Health Research Intelligence API", version="0.1.0", lifespa
 _RUNS_PER_HOUR = 5
 _COST = {"map": 2}
 # a run is a map if its protocol step saved a note (true from the map's first step onwards)
-_IS_MAP = "EXISTS (SELECT 1 FROM run_notes n WHERE n.run_id = runs.run_id AND n.agent = 'protocol')"
+_IS_MAP = ("coalesce((SELECT n.content->>'mode' = 'map' FROM run_notes n WHERE n.run_id = runs.run_id AND n.agent = 'mode'), "
+           # runs from before the mode note: a map has a map note, or a protocol and none of the report agents
+           "EXISTS (SELECT 1 FROM run_notes n WHERE n.run_id = runs.run_id AND n.agent = 'map') OR "
+           "(EXISTS (SELECT 1 FROM run_notes n WHERE n.run_id = runs.run_id AND n.agent = 'protocol') AND NOT EXISTS "
+           "(SELECT 1 FROM run_notes n WHERE n.run_id = runs.run_id AND n.agent IN ('methods','trends','gaps','evidence','synthesis'))))")
 _hits: dict[str, deque] = defaultdict(deque)
 
 
@@ -75,8 +82,8 @@ def list_runs(limit: int = 10):
 @app.get("/health")
 def health():
     with get_conn() as pg:
-        n = pg.execute("SELECT count(*) n FROM papers").fetchone()["n"]
-    return {"ok": True, "papers": n}
+        rows = pg.execute("SELECT source, count(*) n FROM papers GROUP BY source").fetchall()
+    return {"ok": True, "papers": sum(r["n"] for r in rows), "by_source": {r["source"]: r["n"] for r in rows}}
 
 
 @app.post("/runs", status_code=202)
@@ -174,11 +181,28 @@ class DraftRequest(BaseModel):
     direction: str = Field(default="", max_length=1500)
     about: list[str] = Field(default_factory=list, max_length=6)
     provider: str | None = Field(default=None, pattern="^(anthropic|groq|deepseek)$")
+    citation_style: str = Field(default="author-year", pattern="^(author-year|numbered)$")
 
 
 _DRAFTS_PER_HOUR = 6
 _dhits: dict[str, deque] = defaultdict(deque)
 _ITEM_ID = re.compile(r"^[CGNERWHDcgnerwhd][0-9]{1,6}$")
+
+
+@app.get("/runs/{run_id}/graph")
+def get_graph(run_id: str):
+    """The run as a graph (nodes and links) and as a mind map (tree), built from the database."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools.graph import build_graph
+
+    try:
+        ctx = RunContext.attach(run_id, llm_factory=lambda strong=False: None)
+    except ValueError:
+        raise HTTPException(404, "no such run")
+    try:
+        return build_graph(ctx)
+    finally:
+        ctx.close()
 
 
 @app.get("/runs/{run_id}/directions")
@@ -218,7 +242,8 @@ def start_draft(run_id: str, req: DraftRequest, request: Request):
     if run["status"] != "done" or not run["has_report"]:
         raise HTTPException(409, "Drafts are written from a finished run with a report or map.")
     q.append(now)
-    ids = draft.draft_in_background(run_id, req.kind, req.direction, [a.upper() for a in req.about], req.provider)
+    ids = draft.draft_in_background(run_id, req.kind, req.direction, [a.upper() for a in req.about], req.provider,
+                                    req.citation_style)
     return {**ids, "poll": f"/drafts/{ids['draft_id']}"}
 
 
@@ -253,6 +278,87 @@ def export_draft(draft_id: int, fmt: str):
     except ValueError as exc:
         raise HTTPException(404, str(exc))
     return Response(data, media_type=media, headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+class ResearcherRequest(BaseModel):
+    goal: str = Field(min_length=10, max_length=600)
+    scope: str = Field(default="", max_length=600)
+    out_of_bounds: list[str] = Field(default_factory=list, max_length=10)
+    max_cycles: int = Field(default=20, ge=1, le=200)
+    daily_tokens: int = Field(default=2_000_000, ge=10_000, le=100_000_000)
+    total_tokens: int = Field(default=10_000_000, ge=10_000, le=1_000_000_000)
+    split: str = Field(default="random", pattern="^(random|year)$")
+    split_year: int | None = Field(default=None, ge=1990, le=2100)
+    provider: str | None = Field(default=None, pattern="^(anthropic|groq|deepseek)$")
+
+
+@app.post("/runs/{run_id}/researchers", status_code=202)
+def start_researcher(run_id: str, req: ResearcherRequest):
+    """Start an open-ended researcher on a finished run. It works in background cycles within its budget."""
+    from research_agent.research import researcher as R
+
+    with get_conn() as pg:
+        run = pg.execute("SELECT status FROM runs WHERE run_id=%s", (run_id,)).fetchone()
+    if not run:
+        raise HTTPException(404, "no such run")
+    if run["status"] != "done":
+        raise HTTPException(409, "A researcher works on a finished run or map.")
+    if req.split == "year" and not req.split_year:
+        raise HTTPException(422, "a year split needs split_year")
+    try:
+        out = R.start_in_background(run_id, req.goal, scope=req.scope, out_of_bounds=req.out_of_bounds,
+                                    max_cycles=req.max_cycles, daily_tokens=req.daily_tokens,
+                                    total_tokens=req.total_tokens, split=req.split, split_year=req.split_year,
+                                    provider=req.provider)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return {**out, "poll": f"/researchers/{out['researcher_id']}"}
+
+
+@app.get("/runs/{run_id}/researchers")
+def run_researchers(run_id: str):
+    from research_agent.research.researcher import list_for_run
+
+    return {"researchers": list_for_run(run_id)}
+
+
+@app.get("/researchers/{rid}")
+def get_researcher(rid: int):
+    from research_agent.research.researcher import get
+
+    r = get(rid)
+    if not r:
+        raise HTTPException(404, "no such researcher")
+    return r
+
+
+class ResearcherAction(BaseModel):
+    action: str = Field(pattern="^(pause|resume|stop)$")
+
+
+@app.post("/researchers/{rid}/status")
+def researcher_status(rid: int, req: ResearcherAction):
+    from research_agent.research.researcher import get, set_status
+
+    r = get(rid)
+    if not r:
+        raise HTTPException(404, "no such researcher")
+    if r["researcher"]["status"] in ("stopped", "finished") and req.action == "resume":
+        raise HTTPException(409, "This researcher has ended; start a new one.")
+    set_status(rid, {"pause": "paused", "resume": "active", "stop": "stopped"}[req.action], f"{req.action}d by you")
+    return {"ok": True}
+
+
+class QuestionDecision(BaseModel):
+    approve: bool
+
+
+@app.post("/researchers/{rid}/agenda/{agenda_id}")
+def decide_agenda_question(rid: int, agenda_id: int, req: QuestionDecision):
+    from research_agent.research.researcher import decide_question
+
+    decide_question(rid, agenda_id, req.approve)
+    return {"ok": True}
 
 
 @app.get("/runs/{run_id}/export/{fmt}")

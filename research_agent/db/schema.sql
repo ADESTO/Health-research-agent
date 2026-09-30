@@ -193,6 +193,9 @@ CREATE TABLE IF NOT EXISTS drafts (
     finished_at timestamptz
 );
 CREATE INDEX IF NOT EXISTS drafts_run_idx ON drafts (run_id, id);
+-- the extraction schema version a run was read with (older runs keep their records after a schema change)
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS extraction_version text;
+ALTER TABLE drafts ADD COLUMN IF NOT EXISTS citation_style text NOT NULL DEFAULT 'author-year';
 
 -- Screening log for systematic-review reporting (PRISMA): every paper discovery saw, and what happened to it.
 CREATE TABLE IF NOT EXISTS screening (
@@ -241,3 +244,71 @@ CREATE TABLE IF NOT EXISTS jobs (
     finished_at   timestamptz
 );
 CREATE INDEX IF NOT EXISTS jobs_queue_idx ON jobs (status, run_at, id);
+
+-- Open-ended researcher: a charter, an agenda of questions, a notebook, tested patterns and graded findings
+CREATE TABLE IF NOT EXISTS researchers (
+    id            bigserial PRIMARY KEY,
+    run_id        uuid NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,   -- the studies it works on
+    charter       jsonb NOT NULL,                  -- goal, scope, out_of_bounds, success
+    status        text NOT NULL DEFAULT 'active',  -- active | paused | stopped | finished
+    status_note   text,
+    split         jsonb NOT NULL,                  -- how studies are divided into discovery and held-out halves
+    max_cycles    int NOT NULL DEFAULT 20,
+    cycles_done   int NOT NULL DEFAULT 0,
+    daily_tokens  bigint NOT NULL DEFAULT 2000000,
+    total_tokens  bigint NOT NULL DEFAULT 10000000,
+    tokens_used   bigint NOT NULL DEFAULT 0,
+    provider      text,
+    created_at    timestamptz DEFAULT now(),
+    updated_at    timestamptz DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS research_agenda (
+    id            bigserial PRIMARY KEY,
+    researcher_id bigint NOT NULL REFERENCES researchers(id) ON DELETE CASCADE,
+    parent_id     bigint REFERENCES research_agenda(id) ON DELETE SET NULL,
+    question      text NOT NULL,
+    why           text,
+    status        text NOT NULL DEFAULT 'open',    -- open | answered | parked | pruned | needs_approval
+    status_note   text,
+    priority      int NOT NULL DEFAULT 50,
+    cycles_used   int NOT NULL DEFAULT 0,
+    stalled       int NOT NULL DEFAULT 0,          -- consecutive cycles without progress
+    tokens_used   bigint NOT NULL DEFAULT 0,
+    scope_score   real,
+    created_at    timestamptz DEFAULT now(),
+    updated_at    timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS research_agenda_idx ON research_agenda (researcher_id, status);
+CREATE TABLE IF NOT EXISTS research_notebook (
+    id            bigserial PRIMARY KEY,
+    researcher_id bigint NOT NULL REFERENCES researchers(id) ON DELETE CASCADE,
+    agenda_id     bigint,
+    cycle         int,
+    kind          text NOT NULL,                   -- cycle | note | test | finding | checkpoint | park | usage | stop
+    content       jsonb NOT NULL,
+    ts            timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS research_notebook_idx ON research_notebook (researcher_id, id);
+CREATE TABLE IF NOT EXISTS research_tests (
+    id            bigserial PRIMARY KEY,
+    researcher_id bigint NOT NULL REFERENCES researchers(id) ON DELETE CASCADE,
+    agenda_id     bigint,
+    signature     text NOT NULL,
+    spec          jsonb NOT NULL,
+    description   text,
+    result        jsonb NOT NULL,                  -- on the discovery half only
+    ts            timestamptz DEFAULT now(),
+    UNIQUE (researcher_id, signature)
+);
+CREATE TABLE IF NOT EXISTS research_findings (
+    id            bigserial PRIMARY KEY,
+    researcher_id bigint NOT NULL REFERENCES researchers(id) ON DELETE CASCADE,
+    agenda_id     bigint,
+    test_id       bigint REFERENCES research_tests(id) ON DELETE SET NULL,
+    statement     text NOT NULL,
+    grade         text NOT NULL,                   -- strong | moderate | provisional | rejected
+    status        text NOT NULL,                   -- confirmed | provisional | rejected
+    reasons       jsonb,
+    evidence      jsonb,                           -- discovery, subgroups, traps, rivals, held-out, examples
+    created_at    timestamptz DEFAULT now()
+);

@@ -80,6 +80,12 @@ class Settings:
     ask_protocol: bool = os.getenv("ASK_PROTOCOL", "1") != "0"
     # job workers inside the web server (0 = none; then start `python -m research_agent.cli worker`)
     embedded_workers: int = int(os.getenv("EMBEDDED_WORKERS", "1"))
+    # open-ended researcher: pause between background cycles, cycles one question may use before it is parked,
+    # supervisor checkpoint interval, and the similarity to the charter below which a new question needs approval
+    research_cycle_gap_seconds: int = int(os.getenv("RESEARCH_CYCLE_GAP_SECONDS", "30"))
+    research_question_cycles: int = int(os.getenv("RESEARCH_QUESTION_CYCLES", "3"))
+    research_checkpoint_every: int = int(os.getenv("RESEARCH_CHECKPOINT_EVERY", "3"))
+    research_scope_min: float = float(os.getenv("RESEARCH_SCOPE_MIN", "0.30"))
     # citation graph from OpenAlex (set OPENALEX_API_KEY, free, for a 10x larger daily allowance)
     citations: bool = os.getenv("CITATIONS", "1") != "0"
     # focused quoted re-checks when a rarity count is contradicted by the papers' own text
