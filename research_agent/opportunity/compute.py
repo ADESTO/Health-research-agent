@@ -32,6 +32,12 @@ THRESHOLDS = {
     "missing_max_share": 0.05, "missing_max_n": 2,
     "novelty_min_component_n": 3, "novelty_max_observed": 1, "novelty_min_expected": 1.5,
     "novelty_max_p": 0.2, "corpus_min_papers": 5, "emerging_max_p": 0.2,
+    # two components are the same fact under two names when their paper sets overlap this much
+    "mirror_min_jaccard": 0.8,
+    # a stratum needs at least this many papers to say anything about what co-occurs inside it
+    "stratum_min_papers": 4,
+    # a watch item must at least lean the right way; at p = 1 the data says nothing is happening
+    "watch_max_p": 0.9,
 }
 
 # Generic statistics are not methods of the kind the map is about ("Pearson correlation" is how a paper
@@ -91,6 +97,103 @@ def role_of(field: dict | str) -> str:
         if re.search(rx, name, re.I):
             return role
     return field["name"]
+
+
+# ---------------------------------------------------------------- novelty: the null has to be right
+def strata(rows: list[dict], protocol: dict, min_papers: int) -> list[tuple[str, list[set]]]:
+    """Ways the corpus splits into groups that cannot overlap, one entry per single-choice enum field:
+    (field name, [paper-id set per value]). Only levels with enough papers to say anything are kept."""
+    out = []
+    for f in protocol.get("fields", []):
+        if f["type"] != "enum":
+            continue
+        groups = []
+        for v in f["values"]:
+            if v == "not_stated":
+                continue
+            ids = {r["paper_id"] for r in rows if v.lower() in {x.lower() for x in _values(r["data"], f["name"])}}
+            if len(ids) >= min_papers:
+                groups.append(ids)
+        if len(groups) >= 2:
+            out.append((f["name"], groups))
+    return out
+
+
+def stratified_expected(ia: set, ib: set, groups: list[set]) -> float:
+    """How many papers would use BOTH components if, INSIDE each group, papers chose them independently.
+
+    This is the number the novelty claim needs, and it is not the same as n_a * n_b / N. When a corpus is
+    really two literatures that never meet (animal experiments and human trials, say), a component confined
+    to one of them and a component confined to the other never co-occur, and the plain formula calls that a
+    striking absence. Stratified, each group contributes only what that group could have produced: the
+    animal group has no women's trials and the human group has no animal experiments, so the expectation is
+    zero and the pair says nothing. A combination that is genuinely untried behaves differently, because the
+    group where both components live still expects to see it."""
+    total = 0.0
+    for ids in groups:
+        n = len(ids)
+        if n:
+            total += len(ia & ids) * len(ib & ids) / n
+    return total
+
+
+def explained_by_a_stratum(ia: set, ib: set, all_strata, min_expected: float) -> str | None:
+    """The field, if any, whose levels on their own account for two components never appearing together.
+
+    One such field is enough, exactly as one rival explanation is enough to drop a researcher's finding: if
+    knowing which kind of study a paper is already predicts that it cannot use both, their absence together
+    is arithmetic rather than an opportunity."""
+    for field, groups in all_strata:
+        if stratified_expected(ia, ib, groups) < min_expected:
+            return field
+    return None
+
+
+def _collapse_mirrors(items: list[dict], ids: list[set], min_jaccard: float) -> tuple[list[dict], int]:
+    """Fold established items that cover the same papers into one, keeping the better-evidenced wording.
+
+    Two fields often record one fact: a population of `animal model` and a design of
+    `animal or in vitro experiment` are the same eleven papers. Reported separately they make a run look
+    like it found two things. The survivor carries the others under `also_recorded_as` so nothing is lost."""
+    keep: list[int] = []
+    dropped = 0
+    for i, item in enumerate(items):
+        twin = next((k for k in keep if mirrors(item, items[k], ids[i], ids[k], min_jaccard)), None)
+        if twin is None:
+            keep.append(i)
+            continue
+        # keep whichever is better confirmed: more full-text reads, then the larger paper count
+        better = i if (item.get("n_fulltext", 0), item.get("n", 0)) > \
+            (items[twin].get("n_fulltext", 0), items[twin].get("n", 0)) else twin
+        other = twin if better == i else i
+        items[better].setdefault("also_recorded_as", []).append(items[other]["label"])
+        keep[keep.index(twin)] = better
+        dropped += 1
+    order = sorted(keep, key=lambda k: items[k].get("share", 0), reverse=True)
+    return [items[k] for k in order], dropped
+
+
+_MIRROR_STOP = {"only", "other", "stated", "reported", "none", "with", "without", "study", "studies", "type",
+                "level", "general", "unspecified", "multiple", "single", "both", "mixed", "true", "false"}
+
+
+def _concept_words(label: str) -> set[str]:
+    return {w for w in re.split(r"[^a-z0-9]+", label.lower()) if len(w) >= 4 and w not in _MIRROR_STOP}
+
+
+def mirrors(a: dict, b: dict, ia: set, ib: set, min_jaccard: float) -> bool:
+    """Are these two items the same fact recorded in two fields?
+
+    Two conditions, and both are needed. The paper sets must be nearly identical, AND the two values must
+    share a word. The second condition is what keeps this honest: in a twenty-paper run plenty of unrelated
+    fields coincide exactly by chance, and folding those together would hide real findings. `animal model`
+    under population and `animal or in vitro experiment` under design share "animal" and are one fact; a
+    one-month horizon and the use of satellite data may cover the same papers and are still two facts."""
+    union = ia | ib
+    if not union or len(ia & ib) / len(union) < min_jaccard:
+        return False
+    return bool(_concept_words(str(a.get("value") or a.get("label") or ""))
+                & _concept_words(str(b.get("value") or b.get("label") or "")))
 
 
 # ---------------------------------------------------------------- small-sample statistics
@@ -337,6 +440,7 @@ def compute_map(ctx, protocol: dict) -> dict:
     corpus_sizes = {c: sum(1 for r in rows if (r.get("corpus") or "?") == c) for c in corpora}
     T = THRESHOLDS
     established, emerging, watch, gaps, pool = [], [], [], [], []
+    established_ids: list[set] = []
     for feat in _features(rows, protocol, enums):
         s = _stats(rows, feat, cut)
         ids = s.pop("_ids")
@@ -353,6 +457,7 @@ def compute_map(ctx, protocol: dict) -> dict:
             pool.append((feat, s, ids))
         if s["share"] >= T["established_min_share"] and s["n"] >= T["established_min_n"]:
             established.append({**item, "strength": _strength(s, corpus_sizes)})
+            established_ids.append(ids)
         elif s["n"] >= T["emerging_min_n"] and s["share"] < T["established_min_share"]:
             rising = ((s["share_early"] > 0 and s["share_recent"] / s["share_early"] >= T["emerging_min_ratio"])
                       or (s["share_early"] == 0 and s["n_recent"] >= T["emerging_min_n"]))
@@ -369,6 +474,12 @@ def compute_map(ctx, protocol: dict) -> dict:
     novelty = []
     N = len(rows)
     by_id = {r["paper_id"]: r for r in rows}
+    # One fact recorded in two fields is one established item, not two. Collapsing them here keeps the
+    # section honest about how much the run found, and is what stops novelty pairing a value against the
+    # complement of its own field-mate.
+    established, folded = _collapse_mirrors(established, established_ids, T["mirror_min_jaccard"])
+
+    all_strata = strata(rows, protocol, T["stratum_min_papers"])
     for i, (fa, sa, ia) in enumerate(pool):
         for fb, sb, ib in pool[i + 1:]:
             if fa.field == fb.field or fa.role == fb.role:
@@ -377,15 +488,24 @@ def compute_map(ctx, protocol: dict) -> dict:
             expected = sa["n"] * sb["n"] / N
             if len(both) > T["novelty_max_observed"] or expected < T["novelty_min_expected"]:
                 continue
+            # the pair must still be unexpectedly absent once we know what KIND of study each component
+            # belongs to; if any single field accounts for it, their absence together is not news
+            explained = explained_by_a_stratum(ia, ib, all_strata, T["novelty_min_expected"])
+            if explained is not None:
+                continue
             p = hyper_le(len(both), N, sa["n"], sb["n"])
             if p > T["novelty_max_p"]:
                 continue
+            within = max(((f, stratified_expected(ia, ib, g)) for f, g in all_strata),
+                         key=lambda x: x[1], default=None)
             novelty.append({"a": {"label": fa.label, "field": fa.field, "value": fa.value, "role": fa.role,
                                   "n": sa["n"], "paper_ids": sa["paper_ids"][:5]},
                             "b": {"label": fb.label, "field": fb.field, "value": fb.value, "role": fb.role,
                                   "n": sb["n"], "paper_ids": sb["paper_ids"][:5]},
                             "observed": len(both), "expected": round(expected, 1), "p": round(p, 4),
-                            "score": round(expected - len(both), 2), "together_in": sorted(both)})
+                            "score": round(expected - len(both), 2), "together_in": sorted(both),
+                            **({"expected_within": {"field": within[0], "expected": round(within[1], 1)}}
+                               if within else {})})
     novelty.sort(key=lambda x: (x["p"], -x["score"]))
 
     def number(items, prefix):
@@ -396,6 +516,10 @@ def compute_map(ctx, protocol: dict) -> dict:
     established.sort(key=lambda x: -x["n"])
     emerging.sort(key=lambda x: (x["trend"]["p"], -(x["share_recent"] - x["share_early"])))
     watch.sort(key=lambda x: x["trend"]["p"])
+    # A watch list exists to say "this might be rising". An item whose p is 1.00 says the opposite, and a
+    # list where nothing at all separates from chance is the field inventory with a p-value stapled on: it
+    # fills a page and tells a reader nothing. Drop those, and drop the list if that empties it.
+    watch = [w for w in watch if w["trend"]["p"] < T["watch_max_p"]]
     gaps.sort(key=lambda x: -x["confidence"]["points"])
     lists, _ = known_fields(ctx)
     coverage = {f: round(sum(1 for r in rows if _values(r["data"], f)) / len(rows), 2)

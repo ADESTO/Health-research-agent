@@ -92,6 +92,14 @@ class Settings:
     recheck: bool = os.getenv("RECHECK", "1") != "0"
     # after the report is written, an agent backs, corrects or removes numbers code could not trace
     number_check: bool = os.getenv("NUMBER_CHECK", "1") != "0"
+    # before the report is written, claims whose state rests on reading depth have their abstract-only
+    # papers read in full and are measured again (tools/resolve.py). 0 claims turns it off.
+    resolve_evidence: bool = os.getenv("RESOLVE_EVIDENCE", "1") != "0"
+    resolve_max_claims: int = int(os.getenv("RESOLVE_MAX_CLAIMS", "4"))
+    resolve_papers_per_claim: int = int(os.getenv("RESOLVE_PAPERS_PER_CLAIM", "8"))
+    # and a budget for the pass as a whole, so a run's full-text reads stay predictable however many claims
+    # come out thin: the same allowance the extraction step gets, unless set otherwise
+    resolve_max_papers: int = int(os.getenv("RESOLVE_MAX_PAPERS", "0")) or int(os.getenv("MAX_FULLTEXT", "20"))
     # agents whose final answer is a long structured list (map protocol, gap reasoning, designs)
     long_output_max_tokens: int = int(os.getenv("LONG_OUTPUT_MAX_TOKENS", "8192"))
     # evidence quotes make extractions longer; a cut-off extraction now fails loudly instead of saving blanks
@@ -104,9 +112,12 @@ class Settings:
     # v3 adds reported results and associations (what papers found); v2 records are read again when needed
     # v4 widens the form beyond AI papers (study designs, populations, organisms, interventions, mechanisms,
     #    targets, outcomes); runs read under v3 keep their records and their form
+    # v5 splits validation_level: a test on a later period (temporal_holdout) and a test in a different
+    #    place (external_site) were both "external", so reports called them the same thing and any
+    #    comparison of the two mixed them. v4 runs keep the old enum (extraction.enums_for)
     # a count over fewer papers than this decides nothing either way: the claim's state is "uncertain"
     min_evidence_base: int = int(os.getenv("MIN_EVIDENCE_BASE", "10"))
-    extraction_schema_version: str = "health-v4"
+    extraction_schema_version: str = "health-v5"
     extra: dict = field(default_factory=dict)
 
 

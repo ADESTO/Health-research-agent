@@ -47,17 +47,28 @@ Rules:
   failure: this field being genuinely unstated is itself what the run is measuring."""
 
 
+def _base_definition(field: str) -> str:
+    """The wording the extraction form itself uses for a field, so a field pass reads papers by the same
+    rule the first read was meant to follow. Without it a pass would judge `validation_level` by the name
+    alone, which is exactly how a later-period test gets filed as a different-place one."""
+    from research_agent.tools.extraction import EXTRACTION_TOOL
+
+    spec = EXTRACTION_TOOL["input_schema"]["properties"].get(field) or {}
+    return spec.get("description") or f"The paper's {field.replace('_', ' ')}."
+
+
 def _field_def(ctx, field: str) -> dict | None:
     """The field as the run defines it: its type, its allowed values and the definition papers are read by."""
-    from research_agent.tools.extraction import ENUM_FIELDS, LIST_FIELDS, protocol_of
+    from research_agent.tools.extraction import LIST_FIELDS, enums_for, protocol_of
 
     for f in (protocol_of(ctx) or {}).get("fields", []):
         if f["name"] == field:
             return {"name": field, "type": f["type"], "values": f.get("values") or [],
                     "definition": f.get("definition") or "", "protocol": True}
-    if field in ENUM_FIELDS:
-        return {"name": field, "type": "enum", "values": ENUM_FIELDS[field],
-                "definition": f"The paper's {field.replace('_', ' ')}.", "protocol": False}
+    enums = enums_for(getattr(ctx, "extraction_version", None))
+    if field in enums:
+        return {"name": field, "type": "enum", "values": enums[field],
+                "definition": _base_definition(field), "protocol": False}
     if field in LIST_FIELDS:
         return {"name": field, "type": "list", "values": [],
                 "definition": f"The paper's {field.replace('_', ' ')}.", "protocol": False}

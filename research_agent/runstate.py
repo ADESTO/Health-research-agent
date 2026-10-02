@@ -39,6 +39,14 @@ def _routing_factory(base, clients: list):
     return factory
 
 
+def _hit_rate(u: dict) -> float | None:
+    """The share of input tokens served from the prompt cache. Worth watching rather than guessing: the
+    stable prefix of a step (its system prompt and tool schema) is the same on every call it makes, so a
+    rate near zero on a step that makes many calls means the prefix is not actually stable."""
+    total = u.get("input_tokens") or 0
+    return round((u.get("cached_input_tokens") or 0) / total, 2) if total else None
+
+
 def usage_cost(u: dict) -> float | None:
     """USD cost from token counts, using PRICE_* settings (per million tokens). None when prices are unset."""
     pi, pc, po = settings.price_input_per_m, settings.price_cached_input_per_m, settings.price_output_per_m
@@ -203,6 +211,7 @@ class RunContext:
         cost = usage_cost(out)
         if cost is not None:
             out["cost_usd"] = cost
+        out["cache_hit_rate"] = _hit_rate(out)
         return out
 
     def usage_by_step(self) -> dict:
@@ -219,6 +228,7 @@ class RunContext:
             cost = usage_cost(s)
             if cost is not None:
                 s["cost_usd"] = cost
+            s["cache_hit_rate"] = _hit_rate(s)
         return dict(sorted(steps.items(), key=lambda kv: -(kv[1].get("cost_usd") or kv[1]["input_tokens"])))
 
     def finish(self, report_md: str | None, error: str | None = None) -> None:

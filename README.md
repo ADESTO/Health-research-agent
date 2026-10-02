@@ -19,6 +19,11 @@ evidence-checked report.
                  (abstract +     → claims       → claims        → claims     CODE, rejects claims only
                  full text)                                                  overreach
       └──────────────┴──────────────┴──────┬───────┴──────────────┴─────────────┴──────────────┘
+                                           │
+                     ┌─────────────────────▼─────────────────────┐
+                     │  COHORT: the scope the run counts over,   │  stored once, applied wherever
+                     │  applied to every denominator             │  papers are counted
+                     └─────────────────────┬─────────────────────┘
                                            ▼
             ┌───────────────────────────────────────────────────────────────┐
             │  RESEARCH INTELLIGENCE (code, no model calls)                 │
@@ -28,7 +33,15 @@ evidence-checked report.
             │  evidence strength · gap confidence · untried combinations    │
             │  RESEARCH OPPORTUNITIES: each with what supports it, what     │
             │  weakens it, what is unresolved, and where it came from       │
+            │  PRECEDENT: has anyone already done it, searched across the   │
+            │  whole corpus and graded direct · partial · adjacent · none   │
             └──────────────────────────────┬────────────────────────────────┘
+                                           │
+                     ┌─────────────────────▼───────────────────────────┐
+                     │  RESOLUTION, before a word is written: claims   │
+                     │  whose state rests on reading depth go back to  │
+                     │  the papers, are read in full and re-measured   │
+                     └─────────────────────┬───────────────────────────┘
                                            ▼
      SHARED RUN STATE (Postgres): shortlist · extractions · claims + states · opportunities · notes · events
                                            │
@@ -37,8 +50,8 @@ evidence-checked report.
   FOLLOW-UPS      MAP VIEWS       DRAFTS          RESEARCHER      RE-READ         EXPORTS
   count again,    graph · mind    proposal or     its own         papers read     md · docx · bib
   read in full,   map · grid,     review, with    questions,      again in        · ris · csv · xlsx
-  same checks     from the same   real papers     tested and      full, fields    · protocol
-  as the report   records         cited           graded by code  re-coded        · PRISMA · burden
+  same checks     from the same   real papers     tested and      full, fields    · protocol · PRISMA
+  as the report   records         cited           graded by code  re-coded        · burden · PACKAGE
 
       corpus: arXiv + PubMed Central (open access) · tsvector + pgvector (HNSW) · year denominators
               per corpus, so a trend is normalised against the corpus it was measured in
@@ -187,11 +200,123 @@ nearest prior studies, what is still unresolved, what a study would need, and wh
 it. `GET /runs/{id}/opportunities`, `POST /runs/{id}/opportunities/{item_id} {"state": "dismissed"}`, and
 `export <run_id> opportunities` for the CSV.
 
+**Each opportunity is checked for precedent** against the whole corpus, not the shortlist it came from. A gap
+computed from sixty papers says nothing about the other hundreds of thousands, so each one is searched for and
+every nearby paper is graded by what was actually matched:
+
+| verdict | what it means |
+|---|---|
+| `direct` | a paper already does this: read it before going further |
+| `partial` | part of it is done, but not the part the opportunity turns on |
+| `adjacent` | nothing does this, but related work sits next to it |
+| `none` | nothing comes close, which may mean the question is new or badly worded |
+
+No model is involved: the grade is a function of the terms the opportunity is written on and the candidate's
+own text, and every verdict carries those terms so a reader can disagree with it. Two rules keep it honest. A
+value that only says which way a field points (`code_or_data_available = yes`) contributes nothing, because
+searching for the word "yes" would return every paper as precedent; the field's own words are used instead.
+And an opportunity written as prose rather than on a field and a value is capped at `adjacent`, however good
+the hits look, since a sentence cannot establish that a paper did the same thing.
+
+```bash
+python -m research_agent.cli precedent <run_id> [--item G2] [--candidates 40]
+```
+
+### The scope a run counts over
+
+A question usually carries a scope: African studies, East African isolates, paediatric trials. A researcher's
+charter could only ever say so in prose, where nothing enforced it: `scope` scores how close a proposed
+QUESTION is to the goal and `out_of_bounds` matches phrases in a question's text, but neither touches which
+papers a test counts. So a study from the wrong continent sat in every denominator until an agent happened to
+read it, and the scope had to be re-written into each test predicate by hand, every time.
+
+A **cohort** is that scope, stored on the run and applied in the one place paper records are built, so every
+count downstream shares it: claims, the researcher's statistical tests, the map, the report, the exports.
+
+```bash
+python -m research_agent.cli cohort <run_id> --include "geography=kenya,uganda,tanzania,east africa"
+python -m research_agent.cli cohort <run_id> --exclude "geography=india,china" --note "Africa only."
+python -m research_agent.cli cohort <run_id>            # show what is stored, and what it drops
+python -m research_agent.cli cohort <run_id> --clear
+```
+
+Papers that say nothing about a cohort field are **kept** by default and counted separately. Excluding
+silence would drop papers for how they were read rather than for what they are, which is the read-depth trap
+again, so the count kept that way is reported everywhere the cohort is: a cohort resting on thirty unstated
+papers is telling you to run a field pass, not to trust the filter. `--unstated exclude` overrides that. A
+cohort is written on extracted fields, so it can only apply after extraction: reading is never filtered, and
+excluding a paper removes it from the counting, not from the run.
+
+### Thin evidence is sent back to the papers before the report is written
+
+Naming a weak claim is not the same as doing something about it. Before synthesis writes a word, every claim
+whose state rests on **reading depth** has its abstract-only papers read in full (the papers the count missed
+first, since that is where under-counting hides) and is measured again with the same predicate. A number can
+only move because a paper turned out to say more than its abstract did.
+
+A claim that is thin because the literature is thin is left alone and said to be: too few papers to decide is
+not something reading can mend. A claim can also get worse, and `partially_supported` becoming `contradicted`
+is the system working, so it is recorded exactly like an improvement. What comes out is a resolution record
+in the report: the state before, the state after, the counts, the papers read, and which claims are still
+thin afterwards, which is the honest answer to "how much of this rests on abstracts?".
+
+The pass is bounded twice, by claims and by papers over the whole pass, so a run's cost stays predictable:
+`RESOLVE_MAX_CLAIMS` (4), `RESOLVE_PAPERS_PER_CLAIM` (8), `RESOLVE_MAX_PAPERS` (defaults to `MAX_FULLTEXT`).
+`RESOLVE_EVIDENCE=0` turns it off.
+
+### Untried combinations, and the null they are judged against
+
+A pair of components that are each common and never appear together is a candidate research opportunity.
+Whether it is really one depends on the null. Measuring expected co-occurrence as `n_a × n_b / N` assumes a
+paper picks each component independently, and that is wrong whenever a corpus is two literatures that never
+meet. A shortlist of 11 animal experiments and 9 human trials makes any animal-only component and any
+human-only component look like a striking absence, with the smallest p-values in the section, because the
+partition is clean. One such map proposed "women with an animal experiment" as its leading opportunity.
+
+So the expectation is computed **inside** each level of each single-choice field and summed. The animal group
+holds no women's trials and the human group no animal experiments, so the expectation is zero and the pair
+falls below the threshold. If any single field accounts for two components never meeting, the pair goes,
+exactly as one rival explanation is enough to drop a researcher's finding. A genuinely untried combination
+survives, because the group where both components live still expects to see it, and the item records which
+field that was.
+
+Two things fall out of the same idea. Established items that are one fact under two names are folded
+together: a population of `animal model` and a design of `animal or in vitro experiment` are the same
+papers, and reported separately they make a run look like it found two things. Folding needs both
+near-identical paper sets and a shared word between the values, because in a twenty-paper run unrelated
+fields coincide by chance and folding those would hide real findings; the survivor carries the other wording
+under `also_recorded_as`. And the watch list drops items whose rise could not be less convincing: one map
+printed seventeen, every one at p = 1.00, which is the field inventory with a p-value stapled on.
+
+### One field, one axis
+
+A question-specific field that answers two questions at once loses one of them. The testosterone protocol's
+`study_design_for_causal_inference` listed `animal_or_in_vitro_experiment` beside
+`randomised_placebo_controlled`, so a rat study randomised to testosterone or vehicle had to be filed as one
+or the other: it became "animal", its allocation was never recorded, and the novelty map then reported the
+two never meeting as an untried combination. The protocol agent is now told to keep what was studied apart
+from how it was allocated, and code enforces it: when a design enum mixes the two, the study-system values
+move to their own field, `q_study_system` (human, animal, in vitro or ex vivo, in silico), and the design
+field keeps allocation only, with its definition saying an animal experiment can be randomised. A value
+naming two systems gives both a home. An existing run can get the split with a field pass:
+
+```bash
+python -m research_agent.cli fieldpass <run_id> q_study_system --values "human,animal,in_vitro_or_ex_vivo" \
+    --definition "What the study was done in: human participants, animals, or cells or tissue outside a body."
+```
+
 ### What papers found, and how the literature fits together
 
 - **Reported results and associations.** Every paper's performance numbers (RMSE, AUC, accuracy...) and the
   effects it reports for drivers (rainfall, temperature, bed nets...) are extracted, each with a quote that
-  contains the number or names the driver. `method_comparison` compares method families only inside the same
+  contains the number or names the driver. Each number also carries its **unit** as written, and is converted
+  to one canonical unit per metric before anything is pooled: 350 ng/dL and 12.1 nmol/L are the same
+  testosterone level, and a median taken across both describes nothing. Values are pooled only within one
+  metric and one unit; a unit the table cannot read keeps its quote and stays out of every median, and the
+  count of those is reported. Total and free testosterone are separate metrics, because they differ by a
+  factor of about fifty. A value outside what its metric can be (an R² of 2) is a reading error and is
+  dropped rather than carried. Metrics only one paper reports are left out of the report's table, since a
+  median of a single number summarises nothing, and counted instead; every value stays in the data export. `method_comparison` compares method families only inside the same
   paper (same data, same metric), with a sign test; `contradictions` finds drivers reported in opposite
   directions and what separates the two sides. Reports and maps append both as computed tables.
 - **Citation graph.** Papers are matched in OpenAlex by DOI; citations among the analysed papers, the most
@@ -206,10 +331,21 @@ it. `GET /runs/{id}/opportunities`, `POST /runs/{id}/opportunities/{item_id} {"s
 ### Exports
 
 ```bash
-python -m research_agent.cli export <run_id> -f docx     # md, docx, html, bib, ris, csv, xlsx,
-                                                         # protocol, screening, burden, burden_chart
+python -m research_agent.cli export <run_id> -f docx      # md, docx, html, bib, ris, csv, xlsx, protocol,
+                                                          # screening, burden, burden_chart, opportunities
+python -m research_agent.cli export <run_id> -f package   # all of it, as one zip
 ```
 The web page has the same list under the report (Export).
+
+`package` is the **evidence package**: everything someone needs to check the run without asking for anything
+else, in one archive. The report as written; every claim with the predicate code tested, the count, its state
+and why that state; the opportunities with what supports and weakens each one and whether anyone has already
+done it; one row per paper with the verified quote behind every field; the screening log and PRISMA flow; the
+references as BibTeX and RIS. Its `MANIFEST.md` says what each file is, states the cohort the denominators
+were counted over, and ends with what the package **cannot** tell you: that a count of zero is about this
+corpus and not the literature, that a field's rate across abstract-read papers is partly a fact about reading
+depth, and that PMC shares over time track what was loaded. A part that cannot be built is named as missing
+rather than quietly left out.
 
 ### Map of a run: graph view and mind map
 
@@ -314,7 +450,13 @@ python -m research_agent.cli research start <run_id> -g "Find under-explored dir
 python -m research_agent.cli research status <researcher_id>
 python -m research_agent.cli research approve <researcher_id> <question_id>     # or --decline
 python -m research_agent.cli research pause|resume|stop <researcher_id>
+python -m research_agent.cli research budget <researcher_id> --add-cycles 5 [--add-tokens 5000000]
 ```
+A researcher that stops with "cycle limit reached" or "total budget used" has an agenda it was still working
+on. `research budget` raises the limit and sets it going again from where it stopped, keeping its notebook,
+its tested patterns and its held-out half. One that finished because its questions were answered is left
+alone and told so, since more room would change nothing. The Research tab offers the same as a button when a
+researcher has run out of room.
 Its cycles run on the job worker (the web server runs one; or `python -m research_agent.cli worker`). On the web
 page, the Research tab of a run starts one and shows its agenda, notebook and findings with their evidence trail.
 It does not run code of its own yet (no sandbox): it works with counts, tests and reading.
@@ -382,9 +524,21 @@ orchestrated and pipeline runs with a scripted LLM that reacts to real tool resu
 
 ## Cost
 
-Every run records its token usage (`runs.input_tokens/output_tokens`). Extractions are cached
-across runs, so repeated questions on overlapping literature get cheaper. `MAX_SHORTLIST` and
-`MAX_FULLTEXT` are the main cost levers.
+Every run records its token usage (`runs.input_tokens/output_tokens`), and `python -m research_agent.cli
+usage <run_id>` breaks it down per step with the share served from the prompt cache. Extractions are cached
+across runs, so repeated questions on overlapping literature get cheaper. `MAX_SHORTLIST` and `MAX_FULLTEXT`
+are the main cost levers; `RESOLVE_MAX_PAPERS` bounds the pre-report resolution pass.
+
+**Prompt caching.** A step's system prompt and tool schema are identical on every call it makes, so both are
+marked as cache breakpoints: extraction sends one large, identical prefix per paper, and an agent loop resends
+a growing one every turn. The end of the conversation is marked **only** when a later call will read it back,
+which means in an agent loop and never in a one-shot read. A cache write costs more than an ordinary input
+token, so marking a single read's messages would charge a premium on the paper's own text — the bulk of the
+run's spend — for an entry nothing ever reads. Context trimming happens in one large step and the result is
+kept, because re-trimming a little each turn would change the cached prefix and throw it away. A cached prefix
+a provider reports without being asked (DeepSeek, some Groq models) is recorded too, so cost is not
+overstated. A step making many calls whose hit rate stays near zero is the signal that its prefix is not
+actually stable.
 
 ## Layout
 
@@ -400,6 +554,8 @@ papers ─ingestion/─→ Postgres+pgvector ─search─→ shortlist ─readin
                  agents/ (a report)      opportunity/ (a map)  research/   tools/graph.py
                         │                        │          (own findings)  (map views)
                         └──→ claims, checked by code against the extractions ←┘
+                                   counted over the run's cohort, and read deeper
+                                   when their state rests on reading depth
 ```
 
 ```
@@ -412,7 +568,9 @@ research_agent/
   tools/         search+shortlist, extraction+analysis, reading, re-checks, trends,
                  claims/evidence, reported results, citations, graph and mind map, burden, review record,
                  epistemics (what each claim's number is worth), opportunities (what is worth doing),
-                 fieldpass (one field, read for on purpose, in the papers that left it blank)
+                 fieldpass (one field, read for on purpose, in the papers that left it blank),
+                 cohort (the scope every count shares), precedent (has anyone done it already),
+                 resolve (thin evidence read deeper before the report leans on it)
   ingestion/     health filter, DuckDB→pgvector loader, PMC topic slices, full-text fetch + cleaning
   llm/           provider seam: anthropic | groq | deepseek (same internal message format)
   db/            schema.sql: papers, extractions, runs, claims, drafts, researchers, jobs…

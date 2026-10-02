@@ -64,7 +64,7 @@ def _fake_fields(text: str) -> dict:
         "methods": [m for m in METHODS if m in low],
         "evaluation_metrics": [m for m in ("AUROC", "RMSE", "accuracy") if m.lower() in low],
         "sample_size": "42 sites" if "42 sites" in low else "",
-        "validation_level": "external" if "external validation" in low else
+        "validation_level": "external_site" if "external validation" in low else
                             ("internal" if "internal only" in low else "not_stated"),
         "code_or_data_available": "not_stated",
         "key_findings": "Improved over baseline.",

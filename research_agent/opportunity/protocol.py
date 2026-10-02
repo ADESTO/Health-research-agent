@@ -84,6 +84,11 @@ Rules:
   are two categories, not one: a question about seasonality-aware baselines cannot be answered by a category
   called "naive_or_seasonal_naive_baseline", because a plain persistence baseline and a seasonal one have
   been merged and neither can be counted again.
+- One field, one axis. WHAT was studied (humans, animals, cells) and HOW it was allocated (randomised,
+  placebo-controlled, cohort, cross-sectional) are separate questions: an animal experiment can be
+  randomised and placebo-controlled. A design field that lists "animal_experiment" next to
+  "randomised_placebo_controlled" forces an animal trial to give up one of the two facts, so give the study
+  system its own field.
 - Read the question back and check each field can answer it as asked. The distinctions the question makes in
   its own words are the distinctions its categories must make.
 - Every definition must let a reader decide the value from the paper text alone.
@@ -149,6 +154,65 @@ def _unbundle(values: list[str]) -> tuple[list[str], list[str]]:
     return out, notes
 
 
+_SYSTEM = re.compile(r"animal|in_vitro|vitro|cell_line|cell_culture|rodent|murine|mouse|mice|\brats?\b|_rats?_|"
+                     r"^rats?_|porcine|zebrafish|primate|ex_vivo|in_silico|organoid", re.I)
+_ALLOCATION = re.compile(r"random|placebo|sham|cohort|observational|registry|case_control|cross_sectional|"
+                         r"interventional|controlled|trial|before_after|case_series|case_report|ecological", re.I)
+SYSTEM_FIELD = "q_study_system"
+
+
+def _system_kinds(value: str) -> list[str]:
+    """The study systems a value names. `animal_or_in_vitro_experiment` names two, and both need a home."""
+    v = value.lower()
+    out = []
+    if re.search(r"animal|rodent|murine|mouse|mice|rat|porcine|zebrafish|primate", v):
+        out.append("animal")
+    if re.search(r"vitro|cell|organoid|ex_vivo", v):
+        out.append("in_vitro_or_ex_vivo")
+    if "silico" in v:
+        out.append("in_silico")
+    return out or ["animal"]
+
+
+def _split_axes(fields: list[dict]) -> tuple[list[dict], list[str]]:
+    """Give the study system its own field when a design enum mixes it with allocation.
+
+    `study_design_for_causal_inference` listed animal_or_in_vitro_experiment next to
+    randomised_placebo_controlled, so a rat study randomised to testosterone or vehicle had to be filed as
+    one or the other. It became "animal", its allocation was lost, and "are animal studies randomised?"
+    could never be asked of that corpus. The novelty map then reported the two values never meeting as an
+    untried combination. The repair keeps allocation in the original field and moves what was studied to
+    `q_study_system`, so both facts are recorded for every paper."""
+    notes: list[str] = []
+    have_system = any(f["name"] == SYSTEM_FIELD for f in fields)
+    for f in list(fields):
+        if f["type"] != "enum" or f["name"] == SYSTEM_FIELD:
+            continue
+        real = [v for v in f["values"] if v != "not_stated"]
+        system = [v for v in real if _SYSTEM.search(v)]
+        allocation = [v for v in real if v not in system and _ALLOCATION.search(v)]
+        if not system or len(allocation) < 2:
+            continue
+        f["values"] = [v for v in f["values"] if v not in system]
+        f["desirable"] = [d for d in f["desirable"] if d not in system]
+        f["groups"] = [g for g in f["groups"] if not set(g["values"]) & set(system)]
+        f["definition"] = (f["definition"] + " Code how allocation was done, whatever was studied: an animal "
+                           "experiment randomised to treatment or vehicle is randomised. What was studied "
+                           f"(humans, animals, cells) is recorded in {SYSTEM_FIELD}.").strip()
+        notes.append(f"{f['name']}: moved {', '.join(system)} to {SYSTEM_FIELD}; a design field must not make "
+                     "an animal trial choose between being an animal study and being randomised")
+        if not have_system:
+            kinds = list(dict.fromkeys(["human"] + [k for v in system for k in _system_kinds(v)]))
+            fields.append({"name": SYSTEM_FIELD, "type": "enum", "values": kinds + ["not_stated"],
+                           "definition": "What the study was done in: human participants, animals, or cells, "
+                                         "tissue or organoids outside a body (in vitro or ex vivo), or a "
+                                         "computer model (in silico). Code the system the main result comes "
+                                         "from.",
+                           "desirable": [], "search": {}, "groups": [], "role": "setting"})
+            have_system = True
+    return fields, notes
+
+
 def validate_protocol(raw: dict) -> tuple[dict, list[str]]:
     """Clean the agent's protocol into something code can rely on; report what was fixed or dropped."""
     problems: list[str] = []
@@ -198,6 +262,8 @@ def validate_protocol(raw: dict) -> tuple[dict, list[str]]:
         seen.add(name)
         if len(fields) == MAX_FIELDS:
             break
+    fields, split = _split_axes(fields)
+    problems += split
     if not fields:
         problems.append("no usable question-specific fields")
     clean = {"setting": _clip(raw.get("setting"), 900),

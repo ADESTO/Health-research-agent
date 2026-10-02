@@ -48,6 +48,16 @@ def run_specialist(ctx: RunContext, agent_name: str, task: str) -> dict:
         if agent_name == "synthesis":
             # Report may only be written from verified claims: verify anything still pending.
             verify_claims(child)
+            # Then, before a word is written, send the claims whose state rests on reading depth back to
+            # the papers. Doing it here rather than after means the report is written from the better
+            # numbers instead of quoting thin ones and being corrected later.
+            if settings.resolve_evidence:
+                try:
+                    from research_agent.tools.resolve import resolve
+
+                    resolve(child)
+                except Exception as exc:   # a failed attempt must never cost the run its report
+                    child.emit("evidence_resolution", "error", {"error": str(exc)[:300]})
         if agent_name == "discovery":
             task += _probe_hint(child)
         out = agent.run(child, task)

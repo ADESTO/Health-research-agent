@@ -166,7 +166,12 @@ class GroqClient:
             call_id = tc.id or f"call_{uuid.uuid4().hex[:12]}"
             content.append({"type": "tool_use", "id": call_id, "name": tc.function.name, "input": args})
             calls.append(ToolCall(call_id, tc.function.name, args))
+        # Groq has no explicit cache control, but some models report an automatically cached prefix. Record
+        # it where it is reported, so a run's cost is not overstated on the tokens that were billed cheaply.
+        details = getattr(resp.usage, "prompt_tokens_details", None)
+        cached = getattr(details, "cached_tokens", None) if details is not None else None
         usage = {"input_tokens": getattr(resp.usage, "prompt_tokens", 0),
+                 "cached_input_tokens": int(cached or 0),
                  "output_tokens": getattr(resp.usage, "completion_tokens", 0)}
         self.usage.add(usage)
         return LLMResponse(msg.content or "", calls, content, choice.finish_reason or "", usage)

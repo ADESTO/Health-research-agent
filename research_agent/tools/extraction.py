@@ -22,7 +22,18 @@ GENERAL_FIELDS = ["study_designs", "populations", "organisms", "interventions", 
                   "outcomes"]
 LIST_FIELDS = ["task_types", "health_domains", "data_modalities", "datasets", "geography",
                "methods", "evaluation_metrics", "limitations"] + GENERAL_FIELDS
+# health-v5 splits `validation_level`. Through v4 a single "external" value covered two different things:
+# a model tested on a LATER PERIOD of the same data, and a model tested in a DIFFERENT PLACE. Reports then
+# read "externally validated" for both, and a comparison of external against internal mixed them. A run that
+# cared about geographic transfer could not tell them apart, and the miscoding was only ever caught by an
+# agent reading the paper. They are now separate rungs, ordered weakest to strongest, each answering one
+# question. Runs read under v4 or earlier keep the old enum (see enums_for) so their numbers stay comparable.
 ENUM_FIELDS = {
+    "validation_level": ["none", "internal", "temporal_holdout", "external_site", "prospective",
+                        "clinical_trial", "not_stated"],
+    "code_or_data_available": ["yes", "no", "not_stated"],
+}
+ENUMS_V4 = {
     "validation_level": ["none", "internal", "external", "prospective", "clinical_trial", "not_stated"],
     "code_or_data_available": ["yes", "no", "not_stated"],
 }
@@ -33,6 +44,7 @@ EVIDENCE_FIELDS = ["methods", "datasets", "data_modalities", "geography", "valid
                    "mechanisms", "targets"]
 ALL_FIELDS = LIST_FIELDS + list(ENUM_FIELDS) + TEXT_FIELDS
 LEGACY_VERSIONS = {"health-v1", "health-v2", "health-v3"}
+OLD_ENUM_VERSIONS = LEGACY_VERSIONS | {"health-v4"}
 
 
 def fields_for(version: str | None) -> tuple[list[str], list[str], list[str]]:
@@ -42,6 +54,12 @@ def fields_for(version: str | None) -> tuple[list[str], list[str], list[str]]:
         return ([f for f in LIST_FIELDS if f not in drop], [f for f in EVIDENCE_FIELDS if f not in drop],
                 [f for f in ALL_FIELDS if f not in drop])
     return list(LIST_FIELDS), list(EVIDENCE_FIELDS), list(ALL_FIELDS)
+
+
+def enums_for(version: str | None) -> dict[str, list[str]]:
+    """The enum values a given extraction version was read with. A run read before validation_level was
+    split keeps the single `external` value, so its stored records and its counts still agree."""
+    return {k: list(v) for k, v in (ENUMS_V4 if version in OLD_ENUM_VERSIONS else ENUM_FIELDS).items()}
 
 
 _list = {"type": "array", "items": {"type": "string"}}
@@ -104,10 +122,17 @@ EXTRACTION_TOOL = {
                          "concentration, adverse events, hospital admission"},
             "sample_size": {"type": "string", "description": "Participants/samples/isolates/records as stated, or ''"},
             "validation_level": {"type": "string", "enum": ENUM_FIELDS["validation_level"],
-                                 "description": "For predictive models and diagnostic tests: the strongest "
-                                 "validation reported (internal split/CV, external dataset/site, prospective, "
-                                 "clinical trial). For a trial of a treatment use clinical_trial. Otherwise "
-                                 "not_stated."},
+                                 "description": "For predictive models and diagnostic tests, the strongest "
+                                 "validation reported. Each value answers ONE question, so pick by what was "
+                                 "held out, not by the word the paper uses: internal = a random split or "
+                                 "cross-validation inside one dataset; temporal_holdout = tested on a LATER "
+                                 "PERIOD of the same setting (a later year, out-of-fit forecasting, rolling "
+                                 "origin), however the paper labels it; external_site = tested in a DIFFERENT "
+                                 "PLACE, site, cohort or population than it was fitted on (including spatial "
+                                 "cross-validation across places); prospective = tested on data collected "
+                                 "after the model was fixed; clinical_trial for a trial of a treatment. "
+                                 "A paper that calls a later-period test 'external validation' is "
+                                 "temporal_holdout. Otherwise not_stated."},
             "code_or_data_available": {"type": "string", "enum": ENUM_FIELDS["code_or_data_available"]},
             "key_findings": {"type": "string", "description": "Main result in <= 2 sentences, with numbers if given"},
             "limitations": {**_list, "description": "Limitations the AUTHORS state. Do not invent any."},
@@ -136,8 +161,9 @@ def protocol_of(ctx) -> dict | None:
 
 def known_fields(ctx) -> tuple[list[str], dict[str, list[str]]]:
     """Base fields plus this run's protocol fields: (list fields, {enum field: allowed values})."""
-    lists = fields_for(getattr(ctx, "extraction_version", None))[0]
-    enums = dict(ENUM_FIELDS)
+    version = getattr(ctx, "extraction_version", None)
+    lists = fields_for(version)[0]
+    enums = enums_for(version)
     for f in (protocol_of(ctx) or {}).get("fields", []):
         if f["type"] == "enum":
             enums[f["name"]] = f["values"]
@@ -206,7 +232,7 @@ def check_evidence(data: dict, evidence, source_text: str, fields: list[str] | N
     return data
 
 
-def normalise(data: dict) -> dict:
+def normalise(data: dict, version: str | None = None) -> dict:
     out = {}
     for f in LIST_FIELDS:
         vals = data.get(f) or []
@@ -218,7 +244,7 @@ def normalise(data: dict) -> dict:
             if v and v.lower() not in seen and v.lower() not in {"not stated", "none", "n/a", "unknown"}:
                 seen.add(v.lower()); clean.append(v)
         out[f] = clean[:15]
-    for f, allowed in ENUM_FIELDS.items():
+    for f, allowed in enums_for(version).items():
         v = str(data.get(f) or "not_stated").strip().lower().replace(" ", "_")
         out[f] = v if v in allowed else "not_stated"
     for f in TEXT_FIELDS:
@@ -310,7 +336,11 @@ def _rows(ctx) -> list[dict]:
                 data["_unverified"] = {**(data.get("_unverified") or {}), **extra["_unverified"]}
         out.append({**r, "data": data})
     _merge_rechecks(ctx, out)
-    return out
+    # The run's cohort, if it has one, is applied here and nowhere else: every count downstream then
+    # counts the same papers without each caller having to restate the scope (see tools/cohort.py).
+    from research_agent.tools import cohort
+
+    return cohort.apply(ctx, out)
 
 
 def _merge_rechecks(ctx, rows: list[dict]) -> None:

@@ -89,6 +89,9 @@ def record(ctx) -> dict:
             "confidence": it.get("confidence"),
             "evidence": {"supporting_claims": sorted(set(good_a + good_b)),
                          "weakening_claims": sorted(set(weak_a + weak_b)),
+                         # the other side, kept as a field and a value rather than only inside the label, so
+                         # a precedent check can ask for both sides without parsing prose
+                         "second_field": b.get("field"), "second_value": [str(b.get("value") or "")],
                          # each side separately IS the prior art: these are the studies nearest to it
                          "prior_studies": (it.get("a_paper_ids") or [])[:10] + (it.get("b_paper_ids") or [])[:10],
                          "measured": {k: it[k] for k in ("observed", "expected", "p", "n_a", "n_b") if k in it},
@@ -168,10 +171,11 @@ def _from_researchers(ctx) -> list[dict]:
                          "supporting_papers": (ev.get("examples") or [])[:20],
                          "measured": ev.get("discovery") or {},
                          "held_out": ev.get("holdout") or {},
-                         "unresolved_questions": [str(a.get("explanation")) for a in (ev.get("alternatives") or [])
+                         # a rival the gauntlet could not rule out is exactly what is still unresolved
+                         "unresolved_questions": [str(a.get("explanation")) for a in (ev.get("rivals") or [])
                                                   if a.get("verdict") == "inconclusive"][:8],
                          "alternative_explanations": [str(a.get("explanation")) for a in
-                                                      (ev.get("alternatives") or [])][:8]},
+                                                      (ev.get("rivals") or [])][:8]},
             "provenance": {"agent": "researcher", "step": "gauntlet", "researcher_id": f["rid"],
                            "finding_id": f["id"]}})
     return out

@@ -241,6 +241,63 @@ def set_opportunity_state(run_id: str, item_id: str, body: dict):
         ctx.close()
 
 
+@app.post("/runs/{run_id}/precedent")
+def post_precedent(run_id: str, body: dict | None = None):
+    """Search the whole corpus for studies that already do each of this run's opportunities."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools import precedent
+
+    try:
+        ctx = RunContext.attach(run_id, llm_factory=lambda strong=False: None)
+    except ValueError:
+        raise HTTPException(404, "no such run")
+    try:
+        res = precedent.check(ctx, item_id=(body or {}).get("item_id"))
+        if "error" in res:
+            raise HTTPException(400, res["error"])
+        return res
+    finally:
+        ctx.close()
+
+
+@app.get("/runs/{run_id}/cohort")
+def get_cohort(run_id: str):
+    """The scope this run's numbers are counted over, and how many papers it drops."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools import cohort
+
+    try:
+        ctx = RunContext.attach(run_id, llm_factory=lambda strong=False: None)
+    except ValueError:
+        raise HTTPException(404, "no such run")
+    try:
+        return {"cohort": cohort.of(ctx), **cohort.summary(ctx)}
+    finally:
+        ctx.close()
+
+
+@app.post("/runs/{run_id}/cohort")
+def post_cohort(run_id: str, body: dict):
+    """Set the scope (or clear it with {"clear": true}). Every later count uses it."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools import cohort
+
+    try:
+        ctx = RunContext.attach(run_id, llm_factory=lambda strong=False: None)
+    except ValueError:
+        raise HTTPException(404, "no such run")
+    try:
+        if body.get("clear"):
+            return cohort.clear(ctx)
+        res = cohort.set_cohort(ctx, include=body.get("include"), exclude=body.get("exclude"),
+                                unstated=str(body.get("unstated") or "keep"), note=str(body.get("note") or ""))
+        if "error" in res:
+            raise HTTPException(400, res["error"])
+        return res
+    finally:
+        ctx.close()
+
+
 @app.get("/runs/{run_id}/directions")
 def get_directions(run_id: str):
     """Gaps and directions a draft can argue for (map gaps, untried combinations, designs, reported gaps)."""
@@ -383,6 +440,19 @@ def researcher_status(rid: int, req: ResearcherAction):
         raise HTTPException(409, "This researcher has ended; start a new one.")
     set_status(rid, {"pause": "paused", "resume": "active", "stop": "stopped"}[req.action], f"{req.action}d by you")
     return {"ok": True}
+
+
+@app.post("/researchers/{rid}/budget")
+def researcher_budget(rid: int, body: dict):
+    """Give a researcher more cycles or tokens. One that stopped for want of room starts working again."""
+    from research_agent.research import researcher as R
+
+    res = R.set_budget(rid, max_cycles=body.get("max_cycles"), add_cycles=body.get("add_cycles"),
+                       total_tokens=body.get("total_tokens"), add_tokens=body.get("add_tokens"),
+                       daily_tokens=body.get("daily_tokens"))
+    if "error" in res:
+        raise HTTPException(404 if "no researcher" in res["error"] else 400, res["error"])
+    return res
 
 
 class QuestionDecision(BaseModel):

@@ -148,6 +148,24 @@ def main(argv: list[str] | None = None) -> int:
     p_fp.add_argument("--list", dest="as_list", action="store_true",
                       help="with --values: make it a list field rather than one category per paper")
     p_fp.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
+    p_co = sub.add_parser("cohort", help="set the scope a run's numbers are counted over (applied to every "
+                                        "count, so the scope need not be restated in each test)")
+    p_co.add_argument("run_id")
+    p_co.add_argument("--include", action="append", default=[], metavar="FIELD=v1,v2",
+                      help="a paper must match this to be counted, e.g. geography=kenya,uganda,east africa. "
+                           "Repeatable: every --include must hold.")
+    p_co.add_argument("--exclude", action="append", default=[], metavar="FIELD=v1,v2",
+                      help="a paper matching this is out of scope, e.g. geography=india,china. Repeatable.")
+    p_co.add_argument("--unstated", choices=["keep", "exclude"], default="keep",
+                      help="papers silent on an --include field: keep them (default; silence is about how a "
+                           "paper was read) or exclude them")
+    p_co.add_argument("--note", default="", help="why this is the scope, for the report")
+    p_co.add_argument("--clear", action="store_true", help="count every shortlisted paper again")
+    p_pr = sub.add_parser("precedent", help="for each of a run's opportunities, search the whole corpus "
+                                           "for studies that already do it")
+    p_pr.add_argument("run_id")
+    p_pr.add_argument("--item", help="just one opportunity, e.g. G2 or N1")
+    p_pr.add_argument("--candidates", type=int, default=40, help="papers to pull per opportunity")
     p_rr = sub.add_parser("reread", help="read a finished run's papers in full again and re-code their records")
     p_rr.add_argument("run_id")
     p_rr.add_argument("--limit", type=int, help="how many papers (default MAX_FULLTEXT)")
@@ -162,7 +180,9 @@ def main(argv: list[str] | None = None) -> int:
     p_exp = sub.add_parser("export", help="export a finished run (report, references, data, review record)")
     p_exp.add_argument("run_id")
     p_exp.add_argument("--format", "-f", default="docx",
-                       help="md, docx, html, bib, ris, csv, xlsx, protocol, screening, burden, burden_chart, opportunities")
+                       help="md, docx, html, bib, ris, csv, xlsx, protocol, screening, burden, burden_chart, "
+                            "opportunities, or package (everything above as one zip, with a manifest saying "
+                            "what each file is and what it cannot tell you)")
     p_exp.add_argument("--out", "-o", help="file to write (default: a name based on the run and format)")
     p_dr = sub.add_parser("draft", help="draft a research proposal or review manuscript from a finished run")
     p_dr.add_argument("run_id", nargs="?", help="the run to build on (not needed with --export)")
@@ -198,6 +218,13 @@ def main(argv: list[str] | None = None) -> int:
     r_st.add_argument("researcher_id", type=int)
     for name in ("pause", "resume", "stop"):
         rs.add_parser(name).add_argument("researcher_id", type=int)
+    r_bud = rs.add_parser("budget", help="give a researcher more cycles or tokens, and set it going again")
+    r_bud.add_argument("researcher_id", type=int)
+    r_bud.add_argument("--add-cycles", type=int, help="raise the cycle limit by this many")
+    r_bud.add_argument("--max-cycles", type=int, help="set the cycle limit to this")
+    r_bud.add_argument("--add-tokens", type=int, help="raise the total token budget by this many")
+    r_bud.add_argument("--total-tokens", type=int, help="set the total token budget to this")
+    r_bud.add_argument("--daily-tokens", type=int, help="set the per-day token budget")
     r_ap = rs.add_parser("approve", help="approve (or --decline) a question waiting for approval")
     r_ap.add_argument("researcher_id", type=int)
     r_ap.add_argument("agenda_id", type=int)
@@ -373,6 +400,10 @@ def main(argv: list[str] | None = None) -> int:
         return fieldpass_cmd(args)
     elif args.cmd == "reread":
         return reread_cmd(args)
+    elif args.cmd == "cohort":
+        return cohort_cmd(args)
+    elif args.cmd == "precedent":
+        return precedent_cmd(args)
     elif args.cmd == "report":
         from research_agent.db import get_conn
 
@@ -416,6 +447,87 @@ def fieldpass_cmd(args) -> int:
             print(f"\n  {ex['paper_id']} -> {ex['value']}\n    \u201c{ex['quote']}\u201d")
         print("\nThe report and its claims are unchanged. Count the field again (or re-run the researcher) "
               "to use the fuller records.")
+    finally:
+        ctx.close()
+    return 0
+
+
+def _cohort_conditions(specs: list[str]) -> tuple[list[dict], str | None]:
+    """'geography=kenya,uganda' -> {"field": "geography", "any_of": [...]}; 'year=2015-2025' -> min/max."""
+    import re
+
+    out = []
+    for spec in specs:
+        field, _, values = str(spec).partition("=")
+        field, values = field.strip(), values.strip()
+        if not field or not values:
+            return [], f"could not read {spec!r}: write it as FIELD=value1,value2"
+        m = re.fullmatch(r"(\d{4})?-(\d{4})?", values)
+        if field == "year" and m and (m.group(1) or m.group(2)):
+            out.append({"field": "year", **({"min": int(m.group(1))} if m.group(1) else {}),
+                        **({"max": int(m.group(2))} if m.group(2) else {})})
+            continue
+        out.append({"field": field, "any_of": [v.strip() for v in values.split(",") if v.strip()]})
+    return out, None
+
+
+def precedent_cmd(args) -> int:
+    """Say, for each opportunity, whether the corpus already holds a study that does it."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools import precedent as PR
+
+    ctx = RunContext.attach(args.run_id, llm_factory=lambda strong=False, step=None: None)
+    try:
+        res = PR.check(ctx, item_id=args.item, limit=args.candidates)
+        if "error" in res:
+            print(res["error"]); return 1
+        print(f"Checked {res['checked']} opportunities against the whole corpus: "
+              + ", ".join(f"{n} {lv}" for lv, n in res["by_verdict"].items()))
+        for o in res["opportunities"]:
+            print(f"\n{o['item_id']:<4} {o['verdict']:<9} {o['label']}")
+            if o["counts"].get("direct"):
+                print(f"     {o['counts']['direct']} paper(s) already do this")
+        print("\nThe papers behind each verdict are on the opportunity itself "
+              "(`export opportunities`, or the Map tab).")
+    finally:
+        ctx.close()
+    return 0
+
+
+def cohort_cmd(args) -> int:
+    """Set, clear or show the scope a run's numbers are counted over."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools import cohort as CO
+
+    ctx = RunContext.attach(args.run_id, llm_factory=lambda strong=False, step=None: None)
+    try:
+        if args.clear:
+            print(CO.clear(ctx)["note"]); return 0
+        include, err = _cohort_conditions(args.include)
+        exclude, err2 = _cohort_conditions(args.exclude) if not err else ([], None)
+        if err or err2:
+            print(err or err2); return 1
+        if not include and not exclude:                     # no conditions given: show what is stored
+            s = CO.summary(ctx)
+            print(f"Cohort: {s.get('conditions') or 'every shortlisted paper'}")
+            print(f"Counted: {s['counted']} papers")
+            if s.get("cohort") is not None or "excluded_out_of_scope" in s:
+                print(f"Excluded as out of scope: {s.get('excluded_out_of_scope', 0)}")
+                print(f"Silent on a cohort field: {s.get('unstated_on_a_cohort_field', 0)} "
+                      f"({s.get('unstated_are', '')})")
+            if s.get("warning"):
+                print("\n" + s["warning"])
+            return 0
+        res = CO.set_cohort(ctx, include=include, exclude=exclude, unstated=args.unstated, note=args.note)
+        if "error" in res:
+            print(res["error"]); return 1
+        print(f"Cohort: {res['conditions']}")
+        print(f"Counted: {res['counted']} papers; out of scope: {res['excluded_out_of_scope']}; "
+              f"silent on a cohort field: {res['unstated_on_a_cohort_field']} ({res['unstated_are']})")
+        if res.get("warning"):
+            print("\n" + res["warning"])
+        print("\nEvery count from now on is over this cohort: claims, the researcher's tests, the map and the "
+              "exports. The report already written is unchanged; re-run `--redo synthesis` to rewrite it.")
     finally:
         ctx.close()
     return 0
@@ -528,6 +640,17 @@ def research_cmd(args) -> int:
         R.set_status(args.researcher_id, {"pause": "paused", "resume": "active", "stop": "stopped"}[args.rcmd],
                      f"{args.rcmd}d from the terminal")
         print(f"researcher #{args.researcher_id}: {args.rcmd}d")
+        return 0
+    if args.rcmd == "budget":
+        res = R.set_budget(args.researcher_id, max_cycles=args.max_cycles, add_cycles=args.add_cycles,
+                           total_tokens=args.total_tokens, add_tokens=args.add_tokens,
+                           daily_tokens=args.daily_tokens)
+        if "error" in res:
+            print(res["error"]); return 1
+        print(f"researcher #{res['researcher_id']}: {res['cycles_done']}/{res['max_cycles']} cycles, "
+              f"{res['tokens_used']:,}/{res['total_tokens']:,} tokens")
+        print("It is working again; follow it with research status." if res["resumed"]
+              else res.get("note", "Limits raised. It was already running, so nothing else changed."))
         return 0
     if args.rcmd == "approve":
         R.decide_question(args.researcher_id, args.agenda_id, not args.decline)

@@ -96,12 +96,13 @@ def paper_text(paper: dict) -> str:
     return text
 
 
-def _verify(args: dict, text: str, protocol: dict | None, include_base: bool) -> tuple[dict | None, dict | None]:
+def _verify(args: dict, text: str, protocol: dict | None, include_base: bool,
+            version: str | None = None) -> tuple[dict | None, dict | None]:
     from research_agent.opportunity.protocol import _normalise_protocol
     from research_agent.tools.extraction import check_evidence, normalise
 
     evidence = args.get("evidence") if isinstance(args.get("evidence"), dict) else {}
-    base = check_evidence(normalise(args), evidence, text) if include_base else None
+    base = check_evidence(normalise(args, version), evidence, text) if include_base else None
     if base is not None:
         from research_agent.tools.results import verify_structured
 
@@ -133,7 +134,7 @@ def _read_one(llm, ctx, paper: dict, protocol, include_base: bool) -> dict:
     args = resp.tool_calls[0].input or {}
     if "_raw_arguments" in args:
         raise ValueError("extraction was cut off by the output limit; raise EXTRACTION_MAX_TOKENS")
-    base, proto = _verify(args, text, protocol, include_base)
+    base, proto = _verify(args, text, protocol, include_base, ctx.extraction_version)
     return {"source": source, "base": base, "protocol": proto}
 
 
@@ -162,7 +163,7 @@ def _read_batch(llm, ctx, papers: list[dict], protocol, include_base: bool) -> d
     for rec in args.get("records") or []:
         pid = rec.get("paper_id") if isinstance(rec, dict) else None
         if pid in texts and pid not in out:
-            base, proto = _verify(rec, texts[pid], protocol, include_base)   # quotes checked against THIS paper
+            base, proto = _verify(rec, texts[pid], protocol, include_base, ctx.extraction_version)
             out[pid] = {"source": "abstract", "base": base, "protocol": proto}
     return out
 

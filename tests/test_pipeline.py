@@ -158,7 +158,9 @@ def test_end_to_end_run(loaded_db, mode):
     ext = claims["Few malaria forecasting studies use external validation."]
     assert ext["status"] == "supported" and ext["result"]["n_matching"] == 0
 
-    assert 0 < n_ft <= settings.max_fulltext
+    # the extraction step's own allowance, plus whatever the pre-report resolution pass spent on
+    # claims whose state rested on abstracts (tools/resolve.py); both are capped
+    assert 0 < n_ft <= settings.max_fulltext + settings.resolve_max_papers
     assert stub <= 1
     agents_seen = {a for a, _ in events}
     assert {"discovery", "literature", "methods", "trends", "gaps", "evidence", "synthesis"} <= agents_seen
@@ -257,11 +259,30 @@ def test_anthropic_adapter_parses_sdk_response(monkeypatch):
     assert captured["tool_choice"] == {"type": "tool", "name": "hybrid_search"}
     assert resp.tool_calls[0].input == {"query": "malaria"} and resp.text == "Let me search."
     assert client.usage.input_tokens == 12
+    # the stable prefix is always cached: the same system prompt and tool schema go out on every call
     assert captured["system"][0]["cache_control"] == {"type": "ephemeral"}
     assert captured["tools"][-1]["cache_control"] == {"type": "ephemeral"}
-    assert captured["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    # but a one-shot call (one paper, read once) must NOT pay a cache-write premium on its own text:
+    # nothing will ever read that entry back
+    assert "cache_control" not in captured["messages"][-1]["content"][-1]
     if not client._accepts_temperature:
         assert "temperature" not in captured
+
+    # a loop in progress is different: the next turn resends everything up to here, so mark the end
+    loop = [{"role": "user", "content": [{"type": "text", "text": "q"}]},
+            {"role": "assistant", "content": [{"type": "text", "text": "a"}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "r"}]}]
+    client.chat("sys", loop, tools=[{"name": "t", "description": "d",
+                                     "input_schema": {"type": "object", "properties": {}}}])
+    assert captured["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in loop[-1]["content"][-1], "the caller's own messages must not be mutated"
+
+    # and nothing is marked at all when caching is off
+    plain = AnthropicClient("claude-haiku-4-5-20251001", api_key="test", prompt_cache=False)
+    monkeypatch.setattr(plain._client.messages, "create", fake_create)
+    plain.chat("sys", loop, tools=[{"name": "t", "description": "d",
+                                    "input_schema": {"type": "object", "properties": {}}}])
+    assert captured["system"] == "sys" and "cache_control" not in captured["tools"][-1]
     _ = anthropic
 
 
@@ -1136,7 +1157,7 @@ def test_extraction_evidence_is_checked_against_the_text():
             "weekly surveillance counts from 42 sites in western Kenya, with external validation on two "
             "held-out counties.")
     raw = {"methods": ["gradient boosting"], "geography": ["Kenya"], "datasets": ["MIMIC-IV"],
-           "data_modalities": ["surveillance counts"], "validation_level": "external",
+           "data_modalities": ["surveillance counts"], "validation_level": "external_site",
            "code_or_data_available": "yes"}
     evidence = {
         "methods": ["We trained a gradient boosting model on weekly"],          # verbatim
@@ -1148,7 +1169,7 @@ def test_extraction_evidence_is_checked_against_the_text():
     }
     out = check_evidence(normalise(raw), evidence, text)
     assert out["methods"] == ["gradient boosting"] and out["geography"] == ["Kenya"]
-    assert out["validation_level"] == "external"
+    assert out["validation_level"] == "external_site"
     assert out["datasets"] == [] and out["code_or_data_available"] == "not_stated"   # dropped
     assert out["_unverified"] == {"datasets": ["MIMIC-IV"], "code_or_data_available": "yes"}
     assert set(out["evidence"]) == {"methods", "geography", "data_modalities", "validation_level"}
@@ -1396,8 +1417,11 @@ def _synthetic_rows():
         data = {"methods": ["random forest" if i < 30 else "pearson correlation"],
                 "data_modalities": (["satellite imagery"] if i % 2 else ["remote sensing"]) if i >= 30
                 else ["case counts"],
-                "q_model_class": "machine_learning" if i >= 30 else "statistical",
-                "q_interventions": "none" if i >= 30 else "itn_only"}
+                # deliberately NOT aligned with the method/data split: a corpus whose every field agrees
+                # with every other is two separate literatures, and then nothing in it is an untried
+                # combination (see compute.stratified_expected)
+                "q_model_class": "machine_learning" if i % 2 else "statistical",
+                "q_interventions": "none" if i % 3 == 0 else "itn_only"}
         if i >= 50:
             data["data_modalities"].append("mobile phone data")
         if i in (2, 40, 50):          # a weak rise: 1 of 35 early papers, 2 of 25 recent ones
@@ -1858,18 +1882,30 @@ def test_followups_work_on_a_database_from_before_followups(loaded_db):
         assert started.get(f"/runs/{rid}/followups").status_code == 200
 
 
-def test_followup_reads_abstract_only_papers_in_full_and_recounts(loaded_db):
+def test_followup_reads_abstract_only_papers_in_full_and_recounts(loaded_db, monkeypatch):
     from research_agent.agents import followup
     from research_agent.agents.orchestrator import run_research
     from research_agent.db import get_conn
     from research_agent.runstate import RunContext
+    from research_agent.tools import resolve as RS
 
+    # this is about the follow-up tool itself, so leave the papers as the run read them: the pre-report
+    # resolution pass would otherwise have already read the abstract-only ones it is about to be asked for
+    monkeypatch.setattr(RS, "resolve", lambda *a, **k: {"attempted": 0})
     rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
                        llm_factory=lambda strong=False: FakeLLM())["run_id"]
     ctx = RunContext.attach(rid, llm_factory=lambda strong=False: FakeLLM())
     try:
         c = ctx.pg.execute("""SELECT id, result FROM claims WHERE run_id=%s AND claim_type='prevalence'
                               AND predicate->'where' IS NULL ORDER BY id LIMIT 1""", (rid,)).fetchone()
+        # Earlier runs in this database may already have read every retrievable paper in full, so put the
+        # ones whose full text IS available back to abstract-only. read_in_full reads them again, which
+        # leaves the shared extraction records exactly as they were.
+        with get_conn() as pg:
+            pg.execute("""UPDATE extractions SET source='abstract' WHERE schema_version=%s AND paper_id IN
+                          (SELECT rp.paper_id FROM run_papers rp JOIN paper_fulltext f USING (paper_id)
+                           WHERE rp.run_id=%s AND f.status='ok')""",
+                       (settings.extraction_schema_version, rid))
         abstract_before = ctx.pg.execute(
             """SELECT count(*) n FROM run_papers rp JOIN extractions e USING (paper_id)
                WHERE rp.run_id=%s AND e.source='abstract'""", (rid,)).fetchone()["n"]
@@ -1990,7 +2026,8 @@ def test_extraction_records_results_and_report_appends_them(loaded_db):
                        llm_factory=lambda strong=False: FakeLLM())
     with get_conn() as pg:
         rows = pg.execute("""SELECT e.data FROM run_papers rp JOIN extractions e USING (paper_id)
-                             WHERE rp.run_id=%s AND e.schema_version='health-v4'""", (res["run_id"],)).fetchall()
+                             WHERE rp.run_id=%s AND e.schema_version=%s""",
+                          (res["run_id"], settings.extraction_schema_version)).fetchall()
     results = [it for r in rows for it in r["data"].get("reported_results") or []]
     assocs = [it for r in rows for it in r["data"].get("reported_associations") or []]
     assert rows and (results or assocs)
@@ -2884,6 +2921,22 @@ def test_opportunities_are_rows_with_what_supports_and_weakens_them(loaded_db):
         design = next((r for r in O.listing(ctx) if r["kind"] == "design"), None)
         if design:
             assert design["evidence"].get("addresses")
+        # a researcher's finding carries its evidence across under the keys the finding really uses
+        ev = {"pattern": "p", "rivals": [{"explanation": "method family", "verdict": "inconclusive"},
+                                         {"explanation": "read depth", "verdict": "does not explain it"}],
+              "examples": ["PMC1"], "discovery": {"p": 0.01}, "holdout": {"verdict": "replicated"}}
+        with get_conn() as pg:
+            rr = pg.execute("INSERT INTO researchers (run_id, charter, split) VALUES (%s,'{}'::jsonb,'{}'::jsonb) "
+                            "RETURNING id", (rid,)).fetchone()["id"]
+            pg.execute("INSERT INTO research_findings (researcher_id, statement, grade, status, reasons, evidence) "
+                       "VALUES (%s,'Validation is under-reported','moderate','provisional','[]'::jsonb,%s::jsonb)",
+                       (rr, __import__("json").dumps(ev)))
+        O.record(ctx)
+        fnd = next(r for r in O.listing(ctx) if r["kind"] == "finding")
+        assert fnd["evidence"]["unresolved_questions"] == ["method family"]      # the rival it could not rule out
+        assert len(fnd["evidence"]["alternative_explanations"]) == 2
+        assert fnd["evidence"]["supporting_papers"] == ["PMC1"]
+
         assert O.set_state(ctx, rows[0]["item_id"], "dismissed", "already done")["state"] == "dismissed"
         assert "error" in O.set_state(ctx, rows[0]["item_id"], "nonsense")
         assert "error" in O.set_state(ctx, "ZZ9", "dismissed")
@@ -2983,3 +3036,508 @@ def test_a_field_pass_can_define_a_finer_field_when_the_old_one_merges_two_answe
         assert "error" in FP.add_field(ctx, "one_sided", ["only"], "needs two categories")
     finally:
         ctx.close()
+
+
+def test_more_budget_restarts_a_researcher_that_ran_out_of_room_but_not_one_that_ran_out_of_questions(loaded_db):
+    """Raising the limit continues the work of a researcher that stopped for want of cycles or tokens. One
+    that finished because its agenda was answered is left alone: it is not waiting for anything."""
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.db import get_conn
+    from research_agent.research import researcher as R
+
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    r1 = R.create(rid, "Patterns in how models are validated", max_cycles=2, total_tokens=1000)
+    with get_conn() as pg:
+        pg.execute("UPDATE researchers SET cycles_done=2, tokens_used=400, status='finished', "
+                   "status_note='cycle limit reached' WHERE id=%s", (r1,))
+    out = R.set_budget(r1, add_cycles=5)
+    assert out["max_cycles"] == 7 and out["resumed"] and R.get(r1)["researcher"]["status"] == "active"
+
+    # out of tokens is the same case
+    with get_conn() as pg:
+        pg.execute("UPDATE researchers SET tokens_used=1000, status='finished', "
+                   "status_note='total budget used' WHERE id=%s", (r1,))
+    assert R.set_budget(r1, add_tokens=5000)["resumed"]
+
+    # a limit below what it has already used is refused rather than silently ignored
+    assert "error" in R.set_budget(r1, max_cycles=1)
+    assert "error" in R.set_budget(r1, total_tokens=10)
+    assert "error" in R.set_budget(999999, add_cycles=1)
+
+    # finished because its questions ran out: more room changes nothing, and it says so
+    r2 = R.create(rid, "Another charter", max_cycles=5)
+    with get_conn() as pg:
+        pg.execute("UPDATE researchers SET cycles_done=5, status='finished', "
+                   "status_note='the agenda is empty' WHERE id=%s", (r2,))
+    out2 = R.set_budget(r2, add_cycles=5)
+    assert out2["max_cycles"] == 10 and not out2["resumed"] and "agenda" in out2["note"]
+    assert R.get(r2)["researcher"]["status"] == "finished"
+
+
+def test_cohort_scopes_every_count_and_keeps_silent_papers_visible(loaded_db, monkeypatch):
+    """A run's scope is stored once and applied wherever papers are counted, so no test has to restate it.
+    A paper that states an out-of-scope value is dropped; a paper that says nothing is kept and counted
+    separately, because silence is about how it was read."""
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.db import get_conn
+    from research_agent.runstate import RunContext
+    from research_agent.tools import claims as C
+    from research_agent.tools import cohort as CO
+    from research_agent.tools.extraction import _rows, value_counts
+
+    rid = run_research("Which methods forecast malaria?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: None)
+    try:
+        # one paper read from its abstract never named a place: exactly the case a hard filter would drop
+        with get_conn() as pg:
+            pid = pg.execute("""SELECT e.paper_id FROM run_papers rp JOIN extractions e USING (paper_id)
+                                WHERE rp.run_id=%s AND e.schema_version=%s
+                                  AND e.data->'geography' <> '[]'::jsonb ORDER BY e.paper_id LIMIT 1""",
+                             (rid, settings.extraction_schema_version)).fetchone()["paper_id"]
+            pg.execute("UPDATE extractions SET data = jsonb_set(data, '{geography}', '[]'::jsonb) "
+                       "WHERE paper_id=%s AND schema_version=%s", (pid, settings.extraction_schema_version))
+        rows = _rows(ctx)
+        places = {p.lower() for r in rows for p in r["data"].get("geography") or []}
+        assert "kenya" in places and len(rows) >= 6
+        in_africa = [r for r in rows if {"kenya", "uganda", "malawi", "tanzania"}
+                     & {p.lower() for p in r["data"].get("geography") or []}]
+        silent = [r for r in rows if not (r["data"].get("geography") or [])]
+        assert in_africa and silent == [r for r in rows if r["paper_id"] == pid]
+
+        # an unknown field is refused rather than silently counting nothing
+        assert "error" in CO.set_cohort(ctx, include=[{"field": "continent", "any_of": ["africa"]}])
+        assert "error" in CO.set_cohort(ctx, include=[{"field": "geography"}])
+        assert "error" in CO.set_cohort(ctx, unstated="maybe", include=[{"field": "geography", "any_of": ["kenya"]}])
+
+        res = CO.set_cohort(ctx, include=[{"field": "geography", "any_of": ["kenya", "uganda", "malawi",
+                                                                           "tanzania"]}],
+                            note="East African data only.")
+        assert res["counted"] == len(in_africa) + len(silent)
+        assert res["excluded_out_of_scope"] == len(rows) - res["counted"]
+        assert res["unstated_on_a_cohort_field"] == len(silent) and res["unstated_are"] == "counted"
+        assert "field pass" in res["warning"]            # silence is flagged, not quietly trusted
+
+        # every count now counts the cohort: the row builder, value counts and a claim's denominator
+        scoped = _rows(ctx)
+        assert len(scoped) == res["counted"]
+        assert not any("brazil" in p.lower() or "india" in p.lower()
+                       for r in scoped for p in r["data"].get("geography") or [])
+        assert value_counts(ctx, "geography")["n_papers"] == res["counted"]
+        ev = C.evaluate_prevalence(ctx, {"field": "methods", "any_of": ["LSTM"], "min_count": 1})
+        assert ev["denominator"] == res["counted"]
+
+        # excluding silence drops the same papers, and says so in the description
+        tight = CO.set_cohort(ctx, include=[{"field": "geography", "any_of": ["kenya"]}], unstated="exclude")
+        assert tight["unstated_are"] == "excluded" and tight["counted"] < res["counted"]
+        assert "silent on these fields are excluded" in CO.describe(CO.of(ctx))
+
+        # a paper that states an out-of-scope value is out of scope even when it is silent on another field
+        out = CO.set_cohort(ctx, exclude=[{"field": "geography", "any_of": ["brazil", "india", "usa"]}])
+        assert out["counted"] == len(rows) - out["excluded_out_of_scope"] > len(in_africa)
+
+        md = "\n".join(CO.markdown(ctx))
+        assert "What the numbers are counted over" in md and "excluding geography in brazil" in md
+        assert CO.clear(ctx)["cohort"] is None and len(_rows(ctx)) == len(rows)
+        assert CO.markdown(ctx) == [] and CO.describe(None) == "every shortlisted paper"
+    finally:
+        ctx.close()
+
+
+def test_precedent_check_grades_each_opportunity_against_the_whole_corpus(loaded_db):
+    """An opportunity is searched for across the corpus, not just the shortlist, and graded by what was
+    actually matched. An opportunity written as prose can never be graded a direct precedent."""
+    from research_agent.opportunity.pipeline import run_map
+    from research_agent.runstate import RunContext
+    from research_agent.tools import opportunities as O
+    from research_agent.tools import precedent as PR
+
+    rid = run_map("Can machine learning improve 1-6 month malaria forecasting?",
+                  llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: None)
+    try:
+        assert "error" in PR.check(ctx, item_id="ZZ9")
+        res = PR.check(ctx, limit=25)
+        assert res["checked"] == len(O.listing(ctx)) and res["by_verdict"]
+        assert set(res["by_verdict"]) <= set(PR.LEVELS)
+
+        rows = {r["item_id"]: r for r in O.listing(ctx)}
+        for item_id, row in rows.items():
+            p = row["evidence"]["precedent"]
+            assert p["verdict"] in PR.LEVELS and p["means"]
+            # the verdict says what it was judged on, so a reader can disagree with it
+            assert "term_groups" in p["judged_on"] and "topic_terms" in p["judged_on"]
+            assert p["searched"]["corpus"].startswith("whole corpus")
+            # a prose-only opportunity is capped: a sentence cannot show a paper did the same thing
+            if not p["judged_on"]["from_structured_field"]:
+                assert p["verdict"] in ("adjacent", "none") and "cannot" in p["means"]
+            for level in ("direct", "partial", "adjacent"):
+                for hit in p.get(level) or []:
+                    assert hit["paper_id"] and "analysed_in_this_run" in hit
+
+        # a gap on a field and a value IS structured, so it can reach direct, and its terms come from the value
+        gap = next((r for r in rows.values() if r["kind"] == "gap" and r["value"]), None)
+        if gap:
+            req = PR.requirements(ctx, gap)
+            assert req["structured"] and req["groups"]
+            assert all(t not in PR._STOP for g in req["groups"] for t in g)
+        # an untried combination asks for BOTH sides, carried as fields rather than parsed out of the label
+        combo = next((r for r in rows.values() if r["kind"] == "combination"), None)
+        if combo:
+            assert len(PR.requirements(ctx, combo)["groups"]) == 2
+            assert combo["evidence"].get("second_value")
+
+        # the check does not change what the run says it screened
+        from research_agent.tools.review import screening_rows
+
+        before = len(screening_rows(ctx))
+        PR.check(ctx, limit=25)
+        assert len(screening_rows(ctx)) == before
+
+        md = "\n".join(PR.markdown(ctx))
+        assert "Has it been done already?" in md and list(rows)[0] in md
+        # short terms are matched as whole words, so 'mic' does not count 'microscopy' as precedent
+        assert PR._mentions("broth microdilution mic of 2", "mic")
+        assert not PR._mentions("light microscopy of slides", "mic")
+
+        # a value that only says which way a field points carries no meaning, so the field's words are used:
+        # a gap on 'code_or_data_available = yes' must not grade every paper containing "yes" as precedent
+        assert PR._field_and_value("code_or_data_available", "yes") == ["code", "data", "available"]
+        assert PR._field_and_value("q_validation_split", "spatial_holdout") == ["spatial", "holdout"]
+        thin = PR.requirements(ctx, {"kind": "gap", "field": "x", "value": "yes", "label": "l", "evidence": {}})
+        assert not thin["structured"] and "any paper that" in thin["cap_reason"]
+
+        # the grades themselves: both groups present is direct, one is partial, neither is adjacent
+        req = {"groups": [["spatial", "holdout"], ["prevalence"]], "topic": ["malaria"], "structured": True,
+               "cap_reason": ""}
+        both = {"title": "Malaria prevalence mapping", "abstract": "spatial holdout validation across villages"}
+        one = {"title": "Malaria prevalence survey", "abstract": "random cross-validation"}
+        far = {"title": "Malaria case counts", "abstract": "an ARIMA baseline"}
+        off = {"title": "Sepsis triage", "abstract": "spatial holdout prevalence"}
+        assert PR._grade(both, req, None)[0] == "direct"
+        assert PR._grade(one, req, None)[0] == "partial"
+        assert PR._grade(far, req, None)[0] == "adjacent"
+        assert PR._grade(off, req, None)[0] == "none"          # not about the run's subject at all
+        # a paper the run analysed is judged on its checked extraction too, not only on its abstract
+        assert PR._grade(one, req, {"q_validation_split": "spatial_holdout"})[0] == "direct"
+        assert PR._grade(both, {**req, "structured": False}, None)[0] == "adjacent"
+    finally:
+        ctx.close()
+
+
+def test_evidence_package_is_one_archive_that_explains_itself(loaded_db):
+    """Everything needed to check a run, in one file, with a manifest that says what each part is and which
+    questions the evidence cannot answer. A part that cannot be built is named as missing, not skipped."""
+    import io
+    import zipfile
+
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.exports import PACKAGE, export
+    from research_agent.runstate import RunContext
+    from research_agent.tools import cohort as CO
+
+    rid = run_research("Which methods forecast malaria?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: None)
+    try:
+        CO.set_cohort(ctx, include=[{"field": "geography", "any_of": ["kenya", "uganda", "malawi", "tanzania"]}])
+    finally:
+        ctx.close()
+
+    data, name, media = export(rid, "package")
+    assert name.endswith("evidence_package.zip") and media == "application/zip"
+    z = zipfile.ZipFile(io.BytesIO(data))
+    assert not z.testzip()
+    names = set(z.namelist())
+    assert "MANIFEST.md" in names
+    # the parts that must always be there, each non-empty
+    for part in ("report.md", "claims.csv", "extractions.csv", "references.bib", "opportunities.csv"):
+        assert part in names and len(z.read(part)) > 0, part
+
+    manifest = z.read("MANIFEST.md").decode()
+    assert ctx.question[:30] in manifest or "Question:" in manifest
+    assert "geography in kenya" in manifest                  # the denominator is stated, not left implicit
+    assert "What this package cannot tell you" in manifest
+    assert "count of zero" in manifest and "reading depth" in manifest and "topic slices" in manifest
+    # every file in the archive is described, and every described file is in the archive or named missing
+    for part in names - {"MANIFEST.md"}:
+        assert f"`{part}`" in manifest, part
+    for part, _fmt, _what in PACKAGE:
+        assert f"`{part}`" in manifest, part
+    if any(p for p, _f, _w in PACKAGE if p not in names):
+        assert "Not in here" in manifest
+
+    # the report's own text is the report, not a rebuild of it
+    with_report = z.read("report.md").decode()
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: None)
+    try:
+        stored = ctx.pg.execute("SELECT report_md FROM runs WHERE run_id=%s", (rid,)).fetchone()["report_md"]
+        assert with_report == stored
+    finally:
+        ctx.close()
+
+
+def test_thin_evidence_is_sent_back_to_the_papers_before_the_report_is_written(loaded_db, monkeypatch):
+    """A claim whose state rests on reading depth has its abstract-only papers read in full and is measured
+    again, before synthesis. A claim that is thin because the literature is thin is left alone and said to
+    be. The attempt is recorded either way, including when it makes a claim worse."""
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.db import get_conn
+    from research_agent.runstate import RunContext
+    from research_agent.tools import resolve as RS
+
+    rid = run_research("Which methods forecast malaria?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: FakeLLM())
+    try:
+        # reading depth is what limits it: send it back to the papers
+        assert RS._depth_limited({"papers_extracted": 9, "abstract_only": 6})
+        assert RS._depth_limited({"papers_extracted": 9, "abstract_only": 0,
+                                  "mentioned_but_not_recorded": "7 papers mention it"})
+        # mostly read in full already: depth is not the problem, so do not spend reads on it
+        assert not RS._depth_limited({"papers_extracted": 9, "abstract_only": 1})
+
+        # a move is judged by code, and a settled answer against the claim is not called a failure
+        assert RS._movement("not_searched_enough", "supported") == "better"
+        assert RS._movement("supported", "supported") == "unchanged"
+        assert RS._movement("partially_supported", "contradicted") == "settled against the claim"
+        assert RS._movement("supported", "partially_supported") == "worse"
+
+        cands = RS.candidates(ctx)
+        assert cands, "the fixture run should leave some claim short of 'supported'"
+        # too few papers to decide is NOT a reading problem: it is named and left alone
+        with get_conn() as pg:
+            cid = pg.execute("SELECT min(id) i FROM claims WHERE run_id=%s AND claim_type='prevalence' "
+                             "AND status <> 'rejected'", (rid,)).fetchone()["i"]
+            pg.execute("UPDATE claims SET state='uncertain' WHERE id=%s", (cid,))
+        parked = next(c for c in RS.candidates(ctx) if c["id"] == cid)
+        assert parked["skip"] and "cannot add papers" in parked["skip"]
+
+        # Put this run's own claims in the state an abstract-heavy run produces. Only the claims rows are
+        # touched: extraction records are shared by paper across runs, so rewriting those would change what
+        # every other run in the database has read.
+        with get_conn() as pg:
+            pg.execute("""UPDATE claims SET state='not_searched_enough',
+                              state_facts = coalesce(state_facts, '{}'::jsonb)
+                                  || '{"papers_extracted": 12, "abstract_only": 9, "read_in_full": 3}'::jsonb
+                          WHERE run_id=%s AND claim_type='prevalence' AND status <> 'rejected' AND id <> %s""",
+                       (rid, cid))
+        depth = [c for c in RS.candidates(ctx) if not c["skip"]]
+        assert depth, "an abstract-only run should leave claims that a deeper read could settle"
+
+        rec = RS.resolve(ctx, max_claims=2, per_claim=3)
+        assert 0 < rec["attempted"] <= 2 and "resolution_rate" in rec
+        assert any(s["claim"] == f"C{cid}" for s in rec["skipped"])
+        for a in rec["attempts"]:
+            assert a["claim"].startswith("C")
+            assert "state_before" in a and ("state_after" in a or "failed" in a)
+            # an attempt says why it was worth making, so the spend is auditable
+            assert a.get("attempted_because") or a.get("note") or a.get("failed")
+        # the original claim's text and predicate are never edited: only the records underneath it change
+        with get_conn() as pg:
+            after = pg.execute("SELECT text, predicate FROM claims WHERE id=%s", (depth[0]["id"],)).fetchone()
+        assert after["text"] == depth[0]["text"] and after["predicate"] == depth[0]["predicate"]
+        # whatever happened, it is on the run as a note and in the report's own words
+        assert ctx.notes().get("evidence_resolution") == rec
+        md = "\n".join(RS.markdown(ctx))
+        assert "What a deeper read settled" in md and "Left alone" in md
+        assert "same predicate was re-run" in md
+
+        # the re-count is not left in the report as a second claim counting the same papers
+        with get_conn() as pg:
+            dupes = pg.execute("SELECT review_note FROM claims WHERE run_id=%s AND agent='followup' "
+                               "AND status <> 'rejected'", (rid,)).fetchall()
+        assert not dupes
+    finally:
+        ctx.close()
+
+
+def test_an_automatically_cached_prefix_is_recorded_so_cost_is_not_overstated():
+    """Groq reports a cached prefix on some models without any explicit cache control. Recording it keeps the
+    run's cost honest, and makes a step whose prefix is NOT stable visible as a near-zero hit rate."""
+    from types import SimpleNamespace
+
+    from research_agent.llm import groq_client as GC
+    from research_agent.runstate import _hit_rate
+
+    def create(**_kw):
+        msg = SimpleNamespace(content="ok", tool_calls=[])
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=msg, finish_reason="stop")],
+            usage=SimpleNamespace(prompt_tokens=1000, completion_tokens=10,
+                                  prompt_tokens_details=SimpleNamespace(cached_tokens=750)))
+
+    c = GC.GroqClient.__new__(GC.GroqClient)
+    c._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    c.model, c.usage = "openai/gpt-oss-120b", GC.Usage()
+    c.chat("sys", [{"role": "user", "content": "hi"}], max_tokens=64)
+    assert c.usage.cached_input_tokens == 750 and c.usage.input_tokens == 1000
+
+    # a provider that reports no such field must not break, and must not invent a hit
+    def bare(**_kw):
+        msg = SimpleNamespace(content="ok", tool_calls=[])
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")],
+                               usage=SimpleNamespace(prompt_tokens=100, completion_tokens=2))
+    c2 = GC.GroqClient.__new__(GC.GroqClient)
+    c2._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=bare)))
+    c2.model, c2.usage = "m", GC.Usage()
+    c2.chat("sys", [{"role": "user", "content": "hi"}], max_tokens=8)
+    assert c2.usage.cached_input_tokens == 0
+
+    assert _hit_rate({"input_tokens": 1000, "cached_input_tokens": 750}) == 0.75
+    assert _hit_rate({"input_tokens": 0, "cached_input_tokens": 0}) is None
+
+
+def test_novelty_needs_a_stratum_where_both_components_could_have_met(ctx, monkeypatch):
+    """A corpus that splits into two literatures that never meet makes every cross-split pair look untried.
+    The expectation is computed inside each kind of study, so a pair any one field already accounts for is
+    dropped, and one that is genuinely absent where both components live survives."""
+    from research_agent.opportunity import compute as C
+
+    # 20 papers in two disjoint halves: 10 animal experiments, 10 human trials. Within the human half,
+    # tissue sampling and questionnaires both occur and never together: that one IS an untried combination.
+    rows = []
+    for i in range(20):
+        animal = i < 10
+        data = {"q_population": "animal_model" if animal else "women",
+                "q_design": "animal_experiment" if animal else "randomised_trial",
+                "data_modalities": (["histopathology"] if animal else
+                                    (["tissue"] if i < 15 else ["questionnaires"]))}
+        rows.append({"paper_id": f"p{i}", "source": "fulltext", "corpus": "pmc", "year": 2015,
+                     "title": "t", "data": data})
+    protocol = {"fields": [
+        {"name": "q_population", "type": "enum", "role": "setting", "definition": "x", "desirable": [],
+         "values": ["animal_model", "women"]},
+        {"name": "q_design", "type": "enum", "role": "evaluation", "definition": "y", "desirable": [],
+         "values": ["animal_experiment", "randomised_trial"]}]}
+    monkeypatch.setattr(C, "_rows", lambda _ctx: rows)
+    monkeypatch.setattr(C, "known_fields", lambda _ctx: (["data_modalities"], {
+        "q_population": ["animal_model", "women"], "q_design": ["animal_experiment", "randomised_trial"]}))
+    monkeypatch.setattr(C, "_corpus_check", lambda *a: None)
+    m = C.compute_map(ctx, protocol)
+    pairs = [{n["a"]["value"], n["b"]["value"]} for n in m["novelty"]]
+
+    # the animal/human split explains every one of these, so none is an opportunity
+    assert {"women", "animal_experiment"} not in pairs
+    assert {"animal_model", "randomised_trial"} not in pairs
+    assert {"animal_model", "questionnaires"} not in pairs, "rats do not fill in questionnaires"
+    assert {"women", "histopathology"} not in pairs
+
+    # the stratified expectation is what did it, and it is zero for a cross-split pair
+    ids = {v: {r["paper_id"] for r in rows
+               if v in str(r["data"].values())} for v in ("animal_model", "women")}
+    groups = dict(C.strata(rows, protocol, 4))["q_population"]
+    assert C.stratified_expected(ids["animal_model"], ids["women"], groups) == 0
+    assert C.explained_by_a_stratum(ids["animal_model"], ids["women"], C.strata(rows, protocol, 4), 1.5) \
+        == "q_population"
+    # a pair that both strata could have produced is not explained away
+    everywhere = {f"p{i}" for i in range(0, 20, 2)}
+    assert C.stratified_expected(everywhere, everywhere, groups) > 1.5
+
+    # mirrors: the same fact in two fields needs a shared word, not just the same papers
+    animal_pop = {"value": "animal_model"}
+    animal_design = {"value": "animal_experiment"}
+    same = {f"p{i}" for i in range(10)}
+    assert C.mirrors(animal_pop, animal_design, same, same, 0.8)
+    assert not C.mirrors({"value": "one_month_horizon"}, {"value": "satellite_data"}, same, same, 0.8)
+    # and it folds them into one established item rather than reporting one fact twice
+    est = {e["label"] for e in m["established"]}
+    folded = [e for e in m["established"] if e.get("also_recorded_as")]
+    assert folded and any("animal" in e["label"] for e in folded)
+    assert len([x for x in est if "animal" in x]) == 1
+
+    # a watch list where nothing leans the right way is not printed
+    assert all(w["trend"]["p"] < C.THRESHOLDS["watch_max_p"] for w in m.get("watch", []))
+
+
+def test_reported_values_are_pooled_only_within_one_unit(loaded_db):
+    """A number without its unit is not a measurement. ng/dL and nmol/L are the same testosterone level, so
+    they are converted before pooling; a unit that cannot be read keeps its quote but never enters a median;
+    a value outside what its metric can be is a reading error and is dropped."""
+    from research_agent.tools.results import (_CANONICAL, in_bounds, metric_key, normalise_unit,
+                                              verify_structured)
+
+    # total and free testosterone differ by about fifty, so they are never one bucket
+    assert metric_key("serum testosterone")[0] == "total testosterone"
+    assert metric_key("mean total testosterone")[0] == "total testosterone"
+    assert metric_key("free testosterone")[0] == "free testosterone"
+    assert metric_key("free androgen index")[0] == "free testosterone"
+
+    # 350 ng/dL and 12.1 nmol/L are the same level and must land on the same scale
+    v1, u1 = normalise_unit("total testosterone", "ng/dL", 350.0)
+    v2, u2 = normalise_unit("total testosterone", "nmol/L", 12.1)
+    assert u1 == u2 == "nmol/L" and abs(v1 - v2) < 0.2
+    assert normalise_unit("total testosterone", "ng/mL", 3.5)[0] == pytest.approx(12.13, abs=0.01)
+    assert normalise_unit("body weight", "g", 342.0) == (0.342, "kg")       # a rat, in kilograms
+    # a unit the table does not know cannot be converted, and says so rather than guessing
+    assert normalise_unit("total testosterone", "arbitrary units", 5.0) == (None, None)
+    # a metric with no canonical unit keeps whatever was written, so like is still pooled with like
+    assert normalise_unit("duration of attack", "s", 18.1) == (18.1, "s")
+
+    # an impossible value is a reading error
+    assert in_bounds("r2", 0.4) and not in_bounds("r2", 2.0)
+    assert in_bounds("auc", 1.0) and not in_bounds("auc", 1.4)
+    assert in_bounds("body weight", 342.0)                                  # unbounded metrics pass anything
+
+    text = ("Mean total testosterone rose from 318 ng/dL at baseline, and the model reached an R2 of 2 in "
+            "table 3, with free testosterone of 65 pg/mL reported separately.")
+    args = {"reported_results": [
+        {"metric": "mean total testosterone", "value": "318", "unit": "ng/dL", "model": "TRT arm",
+         "quote": "Mean total testosterone rose from 318 ng/dL at baseline"},
+        {"metric": "R2", "value": "2", "unit": "", "model": "regression",
+         "quote": "the model reached an R2 of 2 in table 3"},
+        {"metric": "free testosterone", "value": "65", "unit": "pg/mL", "model": "TRT arm",
+         "quote": "free testosterone of 65 pg/mL reported separately"}]}
+    kept, _dropped = verify_structured(args, text)
+    got = {r["metric"]: r for r in kept["reported_results"]}
+    assert "r2" not in got, "an R2 of 2 is arithmetically impossible and is not a result"
+    assert got["total testosterone"]["unit"] == "nmol/L"
+    assert got["total testosterone"]["value_canonical"] == pytest.approx(11.03, abs=0.01)
+    assert got["total testosterone"]["value"] == "318"          # what the paper wrote is kept as written
+    assert got["free testosterone"]["unit"] == "pmol/L"
+    assert "total testosterone" in _CANONICAL and "free testosterone" in _CANONICAL
+
+
+def test_a_design_field_never_makes_an_animal_trial_choose_what_it_was(loaded_db):
+    """What was studied and how it was allocated are two axes. A design enum that mixes them is split, so an
+    animal experiment randomised to treatment or vehicle keeps both facts."""
+    from research_agent.opportunity.protocol import SYSTEM_FIELD, validate_protocol
+
+    raw = {"fields": [
+        {"name": "study_design_for_causal_inference", "type": "enum", "role": "evaluation",
+         "definition": "The design used to estimate the effect.",
+         "values": ["case_report_or_case_series", "animal_or_in_vitro_experiment",
+                    "observational_cohort_or_registry", "randomised_placebo_controlled"],
+         "desirable": ["randomised_placebo_controlled"]},
+        {"name": "follow_up_duration", "type": "enum", "definition": "How long.",
+         "values": ["up_to_3_months", "3_to_12_months", "more_than_12_months"], "desirable": []}]}
+    clean, problems = validate_protocol(raw)
+    f = {x["name"]: x for x in clean["fields"]}
+    design = f["q_study_design_for_causal_inference"]
+    assert "animal_or_in_vitro_experiment" not in design["values"]
+    assert "randomised_placebo_controlled" in design["values"] and design["desirable"]
+    assert "whatever was studied" in design["definition"]
+    system = f[SYSTEM_FIELD]
+    assert system["values"][0] == "human" and "not_stated" in system["values"]
+    # one value naming two systems gives both a home
+    assert system["values"] == ["human", "animal", "in_vitro_or_ex_vivo", "not_stated"]
+    assert any("moved animal_or_in_vitro_experiment" in p for p in problems)
+    # a field that is only about time, or only about allocation, is left exactly as it was
+    assert f["q_follow_up_duration"]["values"][:3] == ["up_to_3_months", "3_to_12_months", "more_than_12_months"]
+
+    # separate system values map to separate kinds, and an existing system field is reused, not duplicated
+    raw2 = {"fields": [
+        {"name": "study_system", "type": "enum", "definition": "x", "values": ["human", "rodent"]},
+        {"name": "design", "type": "enum", "definition": "y",
+         "values": ["cell_culture", "randomised_trial", "cohort_study"]}]}
+    clean2, _ = validate_protocol(raw2)
+    names = [x["name"] for x in clean2["fields"]]
+    assert names.count(SYSTEM_FIELD) == 1
+    assert "cell_culture" not in next(x for x in clean2["fields"] if x["name"] == "q_design")["values"]
+
+    # with only one allocation value left there is no allocation axis to protect, so nothing moves
+    raw3 = {"fields": [{"name": "kind", "type": "enum", "definition": "z",
+                        "values": ["animal_study", "human_trial", "review"]}]}
+    clean3, problems3 = validate_protocol(raw3)
+    assert [x["name"] for x in clean3["fields"]] == ["q_kind"] and not any("moved" in p for p in problems3)

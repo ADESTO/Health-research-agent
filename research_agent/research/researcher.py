@@ -90,6 +90,52 @@ def start_in_background(run_id: str, goal: str, **kw) -> dict:
     return {"researcher_id": rid, "job_id": schedule(rid)}
 
 
+# The notes a researcher stops itself with when it runs out of room, as opposed to running out of questions.
+_RAN_OUT = ("cycle limit reached", "total budget used")
+
+
+def set_budget(rid: int, max_cycles: int | None = None, add_cycles: int | None = None,
+               total_tokens: int | None = None, add_tokens: int | None = None,
+               daily_tokens: int | None = None) -> dict:
+    """Give a researcher more room to work, and set it going again if room is why it stopped.
+
+    A researcher that stopped because it ran out of cycles or tokens has an agenda it was still working on,
+    so raising the limit continues that work. One that finished because its questions were answered is left
+    alone: it is not waiting for anything."""
+    conn = connect()
+    try:
+        r = conn.execute("SELECT status, status_note, cycles_done, max_cycles, tokens_used, total_tokens, "
+                         "daily_tokens FROM researchers WHERE id=%s", (rid,)).fetchone()
+        if not r:
+            return {"error": f"no researcher {rid}"}
+        new_cycles = max_cycles if max_cycles is not None else (
+            r["max_cycles"] + add_cycles if add_cycles else r["max_cycles"])
+        new_total = total_tokens if total_tokens is not None else (
+            r["total_tokens"] + add_tokens if add_tokens else r["total_tokens"])
+        new_daily = daily_tokens if daily_tokens is not None else r["daily_tokens"]
+        if new_cycles < r["cycles_done"]:
+            return {"error": f"it has already done {r['cycles_done']} cycles; set the limit above that"}
+        if new_total < r["tokens_used"]:
+            return {"error": f"it has already spent {r['tokens_used']:,} tokens; set the budget above that"}
+        conn.execute("UPDATE researchers SET max_cycles=%s, total_tokens=%s, daily_tokens=%s, updated_at=now() "
+                     "WHERE id=%s", (new_cycles, new_total, new_daily, rid))
+        out = {"researcher_id": rid, "max_cycles": new_cycles, "total_tokens": new_total,
+               "daily_tokens": new_daily, "cycles_done": r["cycles_done"], "tokens_used": r["tokens_used"]}
+        room = new_cycles > r["cycles_done"] and new_total > r["tokens_used"]
+        stopped_for_room = r["status"] == "finished" and (r["status_note"] or "") in _RAN_OUT
+    finally:
+        conn.close()
+    if stopped_for_room and room:
+        set_status(rid, "active", "budget raised; carrying on")      # set_status schedules the next cycle
+        out["resumed"] = True
+    else:
+        out["resumed"] = False
+        if r["status"] == "finished" and not stopped_for_room:
+            out["note"] = (f"it is finished because {r['status_note'] or 'its agenda ran out'}, not for want "
+                           "of budget, so it was not restarted; resume it yourself if you still want it to work")
+    return out
+
+
 def set_status(rid: int, status: str, note: str | None = None) -> None:
     conn = connect()
     try:

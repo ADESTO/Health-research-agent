@@ -572,7 +572,7 @@ details.log summary { cursor: pointer; font-size: 13px; color: var(--muted); }
             <div class="panel" style="padding:14px;display:grid;gap:10px">
               <div class="rs-head"><span class="pill" id="rsState"></span><span class="status" id="rsNote"></span>
                 <span style="margin-left:auto" class="go"><button class="btn small" id="rsPause">Pause</button>
-                  <button class="btn small" id="rsResume">Resume</button><button class="btn small" id="rsStop">Stop</button></span></div>
+                  <button class="btn small" id="rsResume">Resume</button><button class="btn small" id="rsStop">Stop</button><button class="btn small" id="rsMore" hidden>Give it 5 more cycles</button></span></div>
               <div class="rs-goal" id="rsGoalView"></div>
               <div class="rs-head status"><span id="rsCyc"></span><span class="meter" title="tokens used of the total budget"><i id="rsMeter"></i></span><span id="rsTok"></span></div>
             </div>
@@ -1885,6 +1885,11 @@ async function showResearcher(id) {
   $("#rsPause").hidden = r.status !== "active";
   $("#rsResume").hidden = r.status !== "paused";
   $("#rsStop").hidden = ["stopped", "finished"].includes(r.status);
+  // room to work, rather than questions, is what it ran out of: offer it more
+  const outOfRoom = r.cycles_done >= r.max_cycles || r.tokens_used >= r.total_tokens;
+  $("#rsMore").hidden = !(outOfRoom && ["finished", "paused", "active"].includes(r.status));
+  $("#rsMore").textContent = r.tokens_used >= r.total_tokens ? "Give it 5 more cycles and 5M tokens"
+                                                             : "Give it 5 more cycles";
   // agenda as a tree
   const kids = {};
   g.agenda.forEach(a => (kids[a.parent_id || 0] = kids[a.parent_id || 0] || []).push(a));
@@ -1951,6 +1956,16 @@ function findingCard(f) {
     </details></div>`;
 }
 
+$("#rsMore").onclick = async () => {
+  if (!rsCurrent) return;
+  try {
+    const r = await api(`/researchers/${rsCurrent}/budget`, { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ add_cycles: 5, add_tokens: 5e6 }) });
+    $("#rsNote").textContent = r.resumed ? "budget raised; carrying on" : (r.note || "budget raised");
+  } catch (e) { $("#rsNote").textContent = e.message; }
+  showResearcher(rsCurrent); loadResearchers();
+};
 $("#rsRejected").onchange = () => rsCurrent && showResearcher(rsCurrent);
 for (const [btn, action] of [["#rsPause", "pause"], ["#rsResume", "resume"], ["#rsStop", "stop"]])
   $(btn).onclick = async () => {

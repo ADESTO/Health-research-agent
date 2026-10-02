@@ -224,6 +224,10 @@ CREATE TABLE IF NOT EXISTS drafts (
 CREATE INDEX IF NOT EXISTS drafts_run_idx ON drafts (run_id, id);
 -- the extraction schema version a run was read with (older runs keep their records after a schema change)
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS extraction_version text;
+
+-- The scope a run's numbers are counted over (tools/cohort.py): include/exclude conditions on extracted
+-- fields, applied in extraction._rows so every claim, test, map and export shares one denominator.
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS cohort jsonb;
 ALTER TABLE drafts ADD COLUMN IF NOT EXISTS citation_style text NOT NULL DEFAULT 'author-year';
 
 -- Screening log for systematic-review reporting (PRISMA): every paper discovery saw, and what happened to it.

@@ -31,6 +31,7 @@ FORMATS = {
     "protocol": ("text/markdown", "protocol_and_prisma.md"), "screening": ("text/csv", "screening_log.csv"),
     "burden": ("text/csv", "research_vs_burden.csv"), "burden_chart": ("image/png", "research_vs_burden.png"),
     "opportunities": ("text/csv", "research_opportunities.csv"),
+    "package": ("application/zip", "evidence_package.zip"),
 }
 
 
@@ -354,15 +355,19 @@ def _claim_rows(ctx):
 def _opportunity_rows(ctx):
     from research_agent.tools.opportunities import listing
 
-    header = ["id", "kind", "what", "research_question", "state", "grade", "supporting_claims",
+    header = ["id", "kind", "what", "research_question", "state", "grade", "already_done",
+              "papers_that_already_do_it", "supporting_claims",
               "weakening_claims", "supporting_papers", "prior_studies", "unresolved_questions",
               "alternative_explanations", "candidate_methods", "required_data", "validation", "from"]
     rows = []
     for o in listing(ctx):
         e, c = o["evidence"] or {}, o["confidence"] or {}
         j = lambda k: "; ".join(str(x) for x in (e.get(k) or []))        # noqa: E731
+        pr = e.get("precedent") or {}
+        nearest = pr.get(pr.get("verdict") or "") or []
         rows.append([o["item_id"], o["kind"], o["label"], o["question"] or "", o["state"],
                      (c.get("grade") or c.get("level") or "") if isinstance(c, dict) else str(c),
+                     pr.get("verdict", ""), "; ".join(x.get("paper_id", "") for x in nearest),
                      j("supporting_claims"), j("weakening_claims"), j("supporting_papers"), j("prior_studies"),
                      j("unresolved_questions"), j("alternative_explanations"), j("candidate_methods"),
                      j("required_data"), j("validation_requirements"),
@@ -419,6 +424,98 @@ def _export_protocol(ctx):
     return protocol_markdown(ctx) + "\n" + "\n".join(prisma_markdown(ctx))
 
 
+# ---------------------------------------------------------------- the evidence package
+# One archive holding everything a reader needs to check the run without asking for anything else: the
+# report as written, every number with the papers and quotes behind it, what each number's state means, what
+# the run says is worth doing and whether anyone has done it, the papers themselves in citation form, and
+# the record of what was screened in or out. The manifest says what each file is and, more importantly,
+# which questions the package can and cannot answer.
+PACKAGE = [
+    ("report.md", "md", "The report as it was written, with the computed sections appended."),
+    ("claims.csv", None, "Every claim: its statement, the predicate code tested, the count it produced, its "
+                         "state and why that state, and how its papers were read."),
+    ("opportunities.csv", "opportunities", "What the run says is worth doing: what supports each one, what "
+                                          "weakens it, what is unresolved, and whether the corpus already "
+                                          "holds a study that does it."),
+    ("extractions.csv", "csv", "One row per analysed paper: every extracted field and the verified quote "
+                               "behind each one."),
+    ("screening_log.csv", "screening", "Every paper the search surfaced and what happened to it "
+                                       "(identified, included, excluded, duplicate, over the limit)."),
+    ("protocol_and_prisma.md", "protocol", "The protocol the run followed and the PRISMA flow counts."),
+    ("references.bib", "bib", "BibTeX for every analysed paper."),
+    ("references.ris", "ris", "RIS for every analysed paper (Zotero, EndNote, Mendeley)."),
+    ("run_data.xlsx", "xlsx", "The same tables as one workbook, plus reported results and associations."),
+]
+
+
+def _manifest(ctx, included: list[tuple[str, str]], missing: list[tuple[str, str]]) -> str:
+    from research_agent.tools import cohort
+
+    facts = {}
+    try:
+        from research_agent.agents.report import run_facts
+
+        facts = run_facts(ctx)
+    except Exception:
+        pass
+    L = [f"# Evidence package", "", f"**Question:** {ctx.question}", "",
+         f"Run `{ctx.run_id}`. Papers analysed: {facts.get('extracted', '?')} "
+         f"({facts.get('fulltext', '?')} read in full, {facts.get('abstract_only', '?')} from the abstract "
+         f"alone), from a corpus of {facts.get('corpus', '?')} papers.", "",
+         f"**Counted over:** {cohort.describe(cohort.of(ctx))}.", ""]
+    states = facts.get("claims_by_state") or {}
+    if states:
+        from research_agent.tools.epistemics import PLAIN
+
+        L += ["## What the numbers are worth", "",
+              "Each claim carries the state its measurement supports, not the state its wording claims:", ""]
+        L += [f"- **{s}** ({n}): {PLAIN.get(s, '')}" for s, n in states.items()]
+        L += [""]
+    L += ["## What is in here", ""]
+    L += [f"- `{name}` — {what}" for name, what in included]
+    if missing:
+        L += [""] + ["## Not in here", ""] + [f"- `{name}` — {why}" for name, why in missing]
+    L += ["", "## What this package cannot tell you", "",
+          "- A count of zero means no analysed paper reports it. Whether it is absent from the literature is "
+          "a different question, which this run does not answer; `claims.csv` marks those as `not_reported` "
+          "or `not_searched_enough`.",
+          "- Fields are stated far more often in full texts than in abstracts, so a field's rate across a "
+          "mostly abstract-read set says as much about reading depth as about the papers.",
+          "- Shares of the corpus over time are not shares of the literature: the PMC part was loaded as "
+          "topic slices, so its year-on-year shares track what was loaded.",
+          "- Every quote in `extractions.csv` was checked against the paper's own text by code. Values whose "
+          "quote was not found were discarded, not kept unverified.", ""]
+    return "\n".join(L)
+
+
+def _export_package(ctx):
+    import zipfile
+
+    buf = io.BytesIO()
+    included: list[tuple[str, str]] = []
+    missing: list[tuple[str, str]] = []
+    payloads: list[tuple[str, bytes]] = []
+    for name, fmt, what in PACKAGE:
+        try:
+            if fmt is None:                                  # claims have no single-file export of their own
+                data = _csv(*_claim_rows(ctx))
+            else:
+                data = globals()[f"_export_{fmt}"](ctx)
+            if data is None:
+                raise ValueError("nothing to export")
+            payloads.append((name, data if isinstance(data, bytes) else data.encode("utf-8")))
+            included.append((name, what))
+        except Exception as exc:          # one missing part must not cost the reader the whole package
+            missing.append((name, f"{what} Not included: {str(exc)[:160]}"))
+    if not payloads:
+        raise ValueError("this run has nothing to package yet")
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("MANIFEST.md", _manifest(ctx, included, missing))
+        for name, data in payloads:
+            z.writestr(name, data)
+    return buf.getvalue()
+
+
 def _export_xlsx(ctx):
     from openpyxl import Workbook
     from openpyxl.styles import Font
@@ -433,11 +530,13 @@ def _export_xlsx(ctx):
     res_rows, assoc_rows = [], []
     for r in C._rows(ctx):
         for x in r["data"].get("reported_results") or []:
-            res_rows.append([r["paper_id"], x["metric"], x["value"], x.get("value_num"), x["model"], x["is_baseline"],
-                             x["split"], x["setting"], x["horizon"], x["quote"]])
+            res_rows.append([r["paper_id"], x["metric"], x["value"], x.get("value_num"),
+                             x.get("unit_as_written", ""), x.get("unit"), x.get("value_canonical"),
+                             x["model"], x["is_baseline"], x["split"], x["setting"], x["horizon"], x["quote"]])
         for x in r["data"].get("reported_associations") or []:
             assoc_rows.append([r["paper_id"], x["driver"], x["direction"], x["lag"], x["significant"], x["quote"]])
-    sheets.insert(1, ("Reported results", ["paper_id", "metric", "value", "value_number", "model", "baseline", "split",
+    sheets.insert(1, ("Reported results", ["paper_id", "metric", "value", "value_number", "unit_as_written",
+                                           "unit", "value_in_that_unit", "model", "baseline", "split",
                                            "setting", "horizon", "quote"], res_rows))
     sheets.insert(2, ("Associations", ["paper_id", "driver", "direction", "lag", "significant", "quote"], assoc_rows))
     pc = prisma_counts(ctx)

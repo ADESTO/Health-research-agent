@@ -32,6 +32,9 @@ RESULT_SCHEMA = {
         "per number. quote must be copied word for word and must contain the number."),
     "items": {"type": "object", "properties": {
         "metric": STR, "value": {**STR, "description": "The number exactly as written, e.g. 0.87 or 12.4%"},
+        "unit": {**STR, "description": "The unit exactly as written next to the number (ng/dL, nmol/L, mg/L, "
+                 "kg, cm, years, %...), or '' for a dimensionless number such as an AUC, an odds ratio or a "
+                 "correlation. Copy it; do not convert it."},
         "model": {**STR, "description": "Which model, method, drug, arm or group it belongs to"},
         "is_baseline": {"type": "boolean", "description": "true for a comparator: baseline model, placebo, "
                         "control arm"},
@@ -67,6 +70,15 @@ _METRICS = [
     ("ic50", r"\bic50\b|half[- ]maximal inhibitory", None), ("ec50", r"\bec50\b", None),
     ("cmax", r"\bcmax\b|peak (plasma )?concentration", None), ("half-life", r"half[- ]life|\bt\s*1/2\b", None),
     ("prevalence", r"prevalence", None),
+    # hormone levels: total and free testosterone differ by a factor of about fifty, so they are never one
+    # bucket, and "serum testosterone" with no fraction named is treated as total, which is what papers mean
+    ("free testosterone", r"free\s+(and\s+)?(serum\s+|plasma\s+)?testosterone|testosterone,?\s*free|\bfai\b|"
+                          r"free androgen index", None),
+    ("total testosterone", r"testosterone", None),
+    ("oestradiol", r"o?estradiol|\be2\b", None),
+    ("psa", r"\bpsa\b|prostate[- ]specific antigen", None),
+    ("waist circumference", r"waist", None),
+    ("body weight", r"body ?weight|\bweight\b(?!ed)", None),
     ("auc", r"\bau(roc|c)\b|area under", True), ("r2", r"\br\s*(2|²|squared)\b|coefficient of determination", True),
     ("accuracy", r"accuracy", True), ("sensitivity", r"sensitivity|recall", True),
     ("specificity", r"specificity", True), ("f1", r"\bf1\b|f-?score", True),
@@ -82,6 +94,54 @@ _DRIVERS = [
     ("housing quality", r"housing|house|roof"), ("health-care access", r"access|travel time|distance to"),
     ("mosquito density / entomology", r"mosquito|anophel|vector|entomolog|larva|\beir\b"),
 ]
+
+
+# ---------------------------------------------------------------- units
+# A number without its unit is not a measurement. 350 ng/dL and 12.1 nmol/L are the SAME testosterone
+# level, and pooling them produced a median of 318 next to a median of 0.6 for the same quantity in one
+# report. So each measured metric declares a canonical unit and the factors that reach it; a value whose
+# unit cannot be read is kept with its quote but never enters a median.
+#
+# Molar conversions depend on the analyte's molecular weight, so they cannot be generic: each analyte
+# carries its own table. Anything not listed here is pooled only with values sharing its written unit.
+_CANONICAL = {
+    "total testosterone": ("nmol/L", {"nmol/l": 1.0, "nm": 1.0, "ng/dl": 0.03467, "ng/ml": 3.467,
+                                      "ng/l": 0.003467, "pg/ml": 0.003467, "µg/l": 3.467, "ug/l": 3.467,
+                                      "mcg/l": 3.467}),
+    "free testosterone": ("pmol/L", {"pmol/l": 1.0, "pg/ml": 3.467, "ng/dl": 34.67, "nmol/l": 1000.0}),
+    "oestradiol": ("pmol/L", {"pmol/l": 1.0, "pg/ml": 3.671, "ng/l": 3.671, "nmol/l": 1000.0}),
+    "psa": ("ng/mL", {"ng/ml": 1.0, "µg/l": 1.0, "ug/l": 1.0, "mcg/l": 1.0}),
+    "body weight": ("kg", {"kg": 1.0, "g": 0.001, "lb": 0.4536, "lbs": 0.4536}),
+    "waist circumference": ("cm", {"cm": 1.0, "mm": 0.1, "m": 100.0, "in": 2.54, "inch": 2.54}),
+    "mic": ("mg/L", {"mg/l": 1.0, "µg/ml": 1.0, "ug/ml": 1.0, "mcg/ml": 1.0, "µg/l": 0.001, "ug/l": 0.001}),
+}
+# Dimensionless metrics with a known range. A value outside it is a reading error, not a result: one report
+# carried an R2 of 2, which is arithmetically impossible and came from a number that was never an R2.
+_BOUNDS = {"auc": (0.0, 1.0), "r2": (-1.0, 1.0), "accuracy": (0.0, 1.0), "sensitivity": (0.0, 1.0),
+           "specificity": (0.0, 1.0), "f1": (0.0, 1.0), "correlation": (-1.0, 1.0), "nse": (-1e6, 1.0),
+           "prevalence": (0.0, 1.0), "mape": (0.0, 1e4)}
+_UNIT_CLEAN = re.compile(r"[\s()\[\]]+")
+
+
+def normalise_unit(metric: str, unit: str, value: float | None) -> tuple[float | None, str | None]:
+    """(value in the metric's canonical unit, that unit), or (None, None) when it cannot be converted.
+
+    A metric with no canonical unit keeps its own written unit, so values are still only pooled with others
+    measured the same way."""
+    canon = _CANONICAL.get(metric)
+    written = _UNIT_CLEAN.sub("", str(unit or "")).lower().replace("μ", "µ")
+    if canon is None:
+        return value, (written or None)
+    target, factors = canon
+    factor = factors.get(written)
+    if factor is None:
+        return None, None
+    return (None if value is None else round(value * factor, 6)), target
+
+
+def in_bounds(metric: str, value: float | None) -> bool:
+    lo, hi = _BOUNDS.get(metric, (None, None))
+    return value is None or lo is None or lo <= value <= hi
 
 
 def metric_key(name: str) -> tuple[str, bool | None]:
@@ -138,8 +198,15 @@ def verify_structured(args: dict, text: str) -> tuple[dict, dict]:
                 # a bare "AUC" above 1 (and not a percentage) is a plasma exposure, not a ROC curve
                 if key == "auc" and value_num is not None and value_num > 1 and "%" not in raw:
                     key, higher = "plasma auc", None
+                if not in_bounds(key, value_num):
+                    continue            # outside what the metric can be: a reading error, not a result
+                # the unit may be written beside the number rather than in the unit field
+                unit_text = str(it.get("unit") or "") or raw
+                canon_num, canon_unit = normalise_unit(key, unit_text, value_num)
                 good.append({"metric": key, "metric_as_written": str(it.get("metric") or "")[:60],
                              "value": raw[:40], "value_num": value_num,
+                             "unit_as_written": str(it.get("unit") or "")[:24],
+                             "unit": canon_unit, "value_canonical": canon_num,
                              "higher_is_better": higher, "model": str(it.get("model") or "")[:80],
                              "is_baseline": bool(it.get("is_baseline")),
                              "split": it.get("split") if it.get("split") in SPLITS else "not_stated",
@@ -198,18 +265,29 @@ def results_table(ctx, metric: str | None = None, split: str | None = None, mode
                 continue
             if model_contains and model_contains.lower() not in it["model"].lower():
                 continue
-            rows.append({"paper_id": r["paper_id"], "year": r["year"], **{k: it[k] for k in
-                         ("metric", "value", "model", "is_baseline", "split", "setting", "horizon", "quote")}})
-            by_metric.setdefault(it["metric"], []).append((r["paper_id"], it.get("value_num")))
-    summary = {}
-    for m, vals in by_metric.items():
+            rows.append({"paper_id": r["paper_id"], "year": r["year"],
+                         **{k: it.get(k) for k in ("metric", "value", "unit_as_written", "unit", "model",
+                                                   "is_baseline", "split", "setting", "horizon", "quote")}})
+            # pooled per metric AND per unit: a median over mixed units is not a number about anything
+            key = (it["metric"], it.get("unit"))
+            by_metric.setdefault(key, []).append((r["paper_id"], it.get("value_canonical", it.get("value_num"))))
+    summary, unconvertible = {}, 0
+    for (m, unit), vals in by_metric.items():
         nums = [v for _, v in vals if v is not None]
+        if m in _CANONICAL and unit is None:
+            unconvertible += len(vals)       # its unit could not be read: kept with its quote, never pooled
+            continue
         q1, q3 = _quartiles(nums)
-        summary[m] = {"papers": len({p for p, _ in vals}), "values": len(vals), "median": _median(nums),
-                      "q1": q1, "q3": q3}
-    return {"summary": summary, "results": rows[:max(1, min(int(limit), 200))], "n_results": len(rows),
-            "note": "Across-paper values come from different data, places and scales: describe them, do not "
-                    "rank methods with them. Within-paper comparisons (method_comparison) are the fair test."}
+        summary[f"{m} ({unit})" if unit else m] = {
+            "metric": m, "unit": unit, "papers": len({p for p, _ in vals}), "values": len(vals),
+            "median": _median(nums), "q1": q1, "q3": q3}
+    out = {"summary": summary, "results": rows[:max(1, min(int(limit), 200))], "n_results": len(rows),
+           "note": "Across-paper values come from different data, places and scales: describe them, do not "
+                   "rank methods with them. Within-paper comparisons (method_comparison) are the fair test. "
+                   "Values are pooled only within one metric and one unit."}
+    if unconvertible:
+        out["values_whose_unit_could_not_be_read"] = unconvertible
+    return out
 
 
 def _sign_test_p(wins: int, losses: int) -> float:
@@ -326,16 +404,35 @@ def results_markdown(ctx) -> list[str]:
     """Code-built appendix: reported performance and conflicting findings, for the end of a report."""
     lines: list[str] = []
     rt = results_table(ctx, limit=200)
-    if rt["summary"]:
-        lines += ["## Reported performance (computed)", "",
-                  "Numbers papers report for their own models, each backed by a quote. Values from different "
-                  "papers come from different data and scales, so the medians describe the literature; they do "
-                  "not rank methods.", "", "| Metric | Papers | Reported values | Median | Middle half |",
-                  "|---|---|---|---|---|"]
-        for m, s in sorted(rt["summary"].items(), key=lambda kv: -kv[1]["papers"]):
-            mid = f"{_fmt(s['q1'])} to {_fmt(s['q3'])}" if s["q1"] is not None else "n/a"
-            lines.append(f"| {m.upper() if len(m) <= 5 else m} | {s['papers']} | {s['values']} | {_fmt(s['median'])} | {mid} |")
-        lines.append("")
+    if rt["summary"]:  # the table itself decides whether it has anything worth printing
+        # A median over one paper's one number is not a summary of a literature, and fifty such rows read
+        # as a results table while saying nothing. Only metrics several papers report are shown; the rest are
+        # counted, and every number remains in the data export with its quote.
+        shown = {k: v for k, v in rt["summary"].items() if v["papers"] >= 2}
+        single = len(rt["summary"]) - len(shown)
+        if shown:
+            lines += ["## Reported performance (computed)", "",
+                      "Numbers papers report for their own models, each backed by a quote and pooled only "
+                      "within one metric and one unit. Values from different papers come from different data "
+                      "and scales, so the medians describe the literature; they do not rank methods.", "",
+                      "| Metric | Unit | Papers | Reported values | Median | Middle half |",
+                      "|---|---|---|---|---|---|"]
+            for m, s in sorted(shown.items(), key=lambda kv: -kv[1]["papers"]):
+                mid = f"{_fmt(s['q1'])} to {_fmt(s['q3'])}" if s["q1"] is not None else "n/a"
+                name = s["metric"]
+                lines.append(f"| {name.upper() if len(name) <= 5 else name} | {s['unit'] or 'none'} | "
+                             f"{s['papers']} | {s['values']} | {_fmt(s['median'])} | {mid} |")
+            notes = []
+            if single:
+                notes.append(f"{single} further metrics are reported by a single paper each and are left out: "
+                             "a median of one number describes nothing. They are in the data export, with "
+                             "their quotes.")
+            if rt.get("values_whose_unit_could_not_be_read"):
+                notes.append(f"{rt['values_whose_unit_could_not_be_read']} values were excluded from these "
+                             "medians because their unit could not be read, so they could not be put on one "
+                             "scale.")
+            lines += ["", " ".join(notes)] if notes else []
+            lines.append("")
     co = contradictions(ctx)["contradictions"]
     if co:
         lines += ["## Where studies disagree (computed)", ""]

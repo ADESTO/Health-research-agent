@@ -211,11 +211,17 @@ def run_facts(ctx) -> dict:
         states = epistemics.summary(ctx)
     except Exception:
         states = {}
+    try:
+        from research_agent.tools import cohort
+
+        scope = cohort.summary(ctx) if cohort.of(ctx) else {}
+    except Exception:
+        scope = {}
     return {"shortlist": cov["shortlist_size"], "extracted": cov["extracted"],
             "fulltext": cov["by_source"].get("fulltext", 0), "abstract_only": cov["by_source"].get("abstract", 0),
             "years": (years["lo"], years["hi"]), "corpus": corpus["n"], "corpus_years": (corpus["lo"], corpus["hi"]),
             "shortlist_by_corpus": shortlist_mix, "corpus_by_source": corpus_mix,
-            "claims_by_state": states}
+            "claims_by_state": states, **({"cohort": scope} if scope else {})}
 
 
 def audit_numbers(body: str, allowed: set[tuple[int, int]]) -> tuple[str, int]:
@@ -312,6 +318,19 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
 
         opportunities.record(ctx)
         computed = epistemics.markdown(ctx) + opportunities.markdown(ctx) + computed
+    except Exception:
+        pass
+    try:
+        from research_agent.tools import precedent, resolve
+
+        computed += precedent.markdown(ctx) + resolve.markdown(ctx)
+    except Exception:
+        pass
+    try:
+        from research_agent.tools import cohort
+
+        # before anything else that quotes a denominator: it says what the denominators are
+        computed = cohort.markdown(ctx) + computed
     except Exception:
         pass
     try:
