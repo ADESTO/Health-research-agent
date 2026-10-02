@@ -1493,7 +1493,8 @@ function showInfo(n) {
     if (n.results && n.results.length) h += `<div>Reported: ${n.results.map(esc).join("; ")}</div>`;
   }
   if (n.type === "concept") h += `<div>Used by <b>${n.papers}/${N}</b> papers</div><div class="bar"><i style="width:${Math.round(100 * (n.papers || 0) / Math.max(1, N))}%"></i></div>`;
-  if (n.type === "claim") h += `<div><span class="v v-${esc(n.status)}">${esc(n.status)}</span>${n.counted ? ` · counted <b>${esc(n.counted)}</b>` : ""}</div>`
+  if (n.type === "claim") h += `<div><span class="v v-${esc(n.state === "supported" ? "supported" : n.state === "contradicted" ? "unsupported" : "pending")}">${esc(n.state || n.status)}</span>${n.counted ? ` · counted <b>${esc(n.counted)}</b>` : ""}</div>`
+    + ((n.state_why || []).length ? `<div>${n.state_why.map(esc).join(" ")}</div>` : "")
     + (n.denominator != null && n.denominator < 20 ? `<div>Limited evidence base: ${n.denominator} papers.</div>` : "");
   if (n.counted && n.type !== "claim") h += `<div>Evidence: <b>${esc(n.counted)}</b> papers</div>`;
   if (n.confidence) {
@@ -1502,6 +1503,8 @@ function showInfo(n) {
     h += `<div>Confidence: <b>${esc(grade)}</b>${why.length ? ` · ${why.slice(0, 3).map(esc).join("; ")}` : ""}</div>`;
   }
   if (n.why) h += `<div>${esc(n.why)}</div>`;
+  if ((n.weakened_by || []).length) h += `<div>Weakened by: ${n.weakened_by.map(esc).join(", ")}</div>`;
+  if ((n.unresolved || []).length) h += `<div>Still unresolved: ${esc(n.unresolved[0])}${n.unresolved.length > 1 ? ` (+${n.unresolved.length - 1} more)` : ""}</div>`;
   if (n.validation) h += `<div>Validation: ${esc(n.validation)}</div>`;
   if (n.separating && n.separating.length) h += `<div>What differs between the two sides: ${n.separating.map(esc).join("; ")}</div>`;
   h += "</div>";

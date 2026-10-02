@@ -152,6 +152,35 @@ ALTER TABLE paper_fulltext ADD COLUMN IF NOT EXISTS tsv tsvector
     GENERATED ALWAYS AS (to_tsvector('english', left(coalesce(clean_text, ''), 400000))) STORED;
 CREATE INDEX IF NOT EXISTS paper_fulltext_tsv_idx ON paper_fulltext USING gin (tsv);
 
+-- Research opportunities: a gap, an untried combination, a candidate design or a researcher's finding, kept
+-- as a row with what supports it, what weakens it and where it came from, so it outlives the report that
+-- first mentioned it (tools/opportunities.py).
+CREATE TABLE IF NOT EXISTS research_opportunities (
+    id          bigserial PRIMARY KEY,
+    run_id      uuid NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    item_id     text NOT NULL,                  -- G2, N1, D1, X1, R1, F3: its id within the run
+    kind        text NOT NULL,                  -- gap | combination | design | finding | direction
+    label       text NOT NULL,
+    question    text,                           -- the research question it implies
+    state       text NOT NULL DEFAULT 'open',   -- open | addressed | dismissed | superseded
+    state_note  text,
+    field       text,
+    value       text,
+    confidence  jsonb,                          -- the grade code gave it, with its reasons
+    evidence    jsonb NOT NULL DEFAULT '{}',    -- supporting/weakening claims, papers, prior studies,
+                                                -- unresolved questions, alternative explanations, methods
+    provenance  jsonb NOT NULL DEFAULT '{}',    -- which agent and step computed it, from what
+    created_at  timestamptz DEFAULT now(),
+    UNIQUE (run_id, item_id)
+);
+CREATE INDEX IF NOT EXISTS research_opportunities_idx ON research_opportunities (run_id, kind, state);
+
+-- Every verified claim also carries the STATE its measurement supports (tools/epistemics.py), with the
+-- numbers behind it: a count of zero is "not reported in this corpus", never "absent from the field".
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS state text;
+ALTER TABLE claims ADD COLUMN IF NOT EXISTS state_facts jsonb;
+CREATE INDEX IF NOT EXISTS claims_state_idx ON claims (run_id, state);
+
 -- Focused re-checks of papers the extraction may have missed: one quoted yes/no answer per paper and
 -- concept. Confirmed ('yes' with a verified quote) values are merged into the paper's extracted field.
 CREATE TABLE IF NOT EXISTS rechecks (

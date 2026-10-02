@@ -205,6 +205,42 @@ def get_graph(run_id: str):
         ctx.close()
 
 
+@app.get("/runs/{run_id}/opportunities")
+def get_opportunities(run_id: str, kind: str | None = None, state: str | None = None):
+    """What this run says is worth doing, each with what supports it, what weakens it and where it came from."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools import epistemics, opportunities
+
+    try:
+        ctx = RunContext.attach(run_id, llm_factory=lambda strong=False: None)
+    except ValueError:
+        raise HTTPException(404, "no such run")
+    try:
+        return {"opportunities": opportunities.listing(ctx, kind, state),
+                "claims_by_state": epistemics.summary(ctx), "state_means": epistemics.PLAIN}
+    finally:
+        ctx.close()
+
+
+@app.post("/runs/{run_id}/opportunities/{item_id}")
+def set_opportunity_state(run_id: str, item_id: str, body: dict):
+    """Mark an opportunity as addressed, dismissed or superseded, with a note saying why."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools import opportunities
+
+    try:
+        ctx = RunContext.attach(run_id, llm_factory=lambda strong=False: None)
+    except ValueError:
+        raise HTTPException(404, "no such run")
+    try:
+        res = opportunities.set_state(ctx, item_id, str(body.get("state") or ""), str(body.get("note") or ""))
+        if "error" in res:
+            raise HTTPException(400, res["error"])
+        return res
+    finally:
+        ctx.close()
+
+
 @app.get("/runs/{run_id}/directions")
 def get_directions(run_id: str):
     """Gaps and directions a draft can argue for (map gaps, untried combinations, designs, reported gaps)."""

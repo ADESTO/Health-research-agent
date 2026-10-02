@@ -111,6 +111,24 @@ def fake_reading(text: str, tools) -> dict:
     return out
 
 
+def fake_field(text: str, tools) -> dict:
+    """Plays the focused one-field reader: answers only from a sentence it can quote back."""
+    import re as _re
+
+    spec = tools[0]["input_schema"]["properties"]["value"]
+    for sentence in _re.split(r"(?<=[.!?])\s+", text.replace("\n", " ")):
+        low = sentence.lower()
+        if spec.get("type") == "array":
+            if "held out" in low or "cross-validation" in low:
+                return {"value": ["held-out split"], "quote": sentence.strip()}
+            continue
+        for v in spec.get("enum") or []:
+            words = [w for w in v.split("_") if len(w) > 3]
+            if words and all(w in low for w in words[:2]):
+                return {"value": v, "quote": sentence.strip()}
+    return {"value": [] if spec.get("type") == "array" else "not_stated", "quote": ""}
+
+
 def fake_recheck(text: str, tools) -> dict:
     """Plays the re-checker: 'yes' with the exact sentence when the paper's own work uses the term,
     'no' when the term only appears in a background sentence."""
@@ -143,6 +161,8 @@ class FakeLLM:
             blocks = re.split(r"^=== Paper (\S+) ===\n", text, flags=re.M)[1:]
             records = [{"paper_id": pid, **fake_reading(body, tools)} for pid, body in zip(blocks[::2], blocks[1::2])]
             return self._resp([_call("record_readings", records=records)])
+        if force_tool == "record_field":
+            return self._resp([_call("record_field", **fake_field(messages[0]["content"][0]["text"], tools))])
         if force_tool == "record_check":
             return self._resp([_call("record_check", **fake_recheck(messages[0]["content"][0]["text"], tools))])
         if not tools and "Draft writer" in system:

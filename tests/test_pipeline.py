@@ -2803,3 +2803,183 @@ def test_reread_fills_fields_that_an_abstract_could_not_quote(loaded_db, monkeyp
     with get_conn() as pg:
         assert pg.execute("SELECT report_md FROM runs WHERE run_id=%s", (rid,)).fetchone()["report_md"] == report
         assert pg.execute("SELECT count(*) n FROM claims WHERE run_id=%s", (rid,)).fetchone()["n"] == claims
+
+
+def test_claim_states_separate_what_is_known_from_what_is_merely_unreported():
+    """A count of zero is "not reported in this corpus", never "absent"; a zero resting on abstracts, or on a
+    field papers mention without recording, is not even that."""
+    from types import SimpleNamespace
+
+    from research_agent.tools import epistemics as E
+
+    def ctx(full=20, abstract=4):
+        c = SimpleNamespace(run_id="r", pg=None)
+        c._cov = {"by_source": {"fulltext": full, "abstract": abstract}, "extracted": full + abstract}
+        return c
+
+    import research_agent.tools.extraction as X
+    real, X.extraction_coverage = X.extraction_coverage, lambda c: c._cov
+    try:
+        st = lambda res, **kw: E.state_of(ctx(**kw), "prevalence", res)                     # noqa: E731
+        # a healthy measurement
+        assert st({"supported": True, "n_matching": 9, "denominator": 24})["state"] == "supported"
+        # supported, but most papers were read from their abstracts: the caveat is part of the state
+        weak = st({"supported": True, "n_matching": 9, "denominator": 24}, full=4, abstract=20)
+        assert weak["state"] == "partially_supported" and "abstract" in weak["reasons"][0]
+        # nothing reports it: an observation about the corpus, and the state says the absence is not established
+        zero = st({"supported": True, "n_matching": 0, "denominator": 24})
+        assert zero["state"] == "not_reported" and "NOT established" in zero["reasons"][0]
+        # the same zero, but the papers were mostly abstracts: the measurement cannot carry anything
+        assert st({"supported": True, "n_matching": 0, "denominator": 24}, full=4, abstract=20
+                  )["state"] == "not_searched_enough"
+        # papers mention it in their text without it reaching the field
+        assert st({"supported": False, "n_matching": 0, "denominator": 24,
+                   "absence_problem": "11 papers mention it"})["state"] == "not_searched_enough"
+        # too few papers to decide either way, whichever way the bound went
+        assert st({"supported": True, "n_matching": 2, "denominator": 6})["state"] == "uncertain"
+        assert st({"supported": False, "n_matching": 2, "denominator": 6})["state"] == "uncertain"
+        # measured against the claim, on a base big enough to mean it
+        assert st({"supported": False, "n_matching": 18, "denominator": 24})["state"] == "contradicted"
+        # a trend needs ten matching papers before it is a trend at all
+        assert E.state_of(ctx(), "trend", {"supported": True, "total_matching_papers": 4})["state"] == "uncertain"
+        assert E.state_of(ctx(), "trend", {"supported": True, "total_matching_papers": 40})["state"] == "supported"
+        caveat = E.state_of(ctx(), "trend", {"supported": True, "total_matching_papers": 40, "caveat": "PMC slice"})
+        assert caveat["state"] == "partially_supported"
+        assert set(E.PLAIN) == set(E.STATES)
+    finally:
+        X.extraction_coverage = real
+
+
+def test_opportunities_are_rows_with_what_supports_and_weakens_them(loaded_db):
+    """Gaps, untried combinations and designs become rows carrying their evidence and provenance, so the
+    report is no longer the only place they exist."""
+    from research_agent.db import get_conn
+    from research_agent.opportunity.pipeline import run_map
+    from research_agent.runstate import RunContext
+    from research_agent.tools import opportunities as O
+
+    rid = run_map("Can machine learning improve 1-6 month malaria forecasting?",
+                  llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: None)
+    try:
+        rows = O.listing(ctx)
+        by_id = {r["item_id"]: r for r in rows}
+        assert rows and {r["kind"] for r in rows} & {"gap", "combination", "design"}
+        for r in rows:
+            assert r["state"] == "open" and r["label"] and r["provenance"].get("agent")
+            assert "supporting_claims" in r["evidence"] and "weakening_claims" in r["evidence"]
+        # a claim the measurement could not settle is listed as weakening, never as supporting
+        with get_conn() as pg:
+            pg.execute("UPDATE claims SET state='not_searched_enough' WHERE run_id=%s AND id = "
+                       "(SELECT min(id) FROM claims WHERE run_id=%s AND status <> 'rejected')", (rid, rid))
+        O.record(ctx)
+        ev = [r["evidence"] for r in O.listing(ctx)]
+        assert not any(c in (e.get("supporting_claims") or []) for e in ev
+                       for c in (e.get("weakening_claims") or []))
+        # recording again keeps one row per item rather than duplicating it
+        before = len(O.listing(ctx))
+        O.record(ctx)
+        assert len(O.listing(ctx)) == before
+        # a design says what it would take, carried over from what the design agent proposed and code checked
+        design = next((r for r in O.listing(ctx) if r["kind"] == "design"), None)
+        if design:
+            assert design["evidence"].get("addresses")
+        assert O.set_state(ctx, rows[0]["item_id"], "dismissed", "already done")["state"] == "dismissed"
+        assert "error" in O.set_state(ctx, rows[0]["item_id"], "nonsense")
+        assert "error" in O.set_state(ctx, "ZZ9", "dismissed")
+        md = "\n".join(O.markdown(ctx))
+        assert "## Research opportunities (computed)" in md and by_id and list(by_id)[0] in md
+    finally:
+        ctx.close()
+
+
+def test_field_pass_fills_one_field_from_full_text_and_only_with_a_quote(loaded_db, monkeypatch):
+    """A field left blank by the first reading is filled by reading for it alone; a value whose quote is not
+    in the paper is discarded, and nothing else in the record is touched."""
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.db import get_conn
+    from research_agent.runstate import RunContext
+    from research_agent.tools import fieldpass as FP
+    from research_agent.tools.extraction import _rows
+
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False, step=None: FakeLLM())
+    try:
+        with get_conn() as pg:   # start from a run where nobody recorded how models were validated
+            pg.execute("""UPDATE extractions SET data = jsonb_set(data, '{validation_level}', '"not_stated"')
+                          WHERE schema_version=%s AND paper_id IN
+                                (SELECT paper_id FROM run_papers WHERE run_id=%s)""",
+                       (settings.extraction_schema_version, rid))
+        before = _rows(ctx)
+        assert all(r["data"]["validation_level"] == "not_stated" for r in before)
+        other = {r["paper_id"]: r["data"].get("methods") for r in before}
+
+        res = FP.fill_field(ctx, "validation_level", limit=6)
+        assert res["blank_before"] == len(before) and res["read_now"] <= 6
+        after = {r["paper_id"]: r["data"] for r in _rows(ctx)}
+        filled = [p for p, d in after.items() if d["validation_level"] != "not_stated"]
+        assert len(filled) == res["filled"]
+        for pid in filled:                       # every filled value carries a quote, and only it changed
+            assert (after[pid].get("evidence") or {}).get("validation_level")
+            assert after[pid].get("_filled_by_pass", {}).get("validation_level")
+            assert after[pid].get("methods") == other[pid]
+        # a paper the pass could not answer for stays blank rather than being guessed at
+        assert res["still_not_stated"] == res["read_now"] - res["filled"]
+
+        # an answer whose quote is not in the paper is dropped, however confident it looks
+        monkeypatch.setattr(FP, "_ask", lambda llm, fd, text: {"value": "external", "quote": "not in any paper",
+                                                               "filled": False, "dropped_without_quote": True})
+        with get_conn() as pg:
+            pg.execute("""UPDATE extractions SET data = jsonb_set(data, '{validation_level}', '"not_stated"')
+                          WHERE schema_version=%s AND paper_id IN
+                                (SELECT paper_id FROM run_papers WHERE run_id=%s)""",
+                       (settings.extraction_schema_version, rid))
+        res2 = FP.fill_field(ctx, "validation_level", limit=4)
+        assert res2["filled"] == 0 and res2["dropped_without_a_quote"] == res2["read_now"]
+        assert all(r["data"]["validation_level"] == "not_stated" for r in _rows(ctx))
+        assert "error" in FP.fill_field(ctx, "no_such_field")
+    finally:
+        ctx.close()
+
+
+def test_a_field_pass_can_define_a_finer_field_when_the_old_one_merges_two_answers(loaded_db, monkeypatch):
+    """A category that joins two things the question separates ("naive_or_seasonal_naive_baseline") cannot be
+    un-merged by reading harder. A pass defines the finer field and codes every paper into it, and the old
+    field keeps every value it had."""
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.runstate import RunContext
+    from research_agent.tools import fieldpass as FP
+    from research_agent.tools.extraction import _rows, known_fields
+
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False, step=None: FakeLLM())
+    try:
+        ctx.save_note("protocol", {"protocol": {"fields": [
+            {"name": "q_baseline_comparison", "type": "enum", "definition": "What it was compared against.",
+             "values": ["naive_or_seasonal_naive_baseline", "other_ml_models_only", "not_stated"],
+             "desirable": [], "search": {}, "groups": [], "role": ""}]}})
+        before = {r["paper_id"]: r["data"].get("q_baseline_comparison") for r in _rows(ctx)}
+
+        monkeypatch.setattr(FP, "_ask", lambda llm, fd, text: {
+            "value": "seasonal_naive_or_historical_expectance", "quote": text.split(".")[0], "filled": True})
+        res = FP.field_pass(ctx, "baseline_reference", limit=4,
+                            values=["no_reference", "other_models_only", "naive_persistence",
+                                    "seasonal_naive_or_historical_expectance"],
+                            definition="The reference forecast its accuracy is compared against.")
+        assert res["added_field"]["field"] == "q_baseline_reference"
+        assert res["added_field"]["values"][-1] == "not_stated" and res["filled"] >= 1
+
+        lists, enums = known_fields(ctx)
+        assert "q_baseline_reference" in enums and "naive_persistence" in enums["q_baseline_reference"]
+        after = {r["paper_id"]: r["data"] for r in _rows(ctx)}
+        assert any(d.get("q_baseline_reference") == "seasonal_naive_or_historical_expectance"
+                   for d in after.values())
+        for pid, old in before.items():      # the field it replaces is untouched: nothing already counted moves
+            assert after[pid].get("q_baseline_comparison") == old
+        # the same name twice is refused rather than silently redefining a field papers are already coded by
+        assert "error" in FP.add_field(ctx, "baseline_reference", ["a", "b"], "again")
+        assert "error" in FP.add_field(ctx, "one_sided", ["only"], "needs two categories")
+    finally:
+        ctx.close()

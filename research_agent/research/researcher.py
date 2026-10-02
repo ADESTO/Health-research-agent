@@ -362,6 +362,13 @@ def propose_finding(ctx, test_id: int, statement: str) -> dict:
         (w.id, w.agenda_id, t["id"], statement.strip(), g["grade"], g["status"], json.dumps(g["reasons"]),
          json.dumps(evidence, default=str))).fetchone()["id"]
     _note(ctx, "finding", {"finding_id": fid, "statement": statement.strip(), "grade": g["grade"]})
+    if g["status"] != "rejected":           # a finding that survived the gauntlet becomes an opportunity too
+        try:
+            from research_agent.tools import opportunities
+
+            opportunities.record(ctx)
+        except Exception:
+            pass
     # the researcher learns the verdict and why, but never the held-out counts, so it cannot tune to them
     return {"finding_id": fid, "grade": g["grade"], "status": g["status"], "reasons": g["reasons"],
             "rival_explanations": [{"explanation": a["explanation"], "verdict": a["verdict"]} for a in tested]}

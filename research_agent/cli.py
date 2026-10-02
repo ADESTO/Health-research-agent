@@ -137,6 +137,17 @@ def main(argv: list[str] | None = None) -> int:
     p_map.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
     p_map.add_argument("--out", help="write the map to this .md file")
     p_rep = sub.add_parser("report"); p_rep.add_argument("run_id")
+    p_fp = sub.add_parser("fieldpass", help="fill ONE field from full text in the papers that left it blank")
+    p_fp.add_argument("run_id")
+    p_fp.add_argument("field", help="e.g. q_validation_split, q_forecast_horizon, validation_level")
+    p_fp.add_argument("--limit", type=int, help="how many papers (default and maximum 60)")
+    p_fp.add_argument("--values", help="define a NEW, finer field with these comma-separated categories, then "
+                                       "fill it (for when the existing field merges things the question "
+                                       "separates); the old field is left as it is")
+    p_fp.add_argument("--definition", default="", help="with --values: what the new field means")
+    p_fp.add_argument("--list", dest="as_list", action="store_true",
+                      help="with --values: make it a list field rather than one category per paper")
+    p_fp.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
     p_rr = sub.add_parser("reread", help="read a finished run's papers in full again and re-code their records")
     p_rr.add_argument("run_id")
     p_rr.add_argument("--limit", type=int, help="how many papers (default MAX_FULLTEXT)")
@@ -151,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     p_exp = sub.add_parser("export", help="export a finished run (report, references, data, review record)")
     p_exp.add_argument("run_id")
     p_exp.add_argument("--format", "-f", default="docx",
-                       help="md, docx, html, bib, ris, csv, xlsx, protocol, screening, burden, burden_chart")
+                       help="md, docx, html, bib, ris, csv, xlsx, protocol, screening, burden, burden_chart, opportunities")
     p_exp.add_argument("--out", "-o", help="file to write (default: a name based on the run and format)")
     p_dr = sub.add_parser("draft", help="draft a research proposal or review manuscript from a finished run")
     p_dr.add_argument("run_id", nargs="?", help="the run to build on (not needed with --export)")
@@ -358,6 +369,8 @@ def main(argv: list[str] | None = None) -> int:
         for r in rows:
             print(f"{r['run_id']}  {r['status']:<7} {r['created_at']:%Y-%m-%d %H:%M}  papers={r['n_papers']:<3} "
                   f"done=[{r['done'] or ''}]  {r['q']}")
+    elif args.cmd == "fieldpass":
+        return fieldpass_cmd(args)
     elif args.cmd == "reread":
         return reread_cmd(args)
     elif args.cmd == "report":
@@ -366,6 +379,45 @@ def main(argv: list[str] | None = None) -> int:
         with get_conn() as pg:
             row = pg.execute("SELECT status, report_md, error FROM runs WHERE run_id=%s", (args.run_id,)).fetchone()
         print(row["report_md"] if row and row["report_md"] else row)
+    return 0
+
+
+def fieldpass_cmd(args) -> int:
+    """Fill one field from full text in the papers that left it blank, and say what changed."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools.fieldpass import field_pass
+
+    vals = [v.strip() for v in (args.values or "").split(",") if v.strip()]
+    if vals and not args.definition:
+        print("--values needs --definition: say what the field means so papers can be coded by it"); return 1
+    ctx = RunContext.attach(args.run_id, provider=args.provider)
+    try:
+        res = field_pass(ctx, args.field, limit=args.limit, values=vals or None,
+                         definition=args.definition, kind="list" if args.as_list else "enum")
+        if "error" in res:
+            print(res["error"]); return 1
+        if res.get("added_field"):
+            a = res["added_field"]
+            print(f"Added {a['field']} ({a['type']}): {', '.join(a['values'])}")
+            for n in a.get("notes") or []:
+                print(f"  note: {n}")
+        args.field = res.get("added_field", {}).get("field", args.field)
+        if res.get("note"):
+            print(res["note"]); return 0
+        print(f"{args.field}: {res['blank_before']} papers left it blank; read {res['read_now']} in full.")
+        print(f"  filled: {res['filled']}   still not stated: {res['still_not_stated']}   "
+              f"dropped for want of a quote: {res['dropped_without_a_quote']}")
+        if res["no_full_text_available"]:
+            print(f"  no full text available: {len(res['no_full_text_available'])} "
+                  f"({', '.join(res['no_full_text_available'][:5])})")
+        for value, n in (res["values_found"] or {}).items():
+            print(f"    {n:>3}  {value}")
+        for ex in res["examples"]:
+            print(f"\n  {ex['paper_id']} -> {ex['value']}\n    \u201c{ex['quote']}\u201d")
+        print("\nThe report and its claims are unchanged. Count the field again (or re-run the researcher) "
+              "to use the fuller records.")
+    finally:
+        ctx.close()
     return 0
 
 

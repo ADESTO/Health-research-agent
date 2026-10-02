@@ -23,6 +23,7 @@ from research_agent.runstate import RunContext
 from research_agent.tools.base import INT, STR, STRS, Tool, obj
 from research_agent.tools.claims import PREDICATE_DOC, TEST_TOOL, propose_claim, verify_claims
 from research_agent.tools.extraction import ANALYSIS_TOOLS, _rows, protocol_of
+from research_agent.tools.fieldpass import FIELDPASS_TOOL
 from research_agent.tools.recheck import RECHECK_TOOL, _passages
 from research_agent.tools.burden import BURDEN_TOOL
 from research_agent.tools.citations import CITATION_INFO_TOOL, CITATION_TOOLS
@@ -311,7 +312,8 @@ FOLLOWUP = FollowupAgent(
     name="followup",
     role="Answers a researcher's follow-up questions about a finished run.",
     system=FOLLOWUP_SYSTEM,
-    tools=[OVERVIEW_TOOL, ITEM_TOOL, READ_TOOL, READ_IN_FULL_TOOL, TEST_TOOL, ADD_CLAIM_TOOL, RECHECK_TOOL]
+    tools=[OVERVIEW_TOOL, ITEM_TOOL, READ_TOOL, READ_IN_FULL_TOOL, TEST_TOOL, ADD_CLAIM_TOOL, RECHECK_TOOL,
+           FIELDPASS_TOOL]
     + [t for t in ANALYSIS_TOOLS if t.name in ("value_counts", "cross_tab", "list_extractions")] + RESULT_TOOLS
     + [CITATION_INFO_TOOL, BURDEN_TOOL] + [t for t in CITATION_TOOLS if t.name == "citation_graph"],
     finish_schema=obj({"answer": {**STR, "description": "The answer in Markdown, with citations"}}, ["answer"]),

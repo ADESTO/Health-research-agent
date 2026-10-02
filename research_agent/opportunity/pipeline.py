@@ -105,7 +105,14 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
 
         from research_agent.tools.burden import burden_markdown
 
-        extra = results_markdown(ctx) + citation_markdown(ctx) + burden_markdown(ctx) + prisma_markdown(ctx)
+        from research_agent.tools import opportunities
+
+        try:
+            opportunities.record(ctx)
+            opp = opportunities.markdown(ctx)
+        except Exception:
+            opp = []
+        extra = opp + results_markdown(ctx) + citation_markdown(ctx) + burden_markdown(ctx) + prisma_markdown(ctx)
         if extra:
             md += "\n" + "\n".join(extra)
         cited = []

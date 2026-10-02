@@ -13,7 +13,7 @@ from research_agent.llm.base import LLMClient, LLMResponse, ToolCall, Usage  # n
 
 # High-volume, well-specified steps: a cheap, fast model does them well.
 CHEAP_STEPS = {"extraction", "protocol_fields", "recheck", "followup_reading", "number_check", "discovery",
-               "literature", "evidence"}
+               "literature", "evidence", "fieldpass"}
 # Judgement and writing: worth a stronger model.
 STRONG_STEPS = {"synthesis", "orchestrator", "gap_reasoning", "design", "followup", "contradictions",
                 "draft_plan", "draft", "research", "critic", "research_supervisor"}

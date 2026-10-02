@@ -7,6 +7,7 @@ from research_agent.config import settings
 from research_agent.tools.results import RESULT_TOOLS
 from research_agent.tools.burden import BURDEN_TOOL
 from research_agent.tools.citations import CITATION_TOOLS
+from research_agent.tools.fieldpass import FIELDPASS_TOOL
 from research_agent.tools.recheck import RECHECK_TOOL
 from research_agent.tools.base import STR, STRS, obj
 from research_agent.tools.claims import TEST_TOOL, EVIDENCE_TOOLS, PREDICATE_DOC, PROPOSE_TOOL
@@ -107,6 +108,12 @@ The general extraction form under-records some things (attention and transformer
 vector data, newer data sources). Before you describe any method family or data type as rare or absent, run
 recheck_field on it with its synonyms: papers that mention it get a quoted yes/no check, and confirmed uses
 are added to the counts.
+Every verified claim carries a STATE measured by code, which you must respect when you write about it:
+supported · partially_supported · contradicted · uncertain · not_reported · not_searched_enough.
+`not_reported` means no analysed paper reports it, which is NOT the same as absent from the field; write it
+as "no paper analysed reports X", never as "X does not occur". `not_searched_enough` means the measurement
+cannot carry the claim at all, so do not build on it. Each state comes with the reasons behind it; use them.
+
 How to write claims: first call test_claim on each candidate predicate (you can test several in one turn),
 read the measured numbers, then write the claim text FROM those numbers and call propose_claim. Never write
 a number into a claim before you have measured it. Examples:
@@ -173,6 +180,12 @@ that are rarely measured.
   data has been loaded; otherwise it shows where studies come from).
 - Run contradictions: a driver whose effect papers report in opposite directions is a gap in understanding.
   Report it with the attributes that separate the two sides as candidate explanations, not conclusions.
+- When a question-specific field reads "not stated" for most papers, that is usually how the papers were read
+  rather than what they did. Run fill_field_from_full_text on that field FIRST: it reads those papers in full
+  for that field alone and records what they say with a checked quote. Only then count it.
+- If a field's categories merge two things the question has to tell apart (a category joining them with
+  "or"), no amount of re-reading fixes it. Give fill_field_from_full_text the finer categories as `values`
+  and it defines that field and codes every paper into it from full text, leaving the old field alone.
 - Before calling a method or data type rare or absent, run recheck_field on it with its synonyms: the general
   extraction form under-records some things, and a re-check turns "mentioned but not recorded" into a count.
 How to write claims: first call test_claim on each candidate predicate (you can test several in one turn),
@@ -183,7 +196,8 @@ a number into a claim before you have measured it. Examples:
 - bad: text "Most papers use deep learning" written first, then the test returns 6 of 46.
 - good: test_claim says x5.32; text "In PMC, ML malaria papers rose about 5-fold (x5.3) between 2015-2017
   and 2023-2025". bad: "roughly 9-fold", written before measuring.""",
-    tools=ANALYSIS_TOOLS + [RECHECK_TOOL, BURDEN_TOOL] + [t for t in RESULT_TOOLS if t.name == "contradictions"]
+    tools=ANALYSIS_TOOLS + [RECHECK_TOOL, FIELDPASS_TOOL, BURDEN_TOOL]
+          + [t for t in RESULT_TOOLS if t.name == "contradictions"]
           + [t for t in SEARCH_TOOLS if t.name == "corpus_count"]
           + [t for t in TREND_TOOLS if t.name == "topic_trend"] + [TEST_TOOL, PROPOSE_TOOL],
     finish_schema=obj({

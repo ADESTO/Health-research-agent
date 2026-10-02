@@ -19,6 +19,7 @@ import re
 
 from research_agent.config import settings
 from research_agent.tools.base import INT, NUM, STR, STRS, Tool, obj
+from research_agent.tools import epistemics
 from research_agent.tools.extraction import ENUM_FIELDS, LIST_FIELDS, SPECIAL_FIELDS, _rows, _values, known_fields
 from research_agent.tools.trends import topic_series, window_ratio
 
@@ -607,12 +608,17 @@ def verify_claims(ctx, claim_ids: list[int] | None = None) -> dict:
             continue
         res = evaluate(ctx, c)
         status = "supported" if res["supported"] else "unsupported"
-        ctx.pg.execute("UPDATE claims SET status=%s, result=%s::jsonb WHERE id=%s",
-                       (status, json.dumps(res, default=str), c["id"]))
+        st = epistemics.state_of(ctx, c["claim_type"], res)
+        ctx.pg.execute("UPDATE claims SET status=%s, result=%s::jsonb, state=%s, state_facts=%s::jsonb "
+                       "WHERE id=%s",
+                       (status, json.dumps(res, default=str), st["state"],
+                        json.dumps({**st["facts"], "reasons": st["reasons"]}, default=str), c["id"]))
         brief = {k: res[k] for k in ("n_matching", "denominator", "share", "matched_values", "caveat")
                  if k in res} if c["claim_type"] == "prevalence" else \
                 {"window": res["window"], "total_matching_papers": res["total_matching_papers"]}
-        out.append({"claim_id": c["id"], "agent": c["agent"], "text": c["text"], "status": status, **brief})
+        out.append({"claim_id": c["id"], "agent": c["agent"], "text": c["text"], "status": status,
+                    "state": st["state"], "state_means": epistemics.PLAIN[st["state"]],
+                    "why_that_state": st["reasons"], **brief})
     return {"verified": len(out), "claims": out}
 
 

@@ -265,16 +265,18 @@ def build_graph(ctx) -> dict:
     enum_fields = {"validation_level", "code_or_data_available"} | {
         f["name"] for f in protocol.get("fields", []) if f.get("type") == "enum"}
     all_ids = [r["paper_id"] for r in rows]
-    for c in ctx.pg.execute("SELECT id, text, claim_type, predicate, status, result FROM claims WHERE run_id=%s "
-                            "ORDER BY id", (ctx.run_id,)).fetchall():
+    for c in ctx.pg.execute("SELECT id, text, claim_type, predicate, status, state, state_facts, result "
+                            "FROM claims WHERE run_id=%s ORDER BY id", (ctx.run_id,)).fetchall():
         res = c["result"] or {}
         p = c["predicate"] or {}
         matched = [x for x in res.get("matched_paper_ids") or [] if f"paper:{x}" in nodes]
         not_counted = ([x for x in all_ids if x not in set(matched)]
                        if c["claim_type"] == "prevalence" and res.get("denominator") is not None and not p.get("where")
                        else None)
+        facts = c["state_facts"] or {}
         cid = node(f"claim:C{c['id']}", type="claim", label=f"C{c['id']}", text=c["text"], status=c["status"],
                    counted=_counted(res), claim_id=f"C{c['id']}", denominator=res.get("denominator"),
+                   state=c["state"], state_why=(facts.get("reasons") or [])[:3],
                    matched=matched, not_counted=not_counted)
         field = p.get("field")
         needles = [_norm(str(x)) for x in p.get("any_of") or []]
@@ -331,10 +333,18 @@ def build_graph(ctx) -> dict:
             out.append({"value": label or sorted(target)[0].replace("_", " "), "papers": [], "is_gap": True})
         return sorted(out, key=lambda g: (not g["is_gap"], -len(g["papers"])))[:8]
 
+    try:                     # what the run recorded about each opportunity: what weakens it, what is open
+        from research_agent.tools.opportunities import listing
+
+        opp = {o["item_id"]: o for o in listing(ctx)}
+    except Exception:
+        opp = {}
     for it in m.get("gaps", []):
+        o = (opp.get(it["id"]) or {}).get("evidence") or {}
         gid = node(f"item:{it['id']}", type="gap", label=f"{it['id']} {it['label']}"[:60], item_id=it["id"],
                    text=it["label"], counted=f"{it.get('n')} of {it.get('N')}" if it.get("N") else None,
                    confidence=it.get("confidence"), field=it.get("field"),
+                   weakened_by=o.get("weakening_claims") or [], unresolved=o.get("unresolved_questions") or [],
                    trail=trail(it.get("field"), it.get("value"), (it.get("label") or "").split(": ")[-1]))
         link(gid, root, "gap")
         c = concept_for(it.get("field"), it.get("value"), it.get("label", ""), it.get("n"))

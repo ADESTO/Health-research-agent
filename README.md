@@ -20,7 +20,17 @@ evidence-checked report.
                  full text)                                                  overreach
       └──────────────┴──────────────┴──────┬───────┴──────────────┴─────────────┴──────────────┘
                                            ▼
-                 SHARED RUN STATE (Postgres): shortlist · extractions · notes · claims · events
+            ┌───────────────────────────────────────────────────────────────┐
+            │  RESEARCH INTELLIGENCE (code, no model calls)                 │
+            │  claim STATE: supported · partially_supported · contradicted  │
+            │               uncertain · not_reported · not_searched_enough  │
+            │  contradictions between papers, and what separates the sides  │
+            │  evidence strength · gap confidence · untried combinations    │
+            │  RESEARCH OPPORTUNITIES: each with what supports it, what     │
+            │  weakens it, what is unresolved, and where it came from       │
+            └──────────────────────────────┬────────────────────────────────┘
+                                           ▼
+     SHARED RUN STATE (Postgres): shortlist · extractions · claims + states · opportunities · notes · events
                                            │
       ┌───────────────┬───────────────┬────┴──────────┬───────────────┬───────────────┐
       ▼               ▼               ▼               ▼               ▼               ▼
@@ -114,11 +124,68 @@ and after and which papers changed. The conversation is saved with the run. In t
 and clicking any id in the report (C12, G2, N1, H4, D1) starts a question about it.
 API: `POST /runs/{id}/followups {"question": ..., "about": "C12"}`, then poll `GET /runs/{id}/followups`.
 
+Filling one field on purpose: `python -m research_agent.cli fieldpass <run_id> q_validation_split`. A
+paper's record is written in one reading that must fill fifteen general fields and the run's
+question-specific ones at once, so a detail stated once in a methods section loses and the field comes back
+"not stated". Counting it then measures the reading rather than the literature: a malaria run found 33 of 45
+studies with no validation design recorded, read four of them in full, and every one described a held-out
+design in its text. This pass takes the papers that left one field blank, shows each full text, and asks
+about that field alone, recording a value only with a passage checked against the text. A paper that
+genuinely does not say stays blank, only that one field is written, and the report and its claims are left
+as they are. The Gap and Follow-up agents can call it themselves (`fill_field_from_full_text`) and the Gap
+agent is told to run it before counting a field that is mostly "not stated". The researcher cannot: the
+choice of which papers to re-read is the user's, so it cannot pick the ones that suit its pattern.
+
+The other way a field fails is worse, because it looks full. A category that merges two things the question
+has to tell apart cannot be un-merged by reading harder: a run asking how often forecasts are benchmarked
+against a *seasonality-aware* baseline found its field offered only `naive_or_seasonal_naive_baseline`, which
+counts plain persistence and seasonal naive as one thing, and the question died there. A pass can define the
+finer field and code every paper into it from full text, leaving the old field untouched beside it so nothing
+already counted moves:
+
+```bash
+python -m research_agent.cli fieldpass <run_id> baseline_reference \
+  --values "no_reference,other_models_only,naive_persistence,seasonal_naive_or_historical_expectance" \
+  --definition "The reference forecast this study compares its accuracy against."
+```
+
+The protocol agent is now told that a category may join two names with "or" only when they are the same
+practice under different names, and that the distinctions the question makes in its own words are the
+distinctions its categories must make.
+
 Re-reading a finished run: `python -m research_agent.cli reread <run_id> [--limit N] [--force]`. A field is
 often empty only because the paper was read from its abstract, which carries no sentence to quote for it;
 this reads the run's papers in full again and re-codes both the general and the question-specific fields,
 then prints which fields moved. `--force` reads again even papers already read in full, for after the
 reading instructions change. The report and its claims are left as they are.
+
+### What is known, what is only unreported, and what is worth doing
+
+Two things are computed for every run, with no model calls, so a report, an export and the map all say the
+same thing and a reader can check why.
+
+**Every verified claim carries a state**, not only a pass or fail against the bound its agent asserted:
+
+| state | what it means |
+|---|---|
+| `supported` | measured, the bound holds, on an evidence base big enough to mean something |
+| `partially_supported` | the bound holds, but on a thin base, a small subgroup or mostly abstracts |
+| `contradicted` | measured on a base worth believing, and the bound fails |
+| `uncertain` | fewer papers than `MIN_EVIDENCE_BASE` (10): decides nothing either way |
+| `not_reported` | nothing in the corpus reports it, which is an observation about the corpus, not an absence in the field |
+| `not_searched_enough` | papers mention it in their text without it reaching the extracted field, or the zero rests on abstracts |
+
+The last two matter most. "0 of 32 papers report allele X" passes a rarity bound and reads in a report as
+"the allele is absent from the region", when all it says is that no paper in this shortlist recorded it. The
+state travels with the numbers behind it (papers, read in full, abstract only), the Gap and Methods agents
+are told to respect it, and the report prints the table.
+
+**Gaps, untried combinations, candidate designs and the researcher's confirmed findings become rows** in
+`research_opportunities` rather than paragraphs inside one run's notes. Each carries the claims that support
+it, the claims that weaken it (anything `contradicted`, `uncertain` or `not_searched_enough`), its papers and
+nearest prior studies, what is still unresolved, what a study would need, and which agent and step computed
+it. `GET /runs/{id}/opportunities`, `POST /runs/{id}/opportunities/{item_id} {"state": "dismissed"}`, and
+`export <run_id> opportunities` for the CSV.
 
 ### What papers found, and how the literature fits together
 
@@ -343,7 +410,9 @@ research_agent/
   research/      open-ended researcher: patterns (statistics), gauntlet (the checks a
                  finding must survive), researcher (agenda, tools, drift controls)
   tools/         search+shortlist, extraction+analysis, reading, re-checks, trends,
-                 claims/evidence, reported results, citations, graph and mind map, burden, review record
+                 claims/evidence, reported results, citations, graph and mind map, burden, review record,
+                 epistemics (what each claim's number is worth), opportunities (what is worth doing),
+                 fieldpass (one field, read for on purpose, in the papers that left it blank)
   ingestion/     health filter, DuckDB→pgvector loader, PMC topic slices, full-text fetch + cleaning
   llm/           provider seam: anthropic | groq | deepseek (same internal message format)
   db/            schema.sql: papers, extractions, runs, claims, drafts, researchers, jobs…

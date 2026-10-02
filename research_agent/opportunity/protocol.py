@@ -79,6 +79,13 @@ Rules:
   category naming two things is only right when it means BOTH ARE PRESENT and each one is also a category of
   its own (e.g. hospital, community, hospital_and_community).
 - Order the categories from least to most, so a study that did more always has somewhere higher to sit.
+- A category may join two names with "or" ONLY when they are the SAME practice under different names
+  ("temporal_holdout_or_rolling_origin"). If the QUESTION could ever need one side counted on its own, they
+  are two categories, not one: a question about seasonality-aware baselines cannot be answered by a category
+  called "naive_or_seasonal_naive_baseline", because a plain persistence baseline and a seasonal one have
+  been merged and neither can be counted again.
+- Read the question back and check each field can answer it as asked. The distinctions the question makes in
+  its own words are the distinctions its categories must make.
 - Every definition must let a reader decide the value from the paper text alone.
 - Mark as `desirable` the values the question treats as good practice or opportunity: their rarity is
   what the map reports as a gap.

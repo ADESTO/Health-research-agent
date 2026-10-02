@@ -30,6 +30,7 @@ FORMATS = {
     "xlsx": ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "run_data.xlsx"),
     "protocol": ("text/markdown", "protocol_and_prisma.md"), "screening": ("text/csv", "screening_log.csv"),
     "burden": ("text/csv", "research_vs_burden.csv"), "burden_chart": ("image/png", "research_vs_burden.png"),
+    "opportunities": ("text/csv", "research_opportunities.csv"),
 }
 
 
@@ -334,14 +335,39 @@ def _export_csv(ctx):
 
 
 def _claim_rows(ctx):
+    from research_agent.tools.epistemics import PLAIN
+
     rows = []
-    for c in ctx.pg.execute("SELECT id, agent, text, claim_type, status, result FROM claims WHERE run_id=%s ORDER BY id",
-                            (ctx.run_id,)).fetchall():
+    for c in ctx.pg.execute("SELECT id, agent, text, claim_type, status, state, state_facts, result "
+                            "FROM claims WHERE run_id=%s ORDER BY id", (ctx.run_id,)).fetchall():
         r = c["result"] or {}
+        f = c["state_facts"] or {}
         counted = (f"{r.get('n_matching')} of {r.get('denominator')}" if r.get("denominator") is not None
                    else json.dumps(r.get("window")) if r.get("window") else "")
-        rows.append([f"C{c['id']}", c["agent"], c["text"], c["claim_type"], c["status"], counted])
-    return ["claim", "made_by", "statement", "type", "verdict", "counted"], rows
+        rows.append([f"C{c['id']}", c["agent"], c["text"], c["claim_type"], c["status"], counted,
+                     c["state"] or "", PLAIN.get(c["state"] or "", ""), "; ".join(f.get("reasons") or []),
+                     f.get("read_in_full", ""), f.get("abstract_only", "")])
+    return (["claim", "made_by", "statement", "type", "verdict", "counted", "state", "state_means",
+             "why_that_state", "papers_read_in_full", "papers_abstract_only"], rows)
+
+
+def _opportunity_rows(ctx):
+    from research_agent.tools.opportunities import listing
+
+    header = ["id", "kind", "what", "research_question", "state", "grade", "supporting_claims",
+              "weakening_claims", "supporting_papers", "prior_studies", "unresolved_questions",
+              "alternative_explanations", "candidate_methods", "required_data", "validation", "from"]
+    rows = []
+    for o in listing(ctx):
+        e, c = o["evidence"] or {}, o["confidence"] or {}
+        j = lambda k: "; ".join(str(x) for x in (e.get(k) or []))        # noqa: E731
+        rows.append([o["item_id"], o["kind"], o["label"], o["question"] or "", o["state"],
+                     (c.get("grade") or c.get("level") or "") if isinstance(c, dict) else str(c),
+                     j("supporting_claims"), j("weakening_claims"), j("supporting_papers"), j("prior_studies"),
+                     j("unresolved_questions"), j("alternative_explanations"), j("candidate_methods"),
+                     j("required_data"), j("validation_requirements"),
+                     (o["provenance"] or {}).get("agent", "")])
+    return header, rows
 
 
 def _screening_rows(ctx):
@@ -363,6 +389,10 @@ def _burden_rows(ctx):
 
 def _export_screening(ctx):
     return _csv(*_screening_rows(ctx))
+
+
+def _export_opportunities(ctx):
+    return _csv(*_opportunity_rows(ctx))
 
 
 def _export_burden(ctx):
@@ -397,7 +427,8 @@ def _export_xlsx(ctx):
     from research_agent.tools import claims as C
 
     wb = Workbook()
-    sheets = [("Papers", *_paper_rows(ctx)), ("Claims", *_claim_rows(ctx)), ("Screening", *_screening_rows(ctx)),
+    sheets = [("Papers", *_paper_rows(ctx)), ("Claims", *_claim_rows(ctx)),
+              ("Opportunities", *_opportunity_rows(ctx)), ("Screening", *_screening_rows(ctx)),
               ("Research vs burden", *_burden_rows(ctx))]
     res_rows, assoc_rows = [], []
     for r in C._rows(ctx):

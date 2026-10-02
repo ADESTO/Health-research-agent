@@ -205,10 +205,17 @@ def run_facts(ctx) -> dict:
            WHERE rp.run_id=%s GROUP BY p.source""", (ctx.run_id,)).fetchall()}
     corpus_mix = {r["source"]: r["n"] for r in ctx.pg.execute(
         "SELECT source, count(*) n FROM papers GROUP BY source").fetchall()}
+    try:
+        from research_agent.tools import epistemics
+
+        states = epistemics.summary(ctx)
+    except Exception:
+        states = {}
     return {"shortlist": cov["shortlist_size"], "extracted": cov["extracted"],
             "fulltext": cov["by_source"].get("fulltext", 0), "abstract_only": cov["by_source"].get("abstract", 0),
             "years": (years["lo"], years["hi"]), "corpus": corpus["n"], "corpus_years": (corpus["lo"], corpus["hi"]),
-            "shortlist_by_corpus": shortlist_mix, "corpus_by_source": corpus_mix}
+            "shortlist_by_corpus": shortlist_mix, "corpus_by_source": corpus_mix,
+            "claims_by_state": states}
 
 
 def audit_numbers(body: str, allowed: set[tuple[int, int]]) -> tuple[str, int]:
@@ -300,6 +307,13 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
         computed = results_markdown(ctx)
     except Exception:
         computed = []
+    try:
+        from research_agent.tools import epistemics, opportunities
+
+        opportunities.record(ctx)
+        computed = epistemics.markdown(ctx) + opportunities.markdown(ctx) + computed
+    except Exception:
+        pass
     try:
         from research_agent.tools.citations import citation_markdown
 

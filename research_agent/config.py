@@ -104,6 +104,8 @@ class Settings:
     # v3 adds reported results and associations (what papers found); v2 records are read again when needed
     # v4 widens the form beyond AI papers (study designs, populations, organisms, interventions, mechanisms,
     #    targets, outcomes); runs read under v3 keep their records and their form
+    # a count over fewer papers than this decides nothing either way: the claim's state is "uncertain"
+    min_evidence_base: int = int(os.getenv("MIN_EVIDENCE_BASE", "10"))
     extraction_schema_version: str = "health-v4"
     extra: dict = field(default_factory=dict)
 
