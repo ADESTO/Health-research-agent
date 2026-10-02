@@ -15,8 +15,13 @@ from research_agent.ingestion.fulltext import fetch_fulltext, select_for_reading
 from research_agent.tools.base import INT, STR, STRS, Tool, obj
 from research_agent.tools.results import STRUCT_FIELDS, STRUCT_SCHEMA
 
+# health-v4 widened the form beyond AI and modelling papers: clinical, laboratory, pharmacological and
+# epidemiological studies are described by what was studied, in whom, with what, how it works and what was
+# measured. Runs read under an earlier version keep the earlier form (see fields_for).
+GENERAL_FIELDS = ["study_designs", "populations", "organisms", "interventions", "mechanisms", "targets",
+                  "outcomes"]
 LIST_FIELDS = ["task_types", "health_domains", "data_modalities", "datasets", "geography",
-               "methods", "evaluation_metrics", "limitations"]
+               "methods", "evaluation_metrics", "limitations"] + GENERAL_FIELDS
 ENUM_FIELDS = {
     "validation_level": ["none", "internal", "external", "prospective", "clinical_trial", "not_stated"],
     "code_or_data_available": ["yes", "no", "not_stated"],
@@ -24,8 +29,20 @@ ENUM_FIELDS = {
 TEXT_FIELDS = ["problem", "sample_size", "key_findings"]
 # Fields the report leans on. Each needs a quote from the text, checked by code; values without one are dropped.
 EVIDENCE_FIELDS = ["methods", "datasets", "data_modalities", "geography", "validation_level",
-                   "code_or_data_available"]
+                   "code_or_data_available", "study_designs", "populations", "organisms", "interventions",
+                   "mechanisms", "targets"]
 ALL_FIELDS = LIST_FIELDS + list(ENUM_FIELDS) + TEXT_FIELDS
+LEGACY_VERSIONS = {"health-v1", "health-v2", "health-v3"}
+
+
+def fields_for(version: str | None) -> tuple[list[str], list[str], list[str]]:
+    """(list fields, evidence fields, all fields) of the form a given extraction version was read with."""
+    if version in LEGACY_VERSIONS:
+        drop = set(GENERAL_FIELDS)
+        return ([f for f in LIST_FIELDS if f not in drop], [f for f in EVIDENCE_FIELDS if f not in drop],
+                [f for f in ALL_FIELDS if f not in drop])
+    return list(LIST_FIELDS), list(EVIDENCE_FIELDS), list(ALL_FIELDS)
+
 
 _list = {"type": "array", "items": {"type": "string"}}
 
@@ -36,27 +53,61 @@ EXTRACTION_TOOL = {
         "type": "object",
         "properties": {
             "problem": {"type": "string", "description": "The health problem addressed, one sentence."},
-            "task_types": {**_list, "description": "e.g. diagnosis, detection, segmentation, prognosis, "
-                           "risk prediction, forecasting, treatment recommendation, drug discovery, "
-                           "generation, question answering, epidemic modelling, causal inference, review"},
-            "health_domains": {**_list, "description": "Disease areas / specialties, e.g. malaria, breast cancer, "
-                               "cardiology, mental health, maternal health"},
-            "data_modalities": {**_list, "description": "e.g. chest X-ray, CT, MRI, histopathology, "
-                                "dermoscopy, retinal fundus, ultrasound, EHR structured, clinical notes, "
-                                "genomics, ECG, EEG, wearable sensors, surveillance counts, survey, "
-                                "climate/environmental, mobility, social media"},
-            "datasets": {**_list, "description": "Named datasets exactly as written (e.g. MIMIC-IV, CheXpert, "
-                         "TCGA, UK Biobank). Only names, no descriptions."},
-            "geography": {**_list, "description": "Countries/regions where the DATA comes from "
+            "task_types": {**_list, "description": "What the study sets out to do, e.g. diagnosis, prognosis, "
+                           "risk prediction, forecasting, treatment efficacy, safety, mechanism of action, "
+                           "pharmacokinetics, drug interaction, drug discovery, resistance surveillance, "
+                           "prevalence estimation, risk factor analysis, screening, epidemic modelling, "
+                           "causal inference, review"},
+            "health_domains": {**_list, "description": "Disease areas / specialties, e.g. malaria, "
+                               "antimicrobial resistance, depression, anxiety, schizophrenia, diabetes, "
+                               "thyroid disorders, reproductive endocrinology, cardiology, maternal health"},
+            "data_modalities": {**_list, "description": "Kinds of data or material analysed, e.g. EHR "
+                                "structured, clinical notes, chest X-ray, MRI, histopathology, ECG, EEG, "
+                                "genomics, whole-genome sequences, bacterial isolates, blood or serum samples, "
+                                "urine, tissue, cell lines, hormone assays, drug concentrations, questionnaires "
+                                "or rating scales, interviews, wearable sensors, surveillance counts, survey, "
+                                "claims or prescription records, climate/environmental, social media"},
+            "datasets": {**_list, "description": "Named datasets, registries or cohorts exactly as written (e.g. "
+                         "MIMIC-IV, UK Biobank, NHANES, GLASS, TCGA). Only names, no descriptions."},
+            "geography": {**_list, "description": "Countries/regions where the DATA or samples come from "
                           "(e.g. Kenya, sub-Saharan Africa, USA). Not author affiliations."},
-            "methods": {**_list, "description": "Model families / techniques, e.g. CNN, U-Net, vision "
-                        "transformer, LLM, foundation model, gradient boosting, logistic regression, "
-                        "graph neural network, federated learning, SEIR model, Bayesian model"},
-            "evaluation_metrics": {**_list, "description": "e.g. AUROC, accuracy, F1, Dice, RMSE"},
-            "sample_size": {"type": "string", "description": "Patients/images/records as stated, or ''"},
+            "methods": {**_list, "description": "Analytical, laboratory and modelling techniques, e.g. "
+                        "logistic regression, Cox regression, meta-analysis, mixed-effects model, CNN, "
+                        "gradient boosting, LLM, SEIR model, disk diffusion, broth microdilution, PCR, "
+                        "whole-genome sequencing, ELISA, LC-MS/MS, molecular docking, "
+                        "population pharmacokinetic modelling"},
+            "evaluation_metrics": {**_list, "description": "Measures the results are reported in, e.g. AUROC, "
+                                   "accuracy, RMSE, odds ratio, hazard ratio, relative risk, mean difference, "
+                                   "MIC, IC50, EC50, Cmax, AUC (plasma), half-life, prevalence"},
+            "study_designs": {**_list, "description": "Study design(s), e.g. randomised controlled trial, "
+                              "cohort, case-control, cross-sectional, case series, systematic review, "
+                              "meta-analysis, qualitative, in vitro, animal study, in silico, "
+                              "pharmacokinetic study, modelling study, diagnostic accuracy study"},
+            "populations": {**_list, "description": "Who or what was studied, e.g. adults with major "
+                            "depressive disorder, children under 5, pregnant women, ICU patients, healthy "
+                            "volunteers, postmenopausal women, Wistar rats, HepG2 cells"},
+            "organisms": {**_list, "description": "Pathogens and model organisms named as studied, e.g. "
+                          "Klebsiella pneumoniae, MRSA, Escherichia coli, Plasmodium falciparum, mice. "
+                          "Empty for studies of humans only."},
+            "interventions": {**_list, "description": "Drugs, compounds, therapies, exposures or programmes "
+                              "studied, e.g. ceftriaxone, carbapenems, sertraline, cognitive behavioural "
+                              "therapy, levothyroxine, oral contraceptives, antibiotic stewardship"},
+            "mechanisms": {**_list, "description": "Mechanisms of action, pathways or resistance mechanisms "
+                           "the paper studies or reports as its own finding, e.g. serotonin reuptake "
+                           "inhibition, beta-lactamase production, efflux pump, biofilm formation, HPA axis "
+                           "dysregulation, CYP3A4 inhibition, receptor agonism, negative feedback"},
+            "targets": {**_list, "description": "Molecular targets, receptors, enzymes, hormones or genes "
+                        "central to the study, e.g. 5-HT1A receptor, dopamine D2 receptor, CYP2D6, mecA, "
+                        "blaNDM-1, blaCTX-M, oestrogen receptor alpha, TSH, cortisol, insulin"},
+            "outcomes": {**_list, "description": "Outcomes or endpoints measured, e.g. mortality, remission, "
+                         "PHQ-9 score, HbA1c, treatment failure, resistance prevalence, MIC, plasma "
+                         "concentration, adverse events, hospital admission"},
+            "sample_size": {"type": "string", "description": "Participants/samples/isolates/records as stated, or ''"},
             "validation_level": {"type": "string", "enum": ENUM_FIELDS["validation_level"],
-                                 "description": "Strongest validation reported: internal split/CV, "
-                                 "external dataset/site, prospective, clinical trial"},
+                                 "description": "For predictive models and diagnostic tests: the strongest "
+                                 "validation reported (internal split/CV, external dataset/site, prospective, "
+                                 "clinical trial). For a trial of a treatment use clinical_trial. Otherwise "
+                                 "not_stated."},
             "code_or_data_available": {"type": "string", "enum": ENUM_FIELDS["code_or_data_available"]},
             "key_findings": {"type": "string", "description": "Main result in <= 2 sentences, with numbers if given"},
             "limitations": {**_list, "description": "Limitations the AUTHORS state. Do not invent any."},
@@ -85,7 +136,8 @@ def protocol_of(ctx) -> dict | None:
 
 def known_fields(ctx) -> tuple[list[str], dict[str, list[str]]]:
     """Base fields plus this run's protocol fields: (list fields, {enum field: allowed values})."""
-    lists, enums = list(LIST_FIELDS), dict(ENUM_FIELDS)
+    lists = fields_for(getattr(ctx, "extraction_version", None))[0]
+    enums = dict(ENUM_FIELDS)
     for f in (protocol_of(ctx) or {}).get("fields", []):
         if f["type"] == "enum":
             enums[f["name"]] = f["values"]
@@ -174,21 +226,24 @@ def normalise(data: dict) -> dict:
     return out
 
 
-def extract_papers(ctx, paper_ids: list[str] | None = None, depth: str = "abstract") -> dict:
+def extract_papers(ctx, paper_ids: list[str] | None = None, depth: str = "abstract",
+                   limit: int | None = None, force: bool = False) -> dict:
     """Extract (or reuse cached extractions for) shortlisted papers.
 
     depth='abstract' for everything; depth='fulltext' reads selected full-text sections
-    (capped at MAX_FULLTEXT papers per run)."""
+    (capped at MAX_FULLTEXT papers per run, or `limit` when given).
+    force=True reads papers again even when they were already read at this depth: for a re-read after the
+    reading instructions or the run's protocol fields changed."""
     shortlist = ctx.shortlist_ids()
     ids = [p for p in (paper_ids or shortlist) if p in set(shortlist)]
     if depth == "fulltext":
-        ids = ids[: settings.max_fulltext]
+        ids = ids[: max(1, int(limit)) if limit else settings.max_fulltext]
     papers = {r["paper_id"]: r for r in ctx.pg.execute(
         "SELECT paper_id, title, abstract FROM papers WHERE paper_id = ANY(%s)", (ids,)).fetchall()}
     cached = {r["paper_id"]: r for r in ctx.pg.execute(
         "SELECT paper_id, source FROM extractions WHERE schema_version=%s AND paper_id = ANY(%s)",
         (ctx.extraction_version, ids)).fetchall()}
-    todo = [p for p in ids if _needs(cached.get(p), depth)]
+    todo = [p for p in ids if force or _needs(cached.get(p), depth)]
 
     fulltexts: dict[str, str | None] = {}
     ft_status: dict[str, str] = {}
@@ -294,13 +349,14 @@ def _values(data: dict, field: str) -> list[str]:
 def extraction_coverage(ctx) -> dict:
     rows = _rows(ctx)
     n = len(rows)
+    _, ev_fields, all_fields = fields_for(ctx.extraction_version)
     stated = {f: sum(1 for r in rows if _values(r["data"], f) or (f in TEXT_FIELDS and r["data"].get(f)))
-              for f in ALL_FIELDS}
+              for f in all_fields}
     return {"shortlist_size": len(ctx.shortlist_ids()), "extracted": n,
             "by_source": {s: sum(1 for r in rows if r["source"] == s) for s in ("abstract", "fulltext")},
-            "field_stated_rate": {f: round(stated[f] / n, 2) if n else 0 for f in ALL_FIELDS},
+            "field_stated_rate": {f: round(stated[f] / n, 2) if n else 0 for f in all_fields},
             "dropped_without_evidence": {f: sum(1 for r in rows if f in (r["data"].get("_unverified") or {}))
-                                         for f in EVIDENCE_FIELDS}}
+                                         for f in ev_fields}}
 
 
 def value_counts(ctx, field: str, top: int = 30) -> dict:

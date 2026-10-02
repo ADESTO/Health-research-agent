@@ -14,6 +14,7 @@ Tool spec:
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -97,6 +98,9 @@ def with_retries(fn, *, attempts: int = 6, base_delay: float = 2.0, retry_on: tu
                     "Resume this run later with `ask --resume <run_id>` (finished agents are skipped), "
                     "switch GROQ_MODEL to another model (limits are per model), or use --provider anthropic. "
                     f"Provider said: {str(exc)[:300]}") from exc
+            m = re.search(r"Limit (\d+), Requested (\d+)", str(exc))
+            if m and int(m.group(2)) > int(m.group(1)):
+                raise                      # larger than the limit itself: waiting cannot help; the caller may shrink it
             if not transient or i == attempts - 1:
                 raise
             wait = _retry_after(exc) or base_delay * (2**i)

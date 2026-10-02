@@ -94,6 +94,9 @@ Use value_counts, cross_tab and list_extractions over the extracted records to d
 - method families (group synonyms: ResNet/DenseNet/VGG -> CNNs; GPT/LLaMA/BERT-based -> language models)
 - data modalities and named datasets (concentration on a few datasets matters)
 - validation practice (validation_level) and code/data availability
+- for clinical, laboratory and pharmacology literature: study designs (how much is trials or cohorts versus
+  cross-sectional, in vitro or animal work), populations, organisms, interventions, mechanisms, targets and
+  outcomes. Skip the fields that are empty for this literature rather than reporting them as gaps.
 Then propose 3-6 checkable claims about prevalence with propose_claim ({PREDICATE_DOC}).
 Put every synonym in any_of. Prefer claims that matter for the research question.
 Report counts exactly as tools return them.
@@ -158,7 +161,10 @@ GAPS = Agent(
 A gap is an OBSERVATION from the literature, not an opinion: e.g. "few studies use data from East Africa",
 "most models are validated only internally", "almost all work is classification, little is forecasting".
 Look at under-represented geographies, populations, modalities, tasks, validation levels, dataset
-concentration, and limitations authors repeatedly state.
+concentration, and limitations authors repeatedly state. For clinical, laboratory and pharmacology work also
+look at study designs (e.g. mechanisms shown only in vitro or in animals, few trials), groups left out
+(children, pregnant women, older adults), organisms and drug classes that are rarely studied, and outcomes
+that are rarely measured.
 - Ground each gap in counts (value_counts, cross_tab, field_by_year) and check with corpus_count whether it
   holds beyond the shortlist.
 - Back every gap with at least one propose_claim ({PREDICATE_DOC}) — often max_share or max_count.

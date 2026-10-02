@@ -251,7 +251,8 @@ def _card(r: dict) -> dict:
     card = {"id": r["paper_id"], "title": (r["title"] or "")[:160], "year": r["year"],
             "kind": "published article (PMC)" if r.get("corpus") == "pmc" else "preprint (arXiv)",
             "read": "full text" if r["source"] == "fulltext" else "abstract only"}
-    for f in ("methods", "datasets", "data_modalities", "geography", "limitations"):
+    for f in ("study_designs", "populations", "organisms", "interventions", "mechanisms", "targets", "outcomes",
+              "methods", "datasets", "data_modalities", "geography", "limitations"):
         if d.get(f):
             card[f] = d[f][:6]
     if d.get("validation_level") not in (None, "", "not_stated"):
@@ -266,7 +267,8 @@ def _card(r: dict) -> dict:
               "quote": str(x.get("quote") or "")[:180]} for x in (d.get("reported_associations") or [])[:3]]
     if assoc:
         card["associations"] = assoc
-    quotes = [q[:200] for f in ("methods", "data_modalities", "geography", "validation_level", "datasets")
+    quotes = [q[:200] for f in ("interventions", "mechanisms", "methods", "data_modalities", "geography",
+                                "validation_level", "datasets", "organisms")
               for q in (ev.get(f) or [])[:1]][:3]
     if quotes:
         card["quotes_verified"] = quotes

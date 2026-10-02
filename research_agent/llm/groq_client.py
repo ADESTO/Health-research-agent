@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import uuid
 
 from research_agent.llm.base import LLMResponse, ToolCall, Usage, with_retries
@@ -62,6 +63,28 @@ def _recover_rejected_call(exc, tools) -> LLMResponse | None:
     return LLMResponse("", [ToolCall(call_id, name, args)], content, "tool_calls", {})
 
 
+MIN_REPLY_TOKENS = 600         # below this a structured reply is likely to be cut off; better to fail clearly
+_TPM = re.compile(r"tokens per minute \(TPM\): Limit (\d+), Requested (\d+)", re.I)
+
+
+def _fit_to_limit(exc, max_tokens: int) -> int | None:
+    """For a 'request too large' rejection on the per-minute TOKEN limit: a smaller max_tokens that fits.
+    None when it is another error, an output-token cap, or the prompt alone is too big."""
+    text = str(exc)
+    if getattr(exc, "status_code", None) not in (413, 429) and "request too large" not in text.lower():
+        return None
+    if "output tokens per minute" in text.lower():
+        return None
+    m = _TPM.search(text)
+    if not m:
+        return None
+    limit, requested = int(m.group(1)), int(m.group(2))
+    if requested <= limit:
+        return None                    # an ordinary rate limit (the minute was busy): with_retries waits it out
+    smaller = max_tokens - (requested - limit) - 64
+    return smaller if smaller >= MIN_REPLY_TOKENS else None
+
+
 class GroqClient:
     provider = "groq"
 
@@ -84,9 +107,20 @@ class GroqClient:
             kwargs["tool_choice"] = (
                 {"type": "function", "function": {"name": force_tool}} if force_tool else "auto"
             )
-        try:
-            resp = with_retries(lambda: self._client.chat.completions.create(**kwargs))
-        except Exception as exc:
+        resp, exc = None, None
+        for _ in range(3):
+            try:
+                resp = with_retries(lambda: self._client.chat.completions.create(**kwargs))
+                break
+            except Exception as e:  # noqa: BLE001
+                exc = e
+                fit = _fit_to_limit(e, kwargs["max_tokens"])
+                if fit is None:
+                    break
+                # Groq counts prompt + max_tokens against the per-minute limit and says by how much a request is
+                # over: give the reply that much less room and send it again (most replies are far shorter).
+                kwargs["max_tokens"] = fit
+        if resp is None:
             recovered = _recover_rejected_call(exc, tools)
             if recovered is not None:
                 return recovered
@@ -97,11 +131,12 @@ class GroqClient:
                      "Lower AGENT_MAX_TOKENS, EXTRACTION_MAX_TOKENS and REPORT_MAX_TOKENS below that limit, "
                      "or use a model without an output cap (e.g. openai/gpt-oss-20b). ")
                     if output_limit else
-                    ("Groq rejected a request larger than your tokens-per-minute limit (it counts the prompt "
-                     "plus max_tokens). Use the 'Groq free tier' settings from .env.example "
-                     "(AGENT_MAX_TOKENS, TOOL_RESULT_CHARS, CONTEXT_BUDGET_CHARS), or a higher Groq tier. ")
+                    ("Groq rejected a request whose PROMPT alone is close to your tokens-per-minute limit, so even "
+                     "a short reply does not fit. Use the 'Groq free tier' settings from .env.example (they shrink "
+                     "prompts: CONTEXT_BUDGET_CHARS, TOOL_RESULT_CHARS, FULLTEXT_READ_CHARS, ABSTRACT_BATCH), or a "
+                     "higher Groq tier. ")
                     + f"Original error: {exc}") from exc
-            raise
+            raise exc
         choice = resp.choices[0]
         msg = choice.message
 

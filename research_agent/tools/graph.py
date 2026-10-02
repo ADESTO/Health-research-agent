@@ -8,7 +8,10 @@ Graph nodes:  question, category (one per extracted field), concept (a value pap
               (ordinary runs), driver (a factor studies disagree about).
 Graph links:  paper -> concept it uses; claim -> concepts it counted and the papers it counted; gap -> concept it
               is about; design -> gaps it addresses and papers it builds on; driver -> papers reporting a positive
-              or negative association; paper -> paper it cites (when citation data is cached).
+              or negative association; paper -> paper it cites (when citation data is cached); concept -> concept
+              used together in the same papers ("co", weighted by the number of papers); concept -> concept that
+              are both common but never used together in these papers ("untried", with the number expected if
+              they were independent).
 
 Mind map:     a short title over the question, then sections (Methods, Data, Study settings, Forecast or study
               design, Evidence, Research gaps). Concepts carry "n/N papers"; under each concept its papers, and
@@ -29,13 +32,27 @@ from research_agent.tools.claims import _matcher, _norm
 # (field, label, section) for the general extraction fields
 FIELDS = [("methods", "Methods", "methods"), ("data_modalities", "Data types", "data"),
           ("datasets", "Datasets", "data"), ("geography", "Study settings", "settings"),
-          ("validation_level", "Validation", "design"), ("code_or_data_available", "Code or data shared", "design")]
-SECTIONS = [("methods", "Methods"), ("data", "Data"), ("settings", "Study settings"), ("design", "Study design")]
+          ("validation_level", "Validation", "design"), ("code_or_data_available", "Code or data shared", "design"),
+          ("study_designs", "Study designs", "design"), ("populations", "Populations", "population"),
+          ("organisms", "Organisms", "population"), ("interventions", "Drugs and interventions", "interventions"),
+          ("outcomes", "Outcomes", "interventions"), ("mechanisms", "Mechanisms", "biology"),
+          ("targets", "Molecular targets", "biology")]
+SECTIONS = [("methods", "Methods"), ("data", "Data"), ("settings", "Study settings"),
+            ("population", "Who or what was studied"), ("interventions", "Interventions and outcomes"),
+            ("biology", "Mechanisms and targets"), ("design", "Study design")]
 TOP_PER_FIELD = 12
+CO_LINKS = 40                # most frequent pairs of concepts used together, across different fields
+# field pairs where a common pair that nobody combined is worth seeing
+UNTRIED_PAIRS = [("methods", "data_modalities"), ("interventions", "organisms"), ("interventions", "populations"),
+                 ("study_designs", "interventions"), ("methods", "geography")]
+UNTRIED_MAX = 8
 PAPERS_PER_BRANCH = 15       # mind map: papers listed under one concept before "+N more"
-ATTRS_PER_PAPER = 4          # mind map: attributes shown under a paper
+ATTRS_PER_PAPER = 6          # mind map: other branches listed under a paper
 _SKIP = {"", "not_stated", "none_stated", "n/a"}
-_SECTION_WORDS = [("data", r"data|satellite|source|covariate|climate|remote|sensing|input|variable|feature"),
+_SECTION_WORDS = [("interventions", r"drug|dose|regimen|compound|intervention|therap|antibiotic|treatment|route"),
+                  ("biology", r"mechanism|pathway|target|receptor|gene|enzyme|hormone"),
+                  ("population", r"organism|pathogen|species|isolate|strain|patient|participant|cohort|population"),
+                  ("data", r"data|satellite|source|covariate|climate|remote|sensing|input|variable|feature"),
                   ("settings", r"country|region|setting|district|site|location|place|population"),
                   ("methods", r"model|method|architecture|algorithm|learner|approach")]
 
@@ -76,6 +93,44 @@ def _section_of(field: str) -> str:
 def _values(d: dict, field: str) -> list[str]:
     v = d.get(field)
     return [x for x in (v if isinstance(v, list) else [v]) if x is not None and _key(x) not in _SKIP]
+
+
+# what tells one paper from another at a glance, in order of preference
+_TAG_FIELDS = [("geography",), ("interventions", "methods", "organisms", "study_designs"),
+               ("data_modalities", "populations", "outcomes")]
+
+
+def paper_tags(rows: list[dict]) -> dict[str, str]:
+    """A short label per paper that tells it apart from the others: "Uganda · 2021 · LSTM · full text".
+    Titles in one literature often differ only at the end, so they are no use cut short."""
+    def part(d: dict, group: tuple, skip: set) -> str | None:
+        for f in group:
+            for v in _values(d, f):
+                v = str(v).replace("_", " ")
+                if v.lower() not in skip:
+                    return v if len(v) <= 28 else v[:27] + "…"
+        return None
+
+    tags, extra = {}, {}
+    for r in rows:
+        d = r["data"]
+        place = part(d, _TAG_FIELDS[0], set())
+        what = part(d, _TAG_FIELDS[1], set())
+        bits = [b for b in (place, str(r.get("year") or ""), what) if b]
+        if r.get("source") == "fulltext":
+            bits.append("full text")
+        tags[r["paper_id"]] = " · ".join(bits) if len(bits) >= 2 else _short(r.get("title") or r["paper_id"], 40)
+        extra[r["paper_id"]] = part(d, _TAG_FIELDS[2], {(what or "").lower()}) or part(
+            d, ("methods", "interventions"), {(what or "").lower()})
+    seen = Counter(tags.values())
+    for pid, t in list(tags.items()):           # still the same as another paper: add one more detail, then the id
+        if seen[t] > 1 and extra.get(pid):
+            tags[pid] = f"{t} · {extra[pid]}"
+    seen = Counter(tags.values())
+    for pid, t in list(tags.items()):
+        if seen[t] > 1:
+            tags[pid] = f"{t} · {pid}"
+    return tags
 
 
 def short_title(ctx, rows: list[dict]) -> str:
@@ -136,6 +191,8 @@ def build_graph(ctx) -> dict:
         concept_of[field] = {}
         for k, c in kept:
             shown = spelling[k].most_common(1)[0][0].replace("_", " ")
+            if shown.lower() in ("yes", "no", "true", "false", "none", "other", "partial", "unclear"):
+                shown = f"{label}: {shown}"            # "yes" alone says nothing on a graph
             cid = node(f"concept:{field}:{k}", type="concept", label=shown, field=field, category=label,
                        section=section, papers=c, share=round(c / max(1, n_papers), 3))
             concept_of[field][k] = cid
@@ -143,12 +200,13 @@ def build_graph(ctx) -> dict:
 
     # ---- papers, with the attributes the compare table and the mind map show
     paper_value: dict[str, dict[str, list[str]]] = {}
+    tags = paper_tags(rows)
     for r in rows:
         d, pid = r["data"], r["paper_id"]
         ev = d.get("evidence") or {}
         attrs = {label: [str(x).replace("_", " ") for x in _values(d, f)][:5] for f, label, _ in fields}
         paper_value[pid] = {f: [_key(x) for x in _values(d, f)] for f, _, _ in fields}
-        node(f"paper:{pid}", type="paper", label=_short(r["title"]), title=r["title"], paper_id=pid,
+        node(f"paper:{pid}", type="paper", label=tags[pid], short=_short(r["title"]), title=r["title"], paper_id=pid,
              year=r["year"], corpus=r.get("corpus"), read=r["source"], url=_url(pid, r.get("corpus")),
              findings=str(d.get("key_findings") or "")[:300],
              results=[f"{x['metric']} {x['value']} ({x['model']})" for x in (d.get("reported_results") or [])[:4]],
@@ -159,6 +217,49 @@ def build_graph(ctx) -> dict:
                 cid = concept_of.get(field, {}).get(k)
                 if cid:
                     link(f"paper:{pid}", cid, "uses")
+
+    # ---- concepts used together, and common pairs nobody combined
+    used: dict[str, set[str]] = defaultdict(set)          # concept -> papers
+    for l in links:
+        if l["type"] == "uses":
+            used[l["target"]].add(l["source"])
+    pair_n: Counter = Counter()
+    for pid in paper_value:
+        mine = sorted(c for c in (concept_of.get(f, {}).get(k) for f, vals in paper_value[pid].items() for k in vals)
+                      if c)
+        mine = list(dict.fromkeys(mine))
+        for i, a in enumerate(mine):
+            for b in mine[i + 1:]:
+                if nodes[a]["field"] != nodes[b]["field"]:
+                    pair_n[(a, b)] += 1
+    # Pairs are ranked by how much more often they go together than chance would give (lift), so a concept
+    # nearly every paper has does not link to everything.
+    common = {c for c, ps in used.items() if len(ps) > 0.75 * n_papers}
+    scored = []
+    for (a, b), n in pair_n.items():
+        if n < 2 or a in common or b in common:
+            continue
+        lift = n * n_papers / max(1, len(used[a]) * len(used[b]))
+        if lift > 1.1:
+            scored.append((n * (lift - 1), n, round(lift, 2), a, b))
+    for _, n, lift, a, b in sorted(scored, reverse=True)[:CO_LINKS]:
+        links.append({"source": a, "target": b, "type": "co", "n": n, "lift": lift})
+        seen_links.add((a, b, "co"))
+    untried = []
+    floor = max(3, round(0.1 * n_papers))
+    for fa, fb in UNTRIED_PAIRS:
+        tops = {f: sorted((c for c in concept_of.get(f, {}).values() if len(used[c]) >= floor),
+                          key=lambda c: -len(used[c]))[:5] for f in (fa, fb)}
+        for a in tops[fa]:
+            for b in tops[fb]:
+                if used[a] & used[b]:
+                    continue
+                expected = len(used[a]) * len(used[b]) / max(1, n_papers)
+                if expected >= 1.5:
+                    untried.append((expected, a, b))
+    for expected, a, b in sorted(untried, reverse=True)[:UNTRIED_MAX]:
+        links.append({"source": a, "target": b, "type": "untried", "n": 0, "expected": round(expected, 1)})
+        seen_links.add((a, b, "untried"))
 
     # ---- claims: linked to what they counted
     enum_fields = {"validation_level", "code_or_data_available"} | {
@@ -309,6 +410,8 @@ def build_graph(ctx) -> dict:
 
     degree = Counter()
     for l in links:
+        if l["type"] in ("co", "untried"):
+            continue
         degree[l["source"]] += 1
         degree[l["target"]] += 1
     for nid, n in nodes.items():
@@ -338,13 +441,18 @@ def _tree(nodes: dict, links: list[dict], n_papers: int, design_name: str) -> di
 
     def paper(pid: str, skip: str | None = None) -> dict:
         """A paper, opening into its other key attributes (setting, data, design...)."""
-        order = {"settings": 0, "design": 1, "data": 2, "methods": 3}
-        attrs = sorted((c for c in concepts_of[pid] if c != skip and c in nodes),
-                       key=lambda c: order.get(nodes[c].get("section"), 9))[:ATTRS_PER_PAPER]
+        order = {"settings": 0, "population": 1, "interventions": 2, "design": 3, "biology": 4, "data": 5,
+                 "methods": 6}
+        others = sorted((c for c in dict.fromkeys(concepts_of[pid]) if c != skip and c in nodes),
+                        key=lambda c: (order.get(nodes[c].get("section"), 9), -nodes[c].get("papers", 0)))
         n = nodes[pid]
-        return {"ref": pid, "label": n["label"], "type": "paper", "count": str(n.get("year") or ""),
+        # where else this paper sits in the map: each opens the branch it belongs to
+        return {"ref": pid, "label": n["label"], "type": "paper", "title": n.get("title"),
+                "count": f"also in {len(others)}" if others else "",
                 "children": [{"ref": c, "label": nodes[c]["label"], "type": "attr",
-                              "count": nodes[c]["category"].lower()} for c in attrs]}
+                              "count": nodes[c]["category"].lower()} for c in others[:ATTRS_PER_PAPER]]
+                + ([{"label": f"+{len(others) - ATTRS_PER_PAPER} more (see the graph)", "type": "more"}]
+                   if len(others) > ATTRS_PER_PAPER else [])}
 
     def papers(ids: list[str], skip: str | None = None) -> list[dict]:
         ids = sorted(set(i for i in ids if i in nodes), key=lambda p: -(nodes[p].get("year") or 0))

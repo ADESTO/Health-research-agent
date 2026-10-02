@@ -24,16 +24,26 @@ Rules:
 - Record only what the text states. If something is not stated, use an empty list, '' or 'not_stated'.
   Never guess: an empty value is correct and useful.
 - Keep list items short (1-5 words), canonical names (e.g. 'vision transformer', not 'our ViT-based model').
-- geography = where the data was collected, not where authors work.
+- geography = where the data or samples were collected, not where authors work.
+- The form covers every kind of health research: modelling and AI papers, trials, cohorts, laboratory and
+  animal studies, pharmacology and reviews. Fill the fields that apply to THIS paper and leave the rest
+  empty; an AI field left empty on a drug trial, or organisms left empty on a survey, is correct.
+- interventions = what was given or studied as an exposure (drug, compound, therapy, programme);
+  mechanisms = how something works or resists (mechanism of action, pathway, resistance mechanism), only as
+  the paper reports or studies it, not textbook background; targets = named receptors, enzymes, hormones
+  or genes central to the study.
 - evidence: for each field listed under evidence that has a value, copy 1-2 short passages (up to 25 words)
   WORD FOR WORD from this paper's text. Code checks every passage against the text; a value whose passages
   are not found is discarded. Do not paraphrase.
-- reported_results: every performance number the paper reports for its models (RMSE, MAE, AUC, accuracy,
-  R2...), one entry per number, with the model it belongs to and whether that model is a baseline. The quote
-  must contain the number exactly as written. Look in results sections and tables.
-- reported_associations: effects the paper itself reports between a driver (rainfall, temperature, bed nets,
-  NDVI, wealth...) and malaria, with direction and lag. Background statements about other studies do not
-  count.{protocol_rules}
+- reported_results: the paper's own main numbers, one entry per number: model performance (RMSE, AUC,
+  accuracy...), effect estimates (odds ratio, hazard ratio, relative risk, mean difference), laboratory and
+  pharmacological measurements (MIC, IC50, EC50, Cmax, plasma AUC, half-life) and prevalences. `model` is
+  the model, drug, arm or group the number belongs to; is_baseline marks a comparator (baseline model,
+  placebo, control arm). The quote must contain the number exactly as written. Look in results sections
+  and tables.
+- reported_associations: effects the paper itself reports between a driver (a risk factor, exposure,
+  drug, dose or intervention) and a health outcome, with direction and lag if stated. Background statements
+  about other studies do not count.{protocol_rules}
 - {source_note}"""
 
 PROTOCOL_RULES = """

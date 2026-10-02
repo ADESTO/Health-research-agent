@@ -18,7 +18,7 @@
   --ok: #1d7a4c; --ok-soft: #e3f4ea; --bad: #b3261e; --bad-soft: #fbe9e7; --warn: #8f6200; --warn-soft: #fbf1d9;
   --g-q: #3b37a0; --g-cat: #1c1a2e; --g-concept: #6a63d8; --g-paper: #aaa6c4; --g-claim: #1d7a4c; --g-bad: #b3261e;
   --g-gap: #c2185b; --g-design: #137f7f; --g-driver: #b7791f; --g-link: #cfcce2;
-  --s-methods: #3b37a0; --s-data: #137f7f; --s-settings: #7b4fa8; --s-design: #b7791f; --s-evidence: #1d7a4c; --s-gaps: #c2185b;
+  --s-methods: #2a78d6; --s-data: #eb6834; --s-settings: #1baf7a; --s-design: #eda100; --s-population: #e87ba4; --s-interventions: #008300; --s-biology: #4a3aa7; --seq: #2a78d6; --s-evidence: #1d7a4c; --s-gaps: #c2185b;
   --f-ui: "Public Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --f-read: "Newsreader", "Iowan Old Style", Georgia, "Times New Roman", serif;
   --f-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
@@ -33,7 +33,7 @@
     --ok: #6fd49c; --ok-soft: #173326; --bad: #ff8a80; --bad-soft: #3a1b1b; --warn: #e8bb4f; --warn-soft: #33290f;
     --g-q: #a8a3ff; --g-cat: #eceaf7; --g-concept: #8f89ff; --g-paper: #6e6a8f; --g-claim: #6fd49c; --g-bad: #ff8a80;
     --g-gap: #ff7eab; --g-design: #4fd1c5; --g-driver: #e8bb4f; --g-link: #34325a;
-    --s-methods: #a8a3ff; --s-data: #4fd1c5; --s-settings: #c9a2f2; --s-design: #e8bb4f; --s-evidence: #6fd49c; --s-gaps: #ff7eab;
+    --s-methods: #3987e5; --s-data: #d95926; --s-settings: #199e70; --s-design: #c98500; --s-population: #d55181; --s-interventions: #008300; --s-biology: #9085e9; --seq: #3987e5; --s-evidence: #6fd49c; --s-gaps: #ff7eab;
     --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 28px -14px rgb(0 0 0 / 60%);
     color-scheme: dark;
   }
@@ -45,7 +45,7 @@
   --ok: #6fd49c; --ok-soft: #173326; --bad: #ff8a80; --bad-soft: #3a1b1b; --warn: #e8bb4f; --warn-soft: #33290f;
   --g-q: #a8a3ff; --g-cat: #eceaf7; --g-concept: #8f89ff; --g-paper: #6e6a8f; --g-claim: #6fd49c; --g-bad: #ff8a80;
   --g-gap: #ff7eab; --g-design: #4fd1c5; --g-driver: #e8bb4f; --g-link: #34325a;
-  --s-methods: #a8a3ff; --s-data: #4fd1c5; --s-settings: #c9a2f2; --s-design: #e8bb4f; --s-evidence: #6fd49c; --s-gaps: #ff7eab;
+  --s-methods: #3987e5; --s-data: #d95926; --s-settings: #199e70; --s-design: #c98500; --s-population: #d55181; --s-interventions: #008300; --s-biology: #9085e9; --seq: #3987e5; --s-evidence: #6fd49c; --s-gaps: #ff7eab;
   --shadow: 0 1px 2px rgb(0 0 0 / 30%), 0 8px 28px -14px rgb(0 0 0 / 60%);
   color-scheme: dark;
 }
@@ -220,7 +220,8 @@ details.log summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 #msvg { display: block; }
 #msvg text { font: 12.5px var(--f-ui); fill: var(--ink); cursor: pointer; }
 #msvg text .c { fill: var(--muted); font: 11.5px var(--f-mono); }
-#msvg text.sec { font-weight: 700; font-size: 12px; letter-spacing: .08em; }
+#msvg text.sec { font-weight: 700; font-size: 12px; letter-spacing: .08em; fill: var(--ink); }
+#msvg g.flash text { fill: var(--hema); font-weight: 700; }
 #msvg text.root { font: 600 17px var(--f-read); }
 #msvg text.sub { font: italic 12.5px var(--f-read); fill: var(--muted); cursor: default; }
 #msvg text.fact, #msvg text.attr { fill: var(--ink-2); font-size: 12px; }
@@ -228,8 +229,39 @@ details.log summary { cursor: pointer; font-size: 13px; color: var(--muted); }
 #msvg text.hit { fill: var(--hema); font-weight: 700; }
 #msvg path { fill: none; stroke: var(--line-2); stroke-width: 1.3; }
 #msvg circle, #msvg rect { cursor: pointer; stroke-width: 1.6; }
+.crumbs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; font-size: 13px; color: var(--muted); }
+.crumbs a { color: var(--ink-2); text-decoration: none; padding: 2px 6px; border-radius: 5px; background: var(--sunk); }
+.crumbs a:hover { background: var(--line); }
+.crumbs b { color: var(--ink); font-weight: 600; padding: 2px 2px; }
+.crumbs .sep { color: var(--line-2); }
+.crumbs .seg button { padding: 3px 9px; font-size: 12.5px; }
+.gtime { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.gtime input[type=range] { width: 160px; accent-color: var(--hema); }
+.gtime output { font-family: var(--f-mono); font-size: 12px; color: var(--ink-2); min-width: 11ch; }
+#gridwrap { display: grid; gap: 10px; }
+.gridbar { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; font-size: 13px; color: var(--ink-2); }
+.gridbox { overflow: auto; max-height: 620px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.heat { border-collapse: separate; border-spacing: 2px; font-size: 12.5px; }
+.heat th { font-weight: 500; color: var(--ink-2); text-align: left; padding: 4px 8px; white-space: nowrap; background: var(--panel); }
+.heat thead th { position: sticky; top: 0; z-index: 1; vertical-align: bottom; height: 150px; padding: 0 0 6px; }
+.heat thead th span { display: inline-block; writing-mode: vertical-rl; transform: rotate(180deg); max-height: 142px;
+                      overflow: hidden; text-overflow: ellipsis; padding: 0 6px; }
+.heat tbody th { position: sticky; left: 0; z-index: 1; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.heat th small, .heat thead th small { color: var(--muted); font-family: var(--f-mono); font-size: 11px; }
+.heat td { width: 38px; min-width: 38px; height: 30px; text-align: center; border-radius: 4px; font-family: var(--f-mono);
+           font-size: 12px; cursor: pointer; color: var(--ink); }
+.heat td.zero { color: var(--muted); cursor: default; }
+.heat td.gap { background: var(--eosin-soft); color: var(--eosin); font-weight: 600; cursor: pointer; }
+.heat td.on { filter: brightness(.82); font-weight: 700; }
+.heat td:hover:not(.zero) { filter: brightness(.94); }
+.heatkey { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; font-size: 12px; color: var(--muted); }
+.heatkey .ramp { display: inline-block; width: 120px; height: 9px; border-radius: 3px; vertical-align: -1px; margin: 0 6px;
+                 background: linear-gradient(90deg, color-mix(in srgb, var(--seq) 10%, var(--panel)), var(--seq)); }
+.heatkey .g { display: inline-block; width: 12px; height: 12px; border-radius: 3px; background: var(--eosin-soft); vertical-align: -2px; margin-right: 6px; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; color: var(--muted); }
 .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.legend i.ln { width: 16px; height: 2px; border-radius: 1px; vertical-align: 3px; }
+.legend i.ln.dash { background: repeating-linear-gradient(90deg, var(--eosin) 0 5px, transparent 5px 9px); }
 #ginfo { border: 1px solid var(--line); border-radius: 10px; padding: 14px; font-size: 14px; align-self: start;
          position: sticky; top: 16px; max-height: calc(100vh - 32px); overflow-y: auto; background: var(--panel); min-width: 0; }
 #ginfo .gi-title { font-family: var(--f-read); font-size: 18px; line-height: 1.3; margin: 4px 0 8px; }
@@ -406,7 +438,7 @@ details.log summary { cursor: pointer; font-size: 13px; color: var(--muted); }
         <div style="display:grid;gap:12px">
           <div class="mapbar">
             <span class="seg" role="group" aria-label="Map view">
-              <button aria-pressed="true" data-view="graph">Graph</button><button aria-pressed="false" data-view="mind">Mind map</button>
+              <button aria-pressed="true" data-view="graph">Graph</button><button aria-pressed="false" data-view="mind">Mind map</button><button aria-pressed="false" data-view="grid">Grid</button>
             </span>
             <input id="gsearch" type="search" placeholder="Find a paper, method, place, claim…" aria-label="Search the map">
             <label class="status" for="mlevel" data-mind hidden>Show</label>
@@ -422,7 +454,16 @@ details.log summary { cursor: pointer; font-size: 13px; color: var(--muted); }
             <label><input type="checkbox" data-t="gap" checked> Gaps and designs</label>
             <label><input type="checkbox" data-t="driver" checked> Disagreements</label>
             <label><input type="checkbox" data-t="cites" checked> Citations</label>
+            <label title="Concepts that appear in the same papers more often than chance"><input type="checkbox" data-t="co" checked> Used together</label>
+            <label title="Two common concepts that no paper here uses together"><input type="checkbox" data-t="untried" checked> Not combined</label>
+            <span class="gtime" id="gtime" hidden>
+              <label for="gyear">Papers up to</label>
+              <input type="range" id="gyear" step="1">
+              <output id="gyearv" for="gyear"></output>
+              <button class="btn small" id="gplay" type="button">Play</button>
+            </span>
           </div>
+          <nav class="crumbs" id="gcrumbs" aria-label="Where you are in the map" hidden></nav>
           <div class="mapgrid">
             <div style="min-width:0;display:grid;gap:8px;align-content:start">
               <div id="gwrap">
@@ -430,6 +471,16 @@ details.log summary { cursor: pointer; font-size: 13px; color: var(--muted); }
                 <div class="gzoom"><button class="btn" id="gzin" title="Zoom in">+</button><button class="btn" id="gzout" title="Zoom out">−</button><button class="btn" id="gfit" title="Fit to view">Fit</button></div>
               </div>
               <div id="mscroll" hidden><svg id="msvg" xmlns="http://www.w3.org/2000/svg"></svg></div>
+              <div id="gridwrap" hidden>
+                <div class="gridbar">
+                  <label>Rows <select class="btn small" id="gridA" aria-label="Field for the rows"></select></label>
+                  <label>Columns <select class="btn small" id="gridB" aria-label="Field for the columns"></select></label>
+                  <span class="status" id="gridN"></span>
+                </div>
+                <div class="gridbox" id="gridbox"></div>
+                <div class="heatkey"><span>Papers using both:<i class="ramp"></i></span>
+                  <span><i class="g"></i>Not combined in any paper, though both are common</span></div>
+              </div>
               <div class="legend" id="gleg"></div>
             </div>
             <aside id="ginfo" aria-live="polite"></aside>
@@ -855,22 +906,37 @@ $("#fq").addEventListener("keydown", ev => { if (ev.key === "Enter" && (ev.metaK
 
 // ---------------------------------------------------------------- map: graph view
 const G = { nodes: [], links: [], byId: {}, adj: {}, scale: 1, tx: 0, ty: 0, alpha: 0, hover: null, sel: null,
-            hidden: new Set(), match: null, raf: null, view: "graph", w: 800, h: 560, runId: null, tree: null };
+            hidden: new Set(), match: null, raf: null, view: "graph", w: 800, h: 560, runId: null, tree: null,
+            anchor: {}, local: null, trail: [], depth: 1, years: null, yearMax: null, play: null };
 const GROUP = { gap: "gap", combination: "gap", design: "gap", direction: "gap" };
 const TCOL = { question: "--g-q", category: "--g-cat", concept: "--g-concept", paper: "--g-paper", claim: "--g-claim",
                gap: "--g-gap", combination: "--g-gap", design: "--g-design", direction: "--g-design", driver: "--g-driver" };
 const TNAME = { question: "Question", category: "Category", concept: "Concept", paper: "Paper", claim: "Claim",
                 gap: "Research gap", combination: "Untried combination", design: "Candidate design", direction: "Research direction",
                 driver: "Disputed driver" };
+const SECNAME = { methods: "Methods", data: "Data", settings: "Study settings", population: "Who or what was studied",
+                  interventions: "Interventions and outcomes", biology: "Mechanisms and targets", design: "Study design" };
 const LEN = { has: 75, uses: 55, counts: 70, counted: 85, about: 95, gap: 130, cites: 70, positive: 60, negative: 60,
-              addresses: 60, builds_on: 75, rests_on: 70 };
+              addresses: 60, builds_on: 75, rests_on: 70, co: 90 };
+const LINKTYPES = new Set(["cites", "co", "untried"]);          // link kinds with their own on/off switch
 let graphPick = null;
 const ncolor = n => cssv(n.type === "claim" ? (n.status === "supported" ? "--g-claim" : "--g-bad") : (TCOL[n.type] || "--muted"));
-const radius = n => ({ question: 14, category: 8.5, concept: 4 + Math.sqrt(n.papers || 1) * 2, claim: 5, gap: 7,
+const filtered = () => G.years && G.yearMax != null && G.yearMax < G.years[1];
+const npapers = n => filtered() ? (n.visN || 0) : (n.papers || 0);
+const radius = n => ({ question: 14, category: 8.5, concept: 4 + Math.sqrt(npapers(n) || 1) * 2, claim: 5, gap: 7,
   combination: 6, design: 7, direction: 5.5, driver: 6.5 })[n.type] || (3.2 + Math.min(4, Math.sqrt(n.degree || 1) / 1.4));
-const shown = n => !G.hidden.has(GROUP[n.type] || n.type);
-const lshown = l => !(l.type === "cites" && G.hidden.has("cites")) && shown(l.s) && shown(l.t);
+function shown(n) {
+  if (G.hidden.has(GROUP[n.type] || n.type)) return false;
+  if (G.local && !G.local.has(n.id)) return false;
+  if (filtered()) {
+    if (n.type === "paper" && (n.year || 0) > G.yearMax) return false;
+    if (n.type === "concept" && !n.visN) return false;
+  }
+  return true;
+}
+const lshown = l => !(LINKTYPES.has(l.type) && G.hidden.has(l.type)) && shown(l.s) && shown(l.t);
 const NPAPERS = () => (G.byId.question && G.byId.question.papers) || 0;
+const secOf = n => n.type === "category" || n.type === "concept" ? n.section : null;
 
 async function loadGraph() {
   const runId = currentRun;
@@ -886,29 +952,70 @@ function setupGraph(data) {
   G.nodes = data.nodes.map(n => ({ ...n }));
   G.byId = Object.fromEntries(G.nodes.map(n => [n.id, n]));
   G.links = data.links.filter(l => G.byId[l.source] && G.byId[l.target]).map(l => ({ ...l, s: G.byId[l.source], t: G.byId[l.target] }));
-  G.adj = {};
+  G.adj = {}; G.near = {};
   for (const l of G.links) {
-    (G.adj[l.s.id] = G.adj[l.s.id] || new Set()).add(l.t.id);
-    (G.adj[l.t.id] = G.adj[l.t.id] || new Set()).add(l.s.id);
+    // co-use and "not combined" links are shown as hints, not as neighbours, so focus stays readable
+    const into = l.type === "co" || l.type === "untried" ? G.near : G.adj;
+    (into[l.s.id] = into[l.s.id] || new Set()).add(l.t.id);
+    (into[l.t.id] = into[l.t.id] || new Set()).add(l.s.id);
   }
-  const cats = G.nodes.filter(n => n.type === "category");
+  // Each section gets its own region around the question, so the layout says what kind of thing a node is.
+  // Categories and their concepts are laid out (a spiral per category, biggest concept first) and pinned;
+  // papers, claims and gaps then settle between the things they link to. Drag a concept to move it.
   for (const n of G.nodes) { n.x = (Math.random() - .5) * 500; n.y = (Math.random() - .5) * 500; n.vx = n.vy = 0; }
   if (G.byId.question) Object.assign(G.byId.question, { x: 0, y: 0, fixed: true, pinned: true });
-  cats.forEach((c, i) => { const a = 2 * Math.PI * i / cats.length; c.x = Math.cos(a) * 200; c.y = Math.sin(a) * 200; });
-  for (const n of G.nodes) {
-    if (n.type === "question" || n.type === "category") continue;
-    const anchor = [...(G.adj[n.id] || [])].map(id => G.byId[id]).find(m => m.type === "category" || m.type === "concept");
-    if (anchor) { n.x = anchor.x * 1.3 + (Math.random() - .5) * 90; n.y = anchor.y * 1.3 + (Math.random() - .5) * 90; }
+  const secs = [...new Set(G.nodes.map(secOf).filter(Boolean))];
+  const catsIn = s => G.nodes.filter(n => n.type === "category" && n.section === s);
+  const conceptsOf = c => [...(G.adj[c.id] || [])].map(id => G.byId[id]).filter(m => m && m.type === "concept" && m.field === c.field)
+    .sort((p, q) => (q.papers || 0) - (p.papers || 0));
+  const STEP = 30, spiralR = k => STEP * Math.sqrt(k + 0.5) + 22;
+  const secR = Object.fromEntries(secs.map(s => {
+    const cs = catsIn(s);
+    return [s, cs.reduce((t, c) => t + spiralR(conceptsOf(c).length) + 18, 0) + 20];
+  }));
+  const ring = Math.max(240, secs.reduce((t, s) => t + secR[s], 0) * 1.12 / Math.PI);
+  G.anchor = {};
+  secs.forEach((s, i) => {
+    const a = -Math.PI / 2 + 2 * Math.PI * i / secs.length;
+    G.anchor[s] = { x: Math.cos(a) * ring, y: Math.sin(a) * ring };
+    const cs = catsIn(s), tx = -Math.sin(a), ty = Math.cos(a);   // categories of one section side by side
+    const GAP = 36;
+    let off = -(cs.reduce((t, c) => t + 2 * spiralR(conceptsOf(c).length) + GAP, 0) - GAP) / 2;
+    for (const c of cs) {
+      const rr = spiralR(conceptsOf(c).length);
+      off += rr;
+      const cx = G.anchor[s].x + tx * off, cy = G.anchor[s].y + ty * off;
+      Object.assign(c, { x: cx, y: cy, fixed: true, pinned: true });
+      conceptsOf(c).forEach((m, k) => {
+        const ang = a + k * 2.39996, d = STEP * Math.sqrt(k + 0.5) + 14;
+        Object.assign(m, { x: cx + Math.cos(ang) * d, y: cy + Math.sin(ang) * d, fixed: true, pinned: true });
+      });
+      off += rr + GAP;
+    }
+  });
+  for (const n of G.nodes) {                     // a concept outside every category (a gap's own value) sits by its category
+    if (n.type === "concept" && !n.pinned) { const a = G.anchor[n.section]; if (a) { n.x = a.x + (Math.random() - .5) * 80; n.y = a.y + (Math.random() - .5) * 80; } }
   }
-  G.sel = G.hover = null; G.match = null; $("#gsearch").value = "";
+  for (const n of G.nodes) {
+    if (secOf(n) || n.type === "question") continue;
+    const ms = [...(G.adj[n.id] || [])].map(id => G.byId[id]).filter(m => secOf(m));
+    if (ms.length) {
+      n.x = ms.reduce((t, m) => t + m.x, 0) / ms.length + (Math.random() - .5) * 60;
+      n.y = ms.reduce((t, m) => t + m.y, 0) / ms.length + (Math.random() - .5) * 60;
+    }
+  }
+  G.sel = G.hover = null; G.match = null; G.local = null; G.trail = []; G.saved = null; $("#gsearch").value = "";
+  setupYears();
   const s = data.stats;
   $("#gstats").textContent = `${s.papers} papers · ${s.nodes} nodes · ${s.links} links` + (s.citations ? ` · ${s.citations} citations` : "");
   sizeCanvas();
   G.alpha = 1;
-  for (let i = 0; i < 320; i++) tick();
+  for (let i = 0; i < 360; i++) tick();
   G.alpha = 0; G.needFit = $("#view-map").hidden; fit();
   legend(); showInfo(null); $("#gcompare").hidden = true;
+  renderCrumbs();
   buildMind(data.tree);
+  setupGrid();
 }
 
 function tick() {
@@ -921,21 +1028,24 @@ function tick() {
       let dx = q.x - p.x, dy = q.y - p.y;
       const d2 = dx * dx + dy * dy || 0.01;
       if (d2 > 300000) continue;
-      const d = Math.sqrt(d2), f = a * (heavy(p) || heavy(q) ? 3000 : 1100) / d2;
+      const d = Math.sqrt(d2), f = a * (heavy(p) || heavy(q) ? 3000 : 1100) * (G.local ? 3 : 1) / d2;
       dx /= d; dy /= d;
       p.vx -= dx * f; p.vy -= dy * f; q.vx += dx * f; q.vy += dy * f;
     }
   }
   for (const l of G.links) {
-    if (!lshown(l)) continue;
+    if (!lshown(l) || l.type === "untried") continue;
     const dx = l.t.x - l.s.x, dy = l.t.y - l.s.y, d = Math.sqrt(dx * dx + dy * dy) || 1;
-    const len = l.s.type === "question" || l.t.type === "question" ? (l.type === "has" ? 170 : 230) : (LEN[l.type] || 65);
-    const k = (d - len) / d * a * (l.type === "cites" ? 0.025 : 0.07);
+    const len = (l.s.type === "question" || l.t.type === "question" ? (l.type === "has" ? 170 : 230) : (LEN[l.type] || 65)) * (G.local ? 2 : 1);
+    const k = (d - len) / d * a * (l.type === "cites" || l.type === "co" ? 0.006 : l.type === "uses" ? 0.035 : 0.07);
     l.s.vx += dx * k; l.s.vy += dy * k; l.t.vx -= dx * k; l.t.vy -= dy * k;
   }
   for (const n of ns) {
     if (n.fixed) { n.vx = n.vy = 0; continue; }
-    n.vx = (n.vx - n.x * 0.004 * a) * 0.6; n.vy = (n.vy - n.y * 0.004 * a) * 0.6;
+    const an = !G.local && G.anchor[secOf(n)];                                // a loose concept drifts to its region
+    if (an) { n.vx += (an.x - n.x) * 0.05 * a; n.vy += (an.y - n.y) * 0.05 * a; }
+    const g = an ? 0 : 0.004;
+    n.vx = (n.vx - n.x * g * a) * 0.6; n.vy = (n.vy - n.y * g * a) * 0.6;
     n.x += n.vx; n.y += n.vy;
   }
   G.alpha *= 0.985;
@@ -969,16 +1079,46 @@ function draw() {
   x.clearRect(0, 0, G.w, G.h);
   x.translate(G.tx, G.ty); x.scale(G.scale, G.scale);
   const focus = G.hover || G.sel, near = focus ? (G.adj[focus.id] || new Set()) : null;
-  const lit = n => !focus || n === focus || near.has(n.id);
+  const hint = focus ? (G.near[focus.id] || new Set()) : null;
+  const lit = n => !focus || n === focus || near.has(n.id) || hint.has(n.id);
   const dim = n => G.match && !G.match.has(n.id);
   const link = cssv("--g-link"), ok = cssv("--ok"), bad = cssv("--bad"), ink = cssv("--ink"), bg = cssv("--panel");
+  const eos = cssv("--eosin"), conc = cssv("--g-concept"), dark = matchMedia("(prefers-color-scheme: dark)").matches
+    && document.documentElement.dataset.theme !== "light" || document.documentElement.dataset.theme === "dark";
+
+  // section regions: a faint wash behind each category's cluster, in its section's colour; the section is
+  // named once, above its highest cluster
+  const regions = [];
+  if (!G.local) {
+    const secTop = {};
+    for (const c of G.nodes.filter(n => n.type === "category" && shown(n))) {
+      const ms = [c, ...[...(G.adj[c.id] || [])].map(id => G.byId[id]).filter(m => m && m.type === "concept" && m.field === c.field && shown(m))];
+      const cx = ms.reduce((t, m) => t + m.x, 0) / ms.length, cy = ms.reduce((t, m) => t + m.y, 0) / ms.length;
+      const ds = ms.map(m => Math.hypot(m.x - cx, m.y - cy) + radius(m)).sort((p, q) => p - q);
+      const r = ds[Math.floor(0.9 * (ds.length - 1))] + 22;
+      x.globalAlpha = dark ? 0.10 : 0.07; x.fillStyle = cssv(SECCOL[c.section] || "--muted");
+      x.beginPath(); x.arc(cx, cy, r, 0, 2 * Math.PI); x.fill();
+      if (!secTop[c.section] || cy - r < secTop[c.section].cy - secTop[c.section].r) secTop[c.section] = { sec: c.section, cx, cy, r };
+    }
+    regions.push(...Object.values(secTop));
+  }
   for (const l of G.links) {
     if (!lshown(l)) continue;
     const on = focus && (l.s === focus || l.t === focus);
-    x.globalAlpha = on ? 0.95 : focus || G.match ? 0.07 : 0.55;
-    x.strokeStyle = l.type === "negative" ? bad : l.type === "positive" ? ok : on ? ncolor(focus) : link;
-    x.lineWidth = (on ? 1.7 : 1) / G.scale;
-    x.setLineDash(l.type === "cites" ? [4 / G.scale, 3 / G.scale] : []);
+    if (l.type === "untried") {
+      x.globalAlpha = on ? 0.95 : focus || G.match ? 0.1 : 0.55;
+      x.strokeStyle = eos; x.lineWidth = (on ? 1.8 : 1.2) / G.scale;
+      x.setLineDash([6 / G.scale, 5 / G.scale]);
+    } else if (l.type === "co") {
+      x.globalAlpha = on ? 0.9 : focus || G.match ? 0.04 : 0.13;
+      x.strokeStyle = conc; x.lineWidth = (0.6 + Math.log2(1 + (l.n || 1)) * (on ? 0.9 : 0.55)) / G.scale;
+      x.setLineDash([]);
+    } else {
+      x.globalAlpha = on ? 0.95 : focus || G.match ? 0.07 : l.type === "uses" ? 0.4 : 0.55;
+      x.strokeStyle = l.type === "negative" ? bad : l.type === "positive" ? ok : on ? ncolor(focus) : link;
+      x.lineWidth = (on ? 1.7 : 1) / G.scale;
+      x.setLineDash(l.type === "cites" ? [4 / G.scale, 3 / G.scale] : []);
+    }
     x.beginPath(); x.moveTo(l.s.x, l.s.y); x.lineTo(l.t.x, l.t.y); x.stroke();
   }
   x.setLineDash([]);
@@ -998,23 +1138,45 @@ function draw() {
       x.beginPath(); x.arc(n.x, n.y, r + 3 / G.scale, 0, 2 * Math.PI); x.stroke();
     }
   }
-  x.textAlign = "center"; x.textBaseline = "top";
-  for (const n of G.nodes) {
-    if (!shown(n)) continue;
+
+  // labels: placed in screen space, most important first; a label that would overlap one already placed is
+  // skipped, so zooming in reveals more instead of piling text on text
+  x.setTransform(dpr, 0, 0, dpr, 0, 0);
+  x.globalAlpha = 1; x.textBaseline = "top"; x.textAlign = "left";
+  const boxes = [];
+  const free = b => !boxes.some(o => b.x < o.x + o.w && b.x + b.w > o.x && b.y < o.y + o.h && b.y + b.h > o.y);
+  const put = (text, sx, sy, font, fill, alpha, force, centre = true) => {
+    x.font = font;
+    const w = x.measureText(text).width, h = parseFloat(font.match(/(\d+(?:\.\d+)?)px/)[1]) + 2;
+    const b = { x: centre ? sx - w / 2 - 2 : sx - 2, y: sy - 1, w: w + 4, h };
+    b.x = Math.max(2, Math.min(G.w - b.w - 2, b.x));               // keep labels inside the canvas
+    if (!force && !free(b)) return false;
+    boxes.push(b);
+    x.globalAlpha = alpha; x.lineWidth = 3.5; x.strokeStyle = bg; x.lineJoin = "round";
+    x.strokeText(text, b.x + 2, sy); x.fillStyle = fill; x.fillText(text, b.x + 2, sy);
+    return true;
+  };
+  const sx = n => n.x * G.scale + G.tx, sy = n => n.y * G.scale + G.ty;
+  const UI = '"Public Sans", system-ui, sans-serif';
+  for (const g of regions) {                                     // region names, above each wash
+    const ty = (g.cy - g.r) * G.scale + G.ty + 4;
+    put(SECNAME[g.sec].toUpperCase(), (g.cx) * G.scale + G.tx, ty, `700 10.5px ${UI}`, cssv("--ink-2"), focus || G.match ? 0.35 : 0.85, false);
+  }
+  const rank = n => n === focus ? 0 : n.type === "question" ? 1 : G.match && G.match.has(n.id) ? 2 : focus && lit(n) ? 3
+    : n.type === "category" ? 4 : ["gap", "combination", "driver", "design"].includes(n.type) ? 5
+    : n.type === "concept" ? 6 - Math.min(0.9, npapers(n) / 100) : n.type === "claim" ? 7 : 8;
+  const cands = G.nodes.filter(shown).filter(n => n.type !== "paper" || G.scale > 1.1 || (focus && lit(n)) || (G.match && G.match.has(n.id)))
+    .sort((a, b) => rank(a) - rank(b));
+  for (const n of cands) {
     const big = n.type === "question" || n.type === "category";
-    const busy = focus && near.size > 16 && n !== focus && n.type === "paper" && G.scale < 1.3;
-    const show = big || (["concept", "gap", "combination", "design", "driver"].includes(n.type) && G.scale > 0.55)
-      || G.scale > 1.5 || (focus && lit(n) && !busy) || (G.match && G.match.has(n.id));
-    if (!show) continue;
-    x.globalAlpha = !lit(n) || dim(n) ? 0.18 : 1;
-    const fs = (n.type === "question" ? 15 : big ? 13 : 11) / G.scale;
-    x.font = n.type === "question" ? `600 ${fs}px Newsreader, Georgia, serif` : `${big ? 600 : 400} ${fs}px "Public Sans", system-ui, sans-serif`;
-    const cap = n.type === "question" ? 36 : 42;
-    const label = n.label.length > cap && focus !== n ? n.label.slice(0, cap - 2) + "…" : n.label;
-    const ly = n.type === "question" ? n.y - radius(n) - fs - 4 / G.scale : n.y + radius(n) + 3 / G.scale;
-    x.lineWidth = 3.5 / G.scale; x.strokeStyle = bg; x.lineJoin = "round";
-    x.strokeText(label, n.x, ly);
-    x.fillStyle = n.type === "gap" ? cssv("--eosin") : ink; x.fillText(label, n.x, ly);
+    const fs = n.type === "question" ? 15 : big ? 13 : 11.5;
+    const font = n.type === "question" ? `600 ${fs}px Newsreader, Georgia, serif` : `${big || n === focus ? 600 : 400} ${fs}px ${UI}`;
+    const cap = n === focus ? 80 : n.type === "question" ? 40 : 34;
+    const label = n.label.length > cap ? n.label.slice(0, cap - 1) + "…" : n.label;
+    const r = radius(n) * G.scale;
+    const y = n.type === "question" ? sy(n) - r - fs - 6 : sy(n) + r + 3;
+    const alpha = !lit(n) || dim(n) ? 0.3 : 1;
+    put(label, sx(n), y, font, n.type === "gap" ? eos : ink, alpha, n === focus || n.type === "question");
   }
   x.globalAlpha = 1;
 }
@@ -1066,12 +1228,124 @@ function zoomAt(f, sx, sy) {
   c.addEventListener("pointerup", up);
   c.addEventListener("pointercancel", up);
   c.addEventListener("pointerleave", () => { if (!down && G.hover) { G.hover = null; draw(); } });
+  c.addEventListener("dblclick", ev => { const n = hit(world(ev)); if (n && n.type !== "question") enterLocal(n); });
   c.addEventListener("wheel", ev => { ev.preventDefault(); const p = world(ev); zoomAt(Math.exp(-ev.deltaY * 0.0015), p.sx, p.sy); }, { passive: false });
   $("#gzin").onclick = () => zoomAt(1.3, G.w / 2, G.h / 2);
   $("#gzout").onclick = () => zoomAt(1 / 1.3, G.w / 2, G.h / 2);
   $("#gfit").onclick = fit;
-  window.addEventListener("resize", () => { if (!$("#view-map").hidden) { if (G.view === "graph") { sizeCanvas(); draw(); } else renderMind(); } });
+  window.addEventListener("resize", () => { if (!$("#view-map").hidden) { if (G.view === "graph") { sizeCanvas(); draw(); } else if (G.view === "mind") renderMind(); } });
 })();
+
+// ---- local view: a node and its neighbours, with a trail back to the whole graph
+function neighbourhood(id, depth) {
+  const out = new Set([id]);
+  let edge = [id];
+  for (let d = 0; d < depth; d++) {
+    const next = [];
+    for (const a of edge) for (const b of (G.adj[a] || [])) {
+      if (out.has(b) || b === "question") continue;
+      const nb = G.byId[b];
+      if (d > 0 && nb.type === "category") continue;          // a category would pull in its whole field
+      out.add(b); next.push(b);
+    }
+    edge = next;
+  }
+  for (const b of (G.near[id] || [])) out.add(b);             // what it is used with, or never combined with
+  return out;
+}
+function layoutLocal(n) {
+  // its own small layout: the node in the middle, its neighbours around it; the whole graph is put back after
+  if (!G.saved) G.saved = new Map(G.nodes.map(m => [m.id, { x: m.x, y: m.y, fixed: m.fixed, pinned: m.pinned }]));
+  const ms = G.nodes.filter(m => G.local.has(m.id)), hints = G.near[n.id] || new Set();
+  const outer = ms.filter(m => hints.has(m.id) && !(G.adj[n.id] || new Set()).has(m.id));
+  ms.forEach((m, i) => {
+    if (m === n) { Object.assign(m, { x: 0, y: 0, vx: 0, vy: 0, fixed: true, pinned: true }); return; }
+    const o = outer.indexOf(m);
+    if (o >= 0) {                     // used with / never combined with: an outer ring, so they never sit on top of it
+      const a = -Math.PI / 2 + 2 * Math.PI * (o + 0.5) / outer.length;
+      Object.assign(m, { x: Math.cos(a) * 340, y: Math.sin(a) * 340, vx: 0, vy: 0, fixed: true, pinned: true });
+      return;
+    }
+    const a = 2 * Math.PI * i / ms.length, d = (G.adj[n.id] || new Set()).has(m.id) ? 160 : 300;
+    Object.assign(m, { x: Math.cos(a) * d, y: Math.sin(a) * d, vx: 0, vy: 0, fixed: false, pinned: false });
+  });
+  G.alpha = 1; for (let i = 0; i < 260; i++) tick(); G.alpha = 0;
+}
+function restoreLayout() {
+  if (!G.saved) return;
+  for (const m of G.nodes) Object.assign(m, G.saved.get(m.id) || {}, { vx: 0, vy: 0 });
+  G.saved = null;
+}
+function enterLocal(n, depth) {
+  G.depth = depth || G.depth || 1;
+  if (G.trail[G.trail.length - 1] !== n.id) G.trail.push(n.id);
+  restoreLayout();
+  G.local = neighbourhood(n.id, G.depth); layoutLocal(n);
+  selectNode(n, false); renderCrumbs(); fit();
+}
+function leaveLocal(to) {
+  restoreLayout();
+  if (to == null || to < 0) { G.local = null; G.trail = []; renderCrumbs(); fit(); return; }
+  G.trail = G.trail.slice(0, to + 1);
+  const n = G.byId[G.trail[to]];
+  G.local = neighbourhood(n.id, G.depth); layoutLocal(n); selectNode(n, false); renderCrumbs(); fit();
+}
+function renderCrumbs() {
+  const box = $("#gcrumbs");
+  if (G.view === "graph") {
+    if (!G.local) { box.hidden = true; return; }
+    box.hidden = false;
+    box.innerHTML = `<a href="#" data-crumb="-1">Whole graph</a>` + G.trail.map((id, i) => {
+      const lab = esc((G.byId[id] || {}).label || id);
+      return `<span class="sep">›</span>` + (i === G.trail.length - 1 ? `<b>${lab}</b>` : `<a href="#" data-crumb="${i}">${lab}</a>`);
+    }).join("") + `<span class="seg" role="group" aria-label="How far out" style="margin-left:8px">`
+      + [1, 2].map(d => `<button type="button" data-depth="${d}" aria-pressed="${G.depth === d}">${d} step${d > 1 ? "s" : ""}</button>`).join("") + "</span>";
+  } else if (G.view === "mind") {
+    if (!M.focus) { box.hidden = true; return; }
+    box.hidden = false;
+    const path = []; for (let p = M.focus; p; p = p.parent) path.unshift(p);
+    box.innerHTML = path.map((p, i) => {
+      const lab = esc(i === 0 ? "Whole map" : p.label);
+      return (i ? `<span class="sep">›</span>` : "") + (p === M.focus ? `<b>${lab}</b>` : `<a href="#" data-mfocus="${p.key}">${lab}</a>`);
+    }).join("");
+  } else box.hidden = true;
+}
+$("#gcrumbs").addEventListener("click", ev => {
+  const t = ev.target.closest("[data-crumb],[data-depth],[data-mfocus]");
+  if (!t) return;
+  ev.preventDefault();
+  if (t.dataset.crumb != null) leaveLocal(+t.dataset.crumb);
+  else if (t.dataset.depth) { G.depth = +t.dataset.depth; leaveLocal(G.trail.length - 1); }
+  else if (t.dataset.mfocus != null) { let f = null; walk(M.root, n => { if (n.key === +t.dataset.mfocus) f = n; }); setMindFocus(f && f.parent ? f : null); }
+});
+
+// ---- years: watch the literature build up
+function setupYears() {
+  const ys = G.nodes.filter(n => n.type === "paper" && n.year).map(n => n.year);
+  if (G.play) { clearInterval(G.play); G.play = null; $("#gplay").textContent = "Play"; }
+  if (ys.length < 2 || Math.min(...ys) === Math.max(...ys)) { G.years = null; G.yearMax = null; $("#gtime").hidden = true; return; }
+  G.years = [Math.min(...ys), Math.max(...ys)]; G.yearMax = G.years[1];
+  const r = $("#gyear"); r.min = G.years[0]; r.max = G.years[1]; r.value = G.years[1];
+  $("#gtime").hidden = false; applyYear();
+}
+function applyYear() {
+  const papersByConcept = {};
+  for (const l of G.links) if (l.type === "uses" && (l.s.year || 0) <= G.yearMax) papersByConcept[l.t.id] = (papersByConcept[l.t.id] || 0) + 1;
+  for (const n of G.nodes) if (n.type === "concept") n.visN = papersByConcept[n.id] || 0;
+  const all = G.nodes.filter(n => n.type === "paper").length, vis = G.nodes.filter(n => n.type === "paper" && (n.year || 0) <= G.yearMax).length;
+  $("#gyearv").textContent = `${G.yearMax} · ${vis}/${all}`;
+  if (G.sel && !shown(G.sel)) selectNode(null);
+  kick(0.2); draw();
+}
+$("#gyear").addEventListener("input", () => { G.yearMax = +$("#gyear").value; applyYear(); });
+$("#gplay").onclick = () => {
+  if (G.play) { clearInterval(G.play); G.play = null; $("#gplay").textContent = "Play"; return; }
+  G.yearMax = G.years[0]; $("#gyear").value = G.yearMax; applyYear(); $("#gplay").textContent = "Pause";
+  G.play = setInterval(() => {
+    if (G.yearMax >= G.years[1]) { clearInterval(G.play); G.play = null; $("#gplay").textContent = "Play"; return; }
+    G.yearMax += 1; $("#gyear").value = G.yearMax; applyYear();
+  }, 800);
+};
 
 function legend() {
   const present = new Set(G.nodes.map(n => n.type === "claim" ? (n.status === "supported" ? "claim" : "claimbad") : n.type));
@@ -1079,8 +1353,12 @@ function legend() {
     ["paper", "Paper", "--g-paper"], ["claim", "Supported claim", "--g-claim"], ["claimbad", "Claim not supported", "--g-bad"],
     ["gap", "Research gap (ring)", "--g-gap"], ["combination", "Untried combination", "--g-gap"], ["design", "Design", "--g-design"],
     ["driver", "Disputed driver", "--g-driver"]];
+  const lt = new Set(G.links.map(l => l.type));
   $("#gleg").innerHTML = items.filter(i => present.has(i[0])).map(i => `<span><i style="background:var(${i[2]})"></i>${i[1]}</span>`).join("")
-    + (G.links.some(l => l.type === "cites") ? "<span>- - - cites</span>" : "");
+    + (lt.has("co") ? '<span><i class="ln" style="background:var(--g-concept)"></i>used together (thicker = more papers)</span>' : "")
+    + (lt.has("untried") ? '<span><i class="ln dash"></i>common, never combined</span>' : "")
+    + (lt.has("cites") ? "<span>- - - cites</span>" : "")
+    + '<span>Double-click a node to see only its neighbourhood</span>';
 }
 
 $("#gfilters").addEventListener("change", ev => {
@@ -1091,22 +1369,95 @@ $("#gfilters").addEventListener("change", ev => {
 });
 $("#gsearch").addEventListener("input", () => {
   const q = $("#gsearch").value.trim().toLowerCase();
-  if (q.length < 2) { G.match = null; draw(); renderMind(); return; }
+  if (q.length < 2) { G.match = null; draw(); renderMind(); renderGrid(); return; }
   G.match = new Set(G.nodes.filter(n => shown(n) && [n.label, n.title, n.text, n.paper_id, n.claim_id, n.item_id]
     .some(v => v && String(v).toLowerCase().includes(q))).map(n => n.id));
   const first = [...G.match].map(id => G.byId[id])[0];
-  if (G.view === "mind") { for (const id of G.match) revealInMind(id, true); renderMind(); }
+  if (G.view === "mind") { M.focus = null; renderCrumbs(); for (const id of G.match) revealInMind(id, true); renderMind(); }
+  else if (G.view === "grid") renderGrid();
   else if (first) { G.tx = G.w / 2 - first.x * G.scale; G.ty = G.h / 2 - first.y * G.scale; }
   draw();
 });
-$$(".seg button").forEach(b => b.onclick = () => {
+$$(".mapbar .seg button").forEach(b => b.onclick = () => {
   G.view = b.dataset.view;
-  $$(".seg button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
-  $("#gwrap").hidden = G.view !== "graph"; $("#mscroll").hidden = G.view !== "mind";
+  $$(".mapbar .seg button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  $("#gwrap").hidden = G.view !== "graph"; $("#mscroll").hidden = G.view !== "mind"; $("#gridwrap").hidden = G.view !== "grid";
   $("#gfilters").hidden = G.view !== "graph"; $("#gleg").hidden = G.view !== "graph";
   $$("[data-mind]").forEach(e => e.hidden = G.view !== "mind");
-  if (G.view === "graph") { sizeCanvas(); draw(); } else renderMind();
+  renderCrumbs();
+  if (G.view === "graph") { sizeCanvas(); draw(); } else if (G.view === "mind") renderMind(); else renderGrid();
 });
+
+// ---------------------------------------------------------------- map: grid (two fields against each other)
+const GR = { a: null, b: null, cell: null };
+function gridFields() {
+  const cats = G.nodes.filter(n => n.type === "category");
+  return cats.map(c => ({ field: c.field, label: c.label,
+    concepts: [...(G.adj[c.id] || [])].map(id => G.byId[id]).filter(m => m && m.type === "concept" && m.field === c.field)
+      .sort((p, q) => (q.papers || 0) - (p.papers || 0)).slice(0, 14) })).filter(f => f.concepts.length);
+}
+function setupGrid() {
+  const fs = gridFields();
+  const opts = fs.map(f => `<option value="${esc(f.field)}">${esc(f.label)}</option>`).join("");
+  $("#gridA").innerHTML = opts; $("#gridB").innerHTML = opts;
+  const has = f => fs.some(x => x.field === f);
+  const pair = [["methods", "data_modalities"], ["interventions", "organisms"], ["interventions", "populations"],
+                ["methods", "geography"]].find(([a, b]) => has(a) && has(b)) || [fs[0] && fs[0].field, fs[1] && fs[1].field];
+  GR.a = pair[0]; GR.b = pair[1] || pair[0]; GR.cell = null;
+  if (GR.a) $("#gridA").value = GR.a; if (GR.b) $("#gridB").value = GR.b;
+  if (G.view === "grid") renderGrid();
+}
+$("#gridA").onchange = () => { GR.a = $("#gridA").value; GR.cell = null; renderGrid(); };
+$("#gridB").onchange = () => { GR.b = $("#gridB").value; GR.cell = null; renderGrid(); };
+function papersUsing(cid) { return new Set([...(G.adj[cid] || [])].filter(id => G.byId[id] && G.byId[id].type === "paper")); }
+function renderGrid() {
+  if (G.view !== "grid" || $("#view-map").hidden) return;
+  const fs = gridFields(), A = fs.find(f => f.field === GR.a), B = fs.find(f => f.field === GR.b);
+  const box = $("#gridbox");
+  if (!A || !B) { box.innerHTML = '<p class="hint" style="padding:12px">Not enough extracted fields for a grid yet.</p>'; return; }
+  const N = NPAPERS() || 1, same = A.field === B.field;
+  const P = Object.fromEntries([...A.concepts, ...B.concepts].map(c => [c.id, papersUsing(c.id)]));
+  const cells = A.concepts.map(a => B.concepts.map(b => {
+    const both = [...P[a.id]].filter(p => P[b.id].has(p));
+    const expected = P[a.id].size * P[b.id].size / N;
+    return { a, b, both, expected, gap: !both.length && !same && expected >= 1.5 };
+  }));
+  const max = Math.max(1, ...cells.flat().filter(c => !same || c.a !== c.b).map(c => c.both.length));
+  const hit = c => G.match && (G.match.has(c.a.id) || G.match.has(c.b.id));
+  const td = c => {
+    if (same && c.a === c.b) return `<td class="zero" title="${esc(c.a.label)}">·</td>`;
+    const n = c.both.length, on = GR.cell && GR.cell.a === c.a.id && GR.cell.b === c.b.id ? " on" : "";
+    const tip = `${c.a.label} with ${c.b.label}: ${n} paper${n === 1 ? "" : "s"}` + (c.gap ? `, though about ${c.expected.toFixed(1)} would if they were unrelated` : "");
+    if (c.gap) return `<td class="gap${on}" data-a="${esc(c.a.id)}" data-b="${esc(c.b.id)}" title="${esc(tip)}">0</td>`;
+    if (!n) return `<td class="zero" title="${esc(tip)}">0</td>`;
+    const k = n / max, bgc = `color-mix(in srgb, var(--seq) ${Math.round(12 + 80 * k)}%, var(--panel))`;
+    return `<td class="${on.trim()}" style="background:${bgc};${k > 0.55 ? "color:#fff;" : ""}${hit(c) ? "font-weight:700;" : ""}" data-a="${esc(c.a.id)}" data-b="${esc(c.b.id)}" title="${esc(tip)}">${n}</td>`;
+  };
+  box.innerHTML = `<table class="heat"><thead><tr><th></th>${B.concepts.map(b => `<th title="${esc(b.label)}"><span>${esc(b.label)} <small>${b.papers}</small></span></th>`).join("")}</tr></thead><tbody>`
+    + cells.map((row, i) => `<tr><th title="${esc(A.concepts[i].label)}">${esc(A.concepts[i].label)} <small>${A.concepts[i].papers}</small></th>${row.map(td).join("")}</tr>`).join("")
+    + "</tbody></table>";
+  const gaps = cells.flat().filter(c => c.gap).length;
+  $("#gridN").textContent = `${A.concepts.length} × ${B.concepts.length} · ${N} papers` + (gaps ? ` · ${gaps} common pair${gaps > 1 ? "s" : ""} never combined` : "");
+}
+$("#gridbox").addEventListener("click", ev => {
+  const t = ev.target.closest("td[data-a]");
+  if (!t) return;
+  GR.cell = { a: t.dataset.a, b: t.dataset.b };
+  renderGrid();
+  showCell(G.byId[t.dataset.a], G.byId[t.dataset.b]);
+});
+function showCell(a, b) {
+  const both = [...papersUsing(a.id)].filter(p => papersUsing(b.id).has(p)), N = NPAPERS() || 1;
+  const exp = papersUsing(a.id).size * papersUsing(b.id).size / N;
+  let h = `<div class="eyebrow">Grid cell</div><div class="gi-title">${esc(a.label)} with ${esc(b.label)}</div><div class="facts">`
+    + `<div><b>${both.length}/${N}</b> papers use both · ${esc(a.label)} alone: ${papersUsing(a.id).size} · ${esc(b.label)} alone: ${papersUsing(b.id).size}</div>`;
+  if (!both.length && exp >= 1.5) h += `<div>No paper here combines them, though about <b>${exp.toFixed(1)}</b> would if the two were unrelated. A possible gap; check the full literature before relying on it.</div>`;
+  h += "</div>";
+  if (both.length) h += `<h4>Papers (${both.length})</h4>` + chips(both, 30)
+    + (both.length > 1 ? `<div class="acts"><button class="btn small" data-compare="${esc(JSON.stringify(both.slice(0, 8)))}">Compare ${Math.min(8, both.length)} papers</button></div>` : "");
+  h += `<h4>Concepts</h4>` + chips([a.id, b.id]);
+  $("#ginfo").innerHTML = h;
+}
 
 // ---------------------------------------------------------------- detail panel (shared by both views)
 function selectNode(n, centre) {
@@ -1126,8 +1477,11 @@ function showInfo(n) {
   const box = $("#ginfo");
   if (!n) {
     box.innerHTML = `<div class="eyebrow">Details</div><p class="hint" style="margin-top:6px">Click any node to see what it is, the
-      papers behind it and what it links to. In the graph, drag nodes, drag the background to pan, and scroll to zoom.
-      Research gaps are drawn as rings.</p>`;
+      papers behind it and what it links to.</p><p class="hint">Graph: drag to move, scroll to zoom, double-click a node to see only
+      its neighbourhood. Research gaps are rings; dashed pink lines join common things no paper here combines.</p>
+      <p class="hint">Mind map: click to open a branch, double-click to focus on it. Under a paper, "also in" lists the other
+      branches it sits in; click one to go there.</p><p class="hint">Grid: any two fields against each other; pink cells are
+      common pairs nobody combined.</p>`;
     return;
   }
   const N = NPAPERS();
@@ -1165,7 +1519,20 @@ function showInfo(n) {
   }
   const others = [...(G.adj[n.id] || [])].filter(id => G.byId[id] && G.byId[id].type !== "paper" && shown(G.byId[id]));
   if (others.length) h += `<h4>${n.type === "paper" ? "Uses and links to" : "Links to"}</h4>` + chips(others, 30);
+  if (n.type === "concept") {
+    const mine = G.links.filter(l => (l.s === n || l.t === n) && (l.type === "co" || l.type === "untried"));
+    const other = l => l.s === n ? l.t : l.s;
+    const co = mine.filter(l => l.type === "co").sort((a, b) => b.n - a.n);
+    const un = mine.filter(l => l.type === "untried").sort((a, b) => b.expected - a.expected);
+    if (co.length) h += `<h4>Often used with</h4><div class="trail">` + co.slice(0, 8).map(l =>
+      `<div><a href="#" data-node="${esc(other(l).id)}">${esc(other(l).label)}</a><span>${l.n} papers</span></div>`).join("") + "</div>";
+    if (un.length) h += `<h4>Never combined with, in these papers</h4><div class="trail">` + un.map(l =>
+      `<div class="gap"><a href="#" data-node="${esc(other(l).id)}" style="color:inherit">${esc(other(l).label)}</a><span>0, about ${l.expected} expected</span></div>`).join("") + "</div>";
+  }
   const act = [];
+  if (n.type !== "question" && G.view === "graph") act.push(`<button class="btn small" data-local="${esc(n.id)}">Show only its neighbourhood</button>`);
+  if (G.view === "mind" && M.last && M.last.ref === n.id && M.last.kids.length && M.last !== M.focus)
+    act.push(`<button class="btn small" data-mfocushere="1">Focus the mind map here</button>`);
   if (n.type === "concept" && papersOf(n).length > 1) act.push(`<button class="btn small" data-compare="${esc(JSON.stringify(papersOf(n).slice(0, 8)))}">Compare ${Math.min(8, papersOf(n).length)} papers</button>`);
   if (n.type === "concept") act.push(`<button class="btn small" data-evidence="${esc(n.id)}">View evidence</button>`);
   if (n.type === "concept") {
@@ -1207,12 +1574,15 @@ function evidenceList(cid) {
 }
 
 function infoClick(ev) {
-  const t = ev.target.closest("[data-node],[data-about],[data-askq],[data-draftnode],[data-compare],[data-evidence]");
+  const t = ev.target.closest("[data-node],[data-about],[data-askq],[data-draftnode],[data-compare],[data-evidence],[data-local],[data-mfocushere]");
   if (!t) return;
+  if (t.dataset.local) { enterLocal(G.byId[t.dataset.local]); return; }
+  if (t.dataset.mfocushere) { setMindFocus(M.last); return; }
   if (t.dataset.node) {
     ev.preventDefault();
     const n = G.byId[t.dataset.node];
-    if (G.view === "mind") { revealInMind(n.id); }
+    if (G.local && !G.local.has(n.id)) leaveLocal(-1);
+    if (G.view === "mind") { jumpInMind(n.id); }
     selectNode(n, true);
   } else if (t.dataset.about || t.dataset.askq) {
     askAbout(t.dataset.about || null, t.dataset.askq || null);
@@ -1235,7 +1605,7 @@ $("#ginfo").addEventListener("click", infoClick);
 $("#gcompare").addEventListener("click", infoClick);
 
 // ---------------------------------------------------------------- map: mind map (collapsible tree)
-const M = { root: null, w: {} };
+const M = { root: null, w: {}, focus: null, last: null };
 const OPEN_AT = {
   overview: new Set(["question"]),
   concepts: new Set(["question", "section", "field", "group"]),
@@ -1248,7 +1618,7 @@ function buildMind(tree) {
     n.kids = (t.children || []).map(c => prep(c, depth + 1, n));
     return n;
   };
-  M.root = prep(tree, 0, null); M.w = {};
+  M.root = prep(tree, 0, null); M.w = {}; M.focus = null; M.last = null;
   $("#mlevel").value = "overview"; applyLevel("overview");
 }
 function walk(n, f) { f(n); n.kids.forEach(c => walk(c, f)); }
@@ -1264,7 +1634,31 @@ function revealInMind(id, quiet) {
   walk(M.root, n => { if (n.ref === id) for (let p = n.parent; p; p = p.parent) p.open = true; });
   if (!quiet) renderMind();
 }
-const SECCOL = { methods: "--s-methods", data: "--s-data", settings: "--s-settings", design: "--s-design", evidence: "--s-evidence", gaps: "--s-gaps" };
+const under = (n, top) => { for (let p = n; p; p = p.parent) if (p === top) return true; return false; };
+function jumpInMind(id) {
+  // the node's own place in the map: a concept under its section, a paper's first listing; never an "also in" copy
+  if (!M.root) return;
+  let target = null;
+  walk(M.root, n => { if (!target && n.ref === id && n.type !== "attr") target = n; });
+  if (!target) return;
+  if (M.focus && !under(target, M.focus)) { M.focus = null; renderCrumbs(); }
+  for (let p = target.parent; p; p = p.parent) p.open = true;
+  renderMind();
+  const g = $(`#msvg g[data-key="${target.key}"]`);
+  if (g) {
+    g.classList.add("flash"); setTimeout(() => g.classList.remove("flash"), 1600);
+    const box = $("#mscroll"), r = g.getBoundingClientRect(), b = box.getBoundingClientRect();
+    box.scrollBy({ top: r.top - b.top - b.height / 2, left: Math.max(0, r.left - b.left - 40), behavior: "smooth" });
+  }
+  M.last = target;
+}
+function setMindFocus(n) {
+  M.focus = n && n.parent ? n : null;
+  if (M.focus) M.focus.open = true;
+  renderCrumbs(); renderMind(); $("#mscroll").scrollTo({ top: 0, left: 0 });
+  if (M.focus && M.focus.ref && G.byId[M.focus.ref]) showInfo(G.byId[M.focus.ref]);
+}
+const SECCOL = { methods: "--s-methods", data: "--s-data", settings: "--s-settings", design: "--s-design", population: "--s-population", interventions: "--s-interventions", biology: "--s-biology", evidence: "--s-evidence", gaps: "--s-gaps" };
 function mcolor(n) {
   if (n.type === "section") return cssv(SECCOL[n.section] || "--ink");
   if (n.type === "trail") return cssv(n.gap ? "--eosin" : "--g-concept");
@@ -1275,39 +1669,40 @@ function mcolor(n) {
 function renderMind() {
   if (!M.root || G.view !== "mind" || $("#view-map").hidden) return;
   const box = $("#mscroll"), narrow = (box.clientWidth || 800) < 620;
-  const rowH = 26, vis = [];
-  walk(M.root, n => { n.show = !n.parent || (n.parent.show && n.parent.open); if (n.show) vis.push(n); });
+  const rowH = 26, vis = [], top = M.focus || M.root;
+  walk(M.root, n => { n.show = false; });
+  walk(top, n => { n.show = n === top || (n.parent.show && n.parent.open); n.rd = n.depth - top.depth; if (n.show) vis.push(n); });
   const room = (box.clientWidth || 360) - 24;
-  const maxChars = n => narrow ? Math.max(12, Math.floor((room - 60 - n.depth * 18) / 7)) :
-    n.type === "section" ? 30 : n.depth === 0 ? 40 : 52;
+  const maxChars = n => narrow ? Math.max(12, Math.floor((room - 60 - n.rd * 18) / 7)) :
+    n.type === "section" ? 30 : n.rd === 0 ? 40 : 52;
   const label = n => {
     const base = n.type === "section" ? n.label.toUpperCase() : n.label;
     return base.length > maxChars(n) ? base.slice(0, maxChars(n) - 1) + "…" : base;
   };
   const count = n => (n.count ? ` · ${n.count}` : "") + (n.kids.length && !n.open ? "  ›" : "");
-  const est = n => (label(n) + count(n)).length * (n.depth === 0 ? 8.6 : n.type === "section" ? 8.4 : 6.9);
+  const est = n => (label(n) + count(n)).length * (n.rd === 0 ? 8.6 : n.type === "section" ? 8.4 : 6.9);
   const tw = n => M.w[n.key + label(n) + count(n)] ?? est(n);
   let y = 22;
   if (narrow) {
-    for (const n of vis) { n.x = 14 + n.depth * 18; n.y = y; y += n.depth === 0 ? rowH + 18 : rowH; }
+    for (const n of vis) { n.x = 14 + n.rd * 18; n.y = y; y += n.rd === 0 ? rowH + 18 : rowH; }
   } else {
     const colW = [];
-    for (const n of vis) colW[n.depth] = Math.max(colW[n.depth] || 0, tw(n) + 58);
+    for (const n of vis) colW[n.rd] = Math.max(colW[n.rd] || 0, tw(n) + 58);
     const xAt = [18]; for (let d = 1; d <= colW.length; d++) xAt[d] = xAt[d - 1] + Math.min(colW[d - 1] || 120, 420);
     const place = n => {
-      n.x = xAt[n.depth];
+      n.x = xAt[n.rd];
       const kids = n.open ? n.kids : [];
       if (!kids.length) { n.y = y; y += rowH; } else { kids.forEach(place); n.y = (kids[0].y + kids[kids.length - 1].y) / 2; }
-      if (n.depth === 0) n.y = Math.max(n.y, 30);
+      if (n.rd === 0) n.y = Math.max(n.y, 30);
     };
-    place(M.root);
-    y = Math.max(y, M.root.y + 40);
+    place(top);
+    y = Math.max(y, top.y + 40);
   }
   const W = narrow ? room : Math.max(...vis.map(n => n.x + tw(n) + 40)), H = y + 14;
   let paths = "", marks = "";
   for (const n of vis) {
     const c = mcolor(n);
-    if (n.parent) {
+    if (n !== top) {
       if (narrow) paths += `<path d="M${n.parent.x},${n.parent.y + 6} V${n.y} H${n.x - 7}"/>`;
       else {
         const px = n.parent.x + tw(n.parent) + 22, mx = (px + n.x) / 2;
@@ -1315,18 +1710,18 @@ function renderMind() {
       }
     }
     const closed = n.kids.length && !n.open;
-    const r = n.depth === 0 ? 7 : n.type === "section" ? 5.5 : 4.5;
+    const r = n.rd === 0 ? 7 : n.type === "section" ? 5.5 : 4.5;
     const shape = n.type === "fact" || n.type === "attr"
       ? `<rect x="${n.x - 3}" y="${n.y - 3}" width="6" height="6" rx="1" fill="${c}" stroke="none"/>`
       : `<circle cx="${n.x}" cy="${n.y}" r="${r}" fill="${closed || n.type === "gap" || n.type === "combination" ? cssv("--panel") : c}" stroke="${c}"/>`;
     const hitm = G.match && n.ref && G.match.has(n.ref);
-    const cls = [n.depth === 0 ? "root" : "", n.type === "section" ? "sec" : "", n.type === "fact" || n.type === "attr" ? n.type : "",
+    const cls = [n.rd === 0 ? "root" : "", n.type === "section" ? "sec" : "", n.type === "fact" || n.type === "attr" ? n.type : "",
                  (n.gap || n.section === "gaps" && n.type === "section") ? "gapmark" : "", hitm ? "hit" : ""].filter(Boolean).join(" ");
-    const style = n.type === "section" ? ` style="fill:${c}"` : "";
+    const style = "";
     marks += `<g data-key="${n.key}" tabindex="0" role="treeitem" aria-expanded="${n.kids.length ? String(!!n.open) : "false"}">${shape}`
-      + `<text x="${n.x + 11}" y="${n.y + 4.5}" class="${cls}"${style}>${esc(label(n))}<tspan class="c">${esc(count(n))}</tspan><title>${esc(n.label)}</title></text></g>`;
-    if (n.depth === 0 && n.subtitle && !narrow) marks += `<text class="sub" x="${n.x + 11}" y="${n.y + 24}">${esc(n.subtitle.length > 70 ? n.subtitle.slice(0, 68) + "…" : n.subtitle)}</text>`;
-    if (n.depth === 0 && n.subtitle && narrow) marks += `<text class="sub" x="${n.x + 11}" y="${n.y + 22}">${esc(n.subtitle.slice(0, Math.floor(room / 7)))}${n.subtitle.length > room / 7 ? "…" : ""}</text>`;
+      + `<text x="${n.x + 11}" y="${n.y + 4.5}" class="${cls}"${style}>${esc(label(n))}<tspan class="c">${esc(count(n))}</tspan><title>${esc(n.title || n.label)}</title></text></g>`;
+    if (n.rd === 0 && n.subtitle && !narrow) marks += `<text class="sub" x="${n.x + 11}" y="${n.y + 24}">${esc(n.subtitle.length > 70 ? n.subtitle.slice(0, 68) + "…" : n.subtitle)}</text>`;
+    if (n.rd === 0 && n.subtitle && narrow) marks += `<text class="sub" x="${n.x + 11}" y="${n.y + 22}">${esc(n.subtitle.slice(0, Math.floor(room / 7)))}${n.subtitle.length > room / 7 ? "…" : ""}</text>`;
   }
   const svg = $("#msvg");
   svg.setAttribute("width", W); svg.setAttribute("height", H); svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
@@ -1341,14 +1736,25 @@ function renderMind() {
   });
   if (changed && !M.again) { M.again = true; renderMind(); M.again = false; }
 }
+function mindNode(g) { let found = null; walk(M.root, n => { if (n.key === +g.dataset.key) found = n; }); return found; }
 function mindActivate(g) {
-  let found = null;
-  walk(M.root, n => { if (n.key === +g.dataset.key) found = n; });
+  const found = mindNode(g);
   if (!found) return;
+  if (found.type === "attr" && found.ref) {            // "also in": go to that concept's own branch
+    jumpInMind(found.ref); selectNode(G.byId[found.ref], false); return;
+  }
+  M.last = found;
   if (found.kids.length) { found.open = !found.open; renderMind(); }
   if (found.ref && G.byId[found.ref]) selectNode(G.byId[found.ref], false);
 }
-$("#msvg").addEventListener("click", ev => { const g = ev.target.closest("g[data-key]"); if (g) mindActivate(g); });
+$("#msvg").addEventListener("click", ev => {
+  const g = ev.target.closest("g[data-key]");
+  if (!g) return;
+  const n = mindNode(g);
+  // a double click focuses the branch (the tree is redrawn on the first click, so dblclick would be lost)
+  if (ev.detail === 2 && n && n.kids.length && n.parent && n.type !== "attr") { n.open = true; setMindFocus(n); return; }
+  mindActivate(g);
+});
 $("#msvg").addEventListener("keydown", ev => {
   const g = ev.target.closest("g[data-key]");
   if (g && (ev.key === "Enter" || ev.key === " ")) { ev.preventDefault(); mindActivate(g); }

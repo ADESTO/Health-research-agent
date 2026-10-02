@@ -1,8 +1,8 @@
 """Reported results and reported associations: what papers FOUND, not only what they did.
 
 Extraction records, per paper:
-  reported_results       a performance number: metric, value, which model, baseline or not, split, setting
-  reported_associations  a driver's reported effect on malaria: direction, lag, significance
+  reported_results       a number the paper reports: metric, value, which model/drug/arm, baseline or not, split, setting
+  reported_associations  a driver's reported effect on a health outcome: direction, lag, significance
 
 Every item needs a quote copied from the paper, checked by code; a result's quote must also contain its
 number, and an association's quote must name its driver. Items that fail are dropped, as with other fields.
@@ -26,13 +26,15 @@ DIRECTIONS = ["positive", "negative", "none", "nonlinear", "mixed"]
 
 RESULT_SCHEMA = {
     "type": "array", "description": (
-        "Performance numbers the paper reports for its models (up to 12): RMSE, MAE, MAPE, AUC, accuracy, R2, "
-        "sensitivity, correlation, CRPS... One entry per number. quote must be copied word for word and must "
-        "contain the number."),
+        "Main numbers the paper reports (up to 12): model performance (RMSE, AUC, accuracy, R2, sensitivity...), "
+        "effect estimates (odds ratio, hazard ratio, relative risk, mean difference), laboratory and "
+        "pharmacological measurements (MIC, IC50, EC50, Cmax, plasma AUC, half-life) and prevalences. One entry "
+        "per number. quote must be copied word for word and must contain the number."),
     "items": {"type": "object", "properties": {
         "metric": STR, "value": {**STR, "description": "The number exactly as written, e.g. 0.87 or 12.4%"},
-        "model": {**STR, "description": "Which model or method produced it"},
-        "is_baseline": {"type": "boolean", "description": "true if this is a comparator/baseline model"},
+        "model": {**STR, "description": "Which model, method, drug, arm or group it belongs to"},
+        "is_baseline": {"type": "boolean", "description": "true for a comparator: baseline model, placebo, "
+                        "control arm"},
         "split": {"type": "string", "enum": SPLITS},
         "setting": {**STR, "description": "Place, dataset or subgroup the number is for"},
         "horizon": {**STR, "description": "Forecast lead time if stated, else ''"},
@@ -40,11 +42,12 @@ RESULT_SCHEMA = {
 
 ASSOCIATION_SCHEMA = {
     "type": "array", "description": (
-        "Associations the paper reports between a driver (rainfall, temperature, bed net coverage, NDVI, "
-        "wealth...) and malaria (up to 12). Only what the paper states as its own finding. quote must be "
+        "Associations the paper reports between a driver (a risk factor, exposure, drug, dose or intervention, "
+        "e.g. rainfall, prior antibiotic use, childhood adversity, sertraline dose, TSH level) and a health "
+        "outcome (up to 12). Only what the paper states as its own finding. quote must be "
         "copied word for word and name the driver."),
     "items": {"type": "object", "properties": {
-        "driver": STR, "outcome": {**STR, "description": "e.g. incidence, prevalence, cases"},
+        "driver": STR, "outcome": {**STR, "description": "e.g. incidence, resistance, depressive symptoms, mortality"},
         "direction": {"type": "string", "enum": DIRECTIONS},
         "lag": {**STR, "description": "Lag if stated, e.g. '2 months', else ''"},
         "significant": {"type": "string", "enum": ["yes", "no", "not_stated"]},
@@ -57,6 +60,13 @@ _METRICS = [
     ("rmse", r"\brmse\b|root mean squared? error", False), ("mae", r"\bmae\b|mean absolute error", False),
     ("mape", r"\bmape\b|mean absolute percentage", False), ("mse", r"(?<!r)\bmse\b|mean squared error", False),
     ("crps", r"\bcrps\b", False), ("wis", r"\bwis\b|weighted interval score", False),
+    ("plasma auc", r"auc\s*[(_]?\s*(0|inf|tau|last|ss)|area under the (plasma |serum |blood )?"
+                   r"(concentration|curve of (plasma|serum|blood))|\bng\s*[·.*]?\s*h|\bmg\s*[·.*]?\s*h", None),
+    ("odds ratio", r"odds ratio|\baor\b|\bor\b", None), ("hazard ratio", r"hazard ratio|\bhr\b", None),
+    ("relative risk", r"relative risk|risk ratio|\brr\b", None), ("mic", r"\bmic(50|90)?\b|minimum inhibitory", None),
+    ("ic50", r"\bic50\b|half[- ]maximal inhibitory", None), ("ec50", r"\bec50\b", None),
+    ("cmax", r"\bcmax\b|peak (plasma )?concentration", None), ("half-life", r"half[- ]life|\bt\s*1/2\b", None),
+    ("prevalence", r"prevalence", None),
     ("auc", r"\bau(roc|c)\b|area under", True), ("r2", r"\br\s*(2|²|squared)\b|coefficient of determination", True),
     ("accuracy", r"accuracy", True), ("sensitivity", r"sensitivity|recall", True),
     ("specificity", r"specificity", True), ("f1", r"\bf1\b|f-?score", True),
@@ -124,8 +134,12 @@ def verify_structured(args: dict, text: str) -> tuple[dict, dict]:
                 if not num or num.group(0) not in quote:
                     continue
                 key, higher = metric_key(it.get("metric"))
+                value_num = parse_number(raw)
+                # a bare "AUC" above 1 (and not a percentage) is a plasma exposure, not a ROC curve
+                if key == "auc" and value_num is not None and value_num > 1 and "%" not in raw:
+                    key, higher = "plasma auc", None
                 good.append({"metric": key, "metric_as_written": str(it.get("metric") or "")[:60],
-                             "value": raw[:40], "value_num": parse_number(raw),
+                             "value": raw[:40], "value_num": value_num,
                              "higher_is_better": higher, "model": str(it.get("model") or "")[:80],
                              "is_baseline": bool(it.get("is_baseline")),
                              "split": it.get("split") if it.get("split") in SPLITS else "not_stated",

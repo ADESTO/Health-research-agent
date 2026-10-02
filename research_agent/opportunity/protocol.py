@@ -64,9 +64,21 @@ Every paper is ALREADY extracted for these base fields, so do not redefine them:
 Define 4-{MAX_FIELDS} ADDITIONAL fields that the question hinges on. For a forecasting question these are
 typically: forecast horizon, spatial unit, target variable, whether forecasts are probabilistic, how
 validation was split (random, temporal holdout, spatial holdout), whether interventions or reporting delays
-are modelled, whether a simple baseline was compared. For other questions, choose what decides the answer.
+are modelled, whether a simple baseline was compared. For a pharmacology question: dose or regimen, route,
+pharmacokinetic parameter reported, whether the mechanism was tested directly or assumed, comparator. For
+antimicrobial resistance: antibiotic class tested, susceptibility testing method (disk diffusion, broth
+microdilution, automated), breakpoint standard (CLSI, EUCAST), hospital or community setting, whether
+genotypic confirmation was done. For mental health: diagnostic instrument, clinical or community sample,
+follow-up length. For other questions, choose what decides the answer.
 Rules:
 - Prefer enum fields with 3-7 mutually exclusive categories: they can be counted exactly.
+- Each category states ONE condition. Never join two conditions with "and": a category such as
+  "plasmid_characterised_and_transfer_tested" has no home for a study that characterised the plasmid but ran
+  no transfer experiment, so such studies get coded down into a weaker category and the field under-counts.
+  Write the ladder out instead: none, sequence_context_only, plasmid_characterised, transfer_tested. A
+  category naming two things is only right when it means BOTH ARE PRESENT and each one is also a category of
+  its own (e.g. hospital, community, hospital_and_community).
+- Order the categories from least to most, so a study that did more always has somewhere higher to sit.
 - Every definition must let a reader decide the value from the paper text alone.
 - Mark as `desirable` the values the question treats as good practice or opportunity: their rarity is
   what the map reports as a gap.
@@ -109,6 +121,25 @@ def _clip(text, limit: int) -> str:
 
 
 _ROLES = {"method", "data", "outcome", "evaluation", "setting", "deployment", "reporting"}
+_BUNDLED = re.compile(r"^(?P<first>.+?)_and_(?P<second>.+)$")
+
+
+def _unbundle(values: list[str]) -> tuple[list[str], list[str]]:
+    """A category that joins two conditions with "and" has no home for a study meeting only the first one, so
+    those studies get coded down and the field under-counts. When the first half is not a category of its own,
+    add it just below the bundled one. A value whose halves are both already categories means "both", which is
+    a real category, and is left alone."""
+    out, notes = list(values), []
+    for v in values:
+        m = _BUNDLED.match(v)
+        if not m:
+            continue
+        first, second = m.group("first"), m.group("second")
+        if first in out or second in out:          # e.g. hospital, community, hospital_and_community: "both"
+            continue
+        out.insert(out.index(v), first)
+        notes.append(f"added {first!r} below {v!r}: a study meeting only the first half had nowhere to sit")
+    return out, notes
 
 
 def validate_protocol(raw: dict) -> tuple[dict, list[str]]:
@@ -132,6 +163,8 @@ def validate_protocol(raw: dict) -> tuple[dict, list[str]]:
             if len(values) < 2:
                 problems.append(f"dropped enum {name}: needs at least two categories")
                 continue
+            values, unbundled = _unbundle(values)
+            problems += [f"{name}: {n}" for n in unbundled]
             values.append("not_stated")
             desirable = [d for d in (_snake(v) for v in f.get("desirable") or []) if d in values
                          and d != "not_stated"]

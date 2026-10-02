@@ -137,6 +137,12 @@ def main(argv: list[str] | None = None) -> int:
     p_map.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
     p_map.add_argument("--out", help="write the map to this .md file")
     p_rep = sub.add_parser("report"); p_rep.add_argument("run_id")
+    p_rr = sub.add_parser("reread", help="read a finished run's papers in full again and re-code their records")
+    p_rr.add_argument("run_id")
+    p_rr.add_argument("--limit", type=int, help="how many papers (default MAX_FULLTEXT)")
+    p_rr.add_argument("--force", action="store_true",
+                      help="read again even papers already read in full (after a protocol or prompt change)")
+    p_rr.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
     p_chat = sub.add_parser("chat", help="ask follow-up questions about a finished run")
     p_chat.add_argument("run_id")
     p_chat.add_argument("--question", "-q", help="ask one question and exit")
@@ -352,12 +358,45 @@ def main(argv: list[str] | None = None) -> int:
         for r in rows:
             print(f"{r['run_id']}  {r['status']:<7} {r['created_at']:%Y-%m-%d %H:%M}  papers={r['n_papers']:<3} "
                   f"done=[{r['done'] or ''}]  {r['q']}")
+    elif args.cmd == "reread":
+        return reread_cmd(args)
     elif args.cmd == "report":
         from research_agent.db import get_conn
 
         with get_conn() as pg:
             row = pg.execute("SELECT status, report_md, error FROM runs WHERE run_id=%s", (args.run_id,)).fetchone()
         print(row["report_md"] if row and row["report_md"] else row)
+    return 0
+
+
+def reread_cmd(args) -> int:
+    """Read a finished run's papers in full again and re-code them. Abstract-only papers often leave a
+    question-specific field empty simply because the abstract has no sentence to quote for it; this fills
+    those in. The report is left as it is: counts change only where the papers themselves say so."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools.extraction import extract_papers, extraction_coverage
+
+    ctx = RunContext.attach(args.run_id, provider=args.provider)
+    try:
+        before = extraction_coverage(ctx)
+        print(f"{before['extracted']} papers extracted; read in full: {before['by_source'].get('fulltext', 0)}, "
+              f"from the abstract only: {before['by_source'].get('abstract', 0)}")
+        res = extract_papers(ctx, depth="fulltext", limit=args.limit, force=args.force)
+        after = extraction_coverage(ctx)
+        print(f"Read now: {res['newly_extracted']}; failed: {len(res['failed'])}; "
+              f"no full text available: {sum(1 for k, v in res['fulltext_status'].items() if k != 'ok')}")
+        moved = [(f, before["field_stated_rate"].get(f, 0), r) for f, r in after["field_stated_rate"].items()
+                 if abs(r - before["field_stated_rate"].get(f, 0)) >= 0.01]
+        if moved:
+            print("\nFields that changed (share of papers stating them):")
+            for f, b, a in sorted(moved, key=lambda x: -(x[2] - x[1])):
+                print(f"  {f:<34} {b:>5.0%} -> {a:>5.0%}")
+        else:
+            print("\nNo field changed: the papers read again say no more than their abstracts did.")
+        print("\nThe report and its claims are unchanged. Re-run the researcher, or ask a follow-up, to use "
+              "the fuller records.")
+    finally:
+        ctx.close()
     return 0
 
 

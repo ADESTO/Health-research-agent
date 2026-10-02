@@ -100,7 +100,8 @@ def _paper_texts(pg, ids: list[str]) -> dict[str, str]:
         d = r["data"] or {}
         extra = [f"{x.get('value')} {x.get('quote', '')}" for x in d.get("reported_results") or []]
         extra += [str(d.get("key_findings") or ""), str(d.get("sample_size") or "")]
-        for f in ("methods", "geography", "datasets", "data_modalities"):
+        for f in ("methods", "geography", "datasets", "data_modalities", "study_designs", "populations",
+                  "organisms", "interventions", "mechanisms", "targets", "outcomes"):
             extra += [str(v) for v in (d.get(f) or [])]
         sources[r["paper_id"]] = sources.get(r["paper_id"], "") + " " + " ".join(extra)
     return sources

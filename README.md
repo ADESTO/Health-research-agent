@@ -130,18 +130,27 @@ The web page has the same list under the report (Export).
 
 ### Map of a run: graph view and mind map
 
-The web page opens a finished run in tabs: Report, Map, Ask (follow-ups) and Draft. The Map tab draws the run two
+The web page opens a finished run in tabs: Report, Map, Ask (follow-ups) and Draft. The Map tab draws the run three
 ways, built from the database with no model calls:
 
 - **Graph** (like Obsidian's graph view) answers "how is this literature connected?": papers, the concepts they
-  share (methods, data, settings, design), claims, gaps (drawn as rings), designs and disputed drivers. Drag,
-  pan, zoom, search and filter; citations between papers are dashed links.
+  share, claims, gaps (drawn as rings), designs and disputed drivers. Concepts sit in one region per section
+  (methods, data, settings, who or what was studied, interventions and outcomes, mechanisms and targets, design),
+  each on a faint wash of its section's colour; papers settle between what they use. Labels never overlap: the
+  most important are placed first and zooming in reveals more. Thin links join concepts used together more
+  often than chance; dashed pink links join two common concepts that no paper here combines, with the number
+  expected by chance. Double-click a node (or "Show only its neighbourhood") for a local view, one or two steps
+  out, with a trail back to the whole graph. The year slider shows the literature up to a year; Play steps
+  through the years.
 - **Mind map** answers "what does it contain, what supports it, where does it disagree, where are the gaps?".
-  Sections: Methods, Data, Study settings, Forecast (or study) design, Evidence, Research gaps. Concepts show
-  "3/12 papers"; each opens into its papers, and each paper into its setting, design and data. A gap opens into
-  its evidence, how the papers are distributed on that point, and the designs that address it; a claim into the
-  papers counted and not counted. It opens at the overview with the gaps expanded; "Show" steps to concepts,
-  papers or everything. On a phone it becomes an indented outline.
+  Sections as above plus Evidence and Research gaps. Concepts show "3/12 papers"; each opens into its papers,
+  labelled so they can be told apart ("Uganda · 2021 · LSTM · full text", the title on hover). Under each paper,
+  "also in" lists the other branches it sits in; click one to go there. Double-click a branch to focus on it,
+  with a trail back. "Show" steps from the overview to concepts, papers or everything. On a phone it becomes an
+  indented outline.
+- **Grid** sets any two fields against each other (methods against data types, drugs against organisms...):
+  each cell counts the papers that use both, shaded by count. Pink cells are pairs nobody combined although
+  both are common. Click a cell for its papers.
 
 The detail panel beside both views can compare papers side by side (differences stand out), show the quoted
 evidence for a concept, ask a follow-up about an item, or start a proposal draft on a gap. The data is at
@@ -271,6 +280,22 @@ orchestrated and pipeline runs with a scripted LLM that reacts to real tool resu
   uses DuckDB throughout.
 - The health filter is in `research_agent/ingestion/health_filter.py`. Run `scope` and read the
   random samples before a full ingest; tune the term list if precision looks off.
+- More PMC topics load with `pmc-ingest` and any PubMed Central search; MeSH terms keep a slice precise:
+
+      python -m research_agent.cli pmc-ingest '"drug resistance, microbial"[MeSH Terms] OR "antimicrobial resistance"' --from-year 2015 --limit 15000
+      python -m research_agent.cli pmc-ingest '"mental disorders"[MeSH Terms] OR "mental health"[MeSH Terms]' --from-year 2015 --limit 15000
+      python -m research_agent.cli pmc-ingest '"hormones"[MeSH Terms] OR "endocrine system diseases"[MeSH Terms]' --from-year 2015 --limit 10000
+      python -m research_agent.cli pmc-ingest '"pharmacology"[MeSH Terms] OR "pharmacokinetics"[MeSH Terms] OR "drug interactions"[MeSH Terms] OR "mechanism of action"' --from-year 2015 --limit 15000
+
+  Check a slice's size first with `--limit 1` (it prints how many articles match). `--limit 0` means no limit.
+- The extraction form (schema `health-v4`) covers clinical, laboratory, pharmacology and epidemiology papers
+  as well as AI and modelling ones: besides methods, data, datasets and places it records study designs,
+  populations, organisms, interventions (drugs, therapies, exposures), mechanisms (of action or resistance),
+  molecular targets and outcomes, each needing a quote from the paper like the other fields. Reported results
+  include effect estimates (odds, hazard and risk ratios) and pharmacological measurements (MIC, IC50, Cmax,
+  plasma AUC, half-life); those are listed but never ranked as better or worse. Runs read under `health-v3`
+  keep their records and their form; new runs read their papers again under v4. The malaria burden comparison
+  only appears in runs about malaria; other runs get a table of where their studies come from.
 
 ## Cost
 

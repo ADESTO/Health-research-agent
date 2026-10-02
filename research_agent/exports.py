@@ -298,8 +298,9 @@ def _export_ris(ctx):
 # ---------------------------------------------------------------- data
 def _paper_rows(ctx) -> tuple[list[str], list[list]]:
     from research_agent.tools import claims as C
-    from research_agent.tools.extraction import ENUM_FIELDS, EVIDENCE_FIELDS, LIST_FIELDS, TEXT_FIELDS, protocol_of
+    from research_agent.tools.extraction import ENUM_FIELDS, TEXT_FIELDS, fields_for, protocol_of
 
+    LIST_FIELDS, EVIDENCE_FIELDS, _ = fields_for(ctx.extraction_version)
     protocol = protocol_of(ctx) or {}
     qf = [f["name"] for f in protocol.get("fields", [])]
     header = (["paper_id", "corpus", "year", "title", "read"] + LIST_FIELDS + list(ENUM_FIELDS) + TEXT_FIELDS + qf

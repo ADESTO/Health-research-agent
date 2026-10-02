@@ -448,6 +448,47 @@ def test_groq_rejected_call_is_recovered_only_when_valid():
     assert _recover_rejected_call(Err("{}", code="other"), tools) is None
 
 
+def test_groq_request_over_the_minute_limit_is_resent_with_a_smaller_reply_allowance():
+    """Groq counts prompt + max_tokens against tokens-per-minute and rejects the whole request when the sum is over.
+    The client shrinks max_tokens by exactly the excess and sends it again, without waiting out a minute."""
+    from types import SimpleNamespace
+
+    from research_agent.llm import groq_client as GC
+
+    class TooLarge(Exception):
+        status_code = 413
+
+    seen = []
+
+    def create(**kw):
+        seen.append(kw["max_tokens"])
+        prompt = 5900
+        if prompt + kw["max_tokens"] > 8000:
+            raise TooLarge("Error code: 413 - Request too large for model `openai/gpt-oss-120b` ... on tokens per "
+                           f"minute (TPM): Limit 8000, Requested {prompt + kw['max_tokens']}, please reduce")
+        msg = SimpleNamespace(content="ok", tool_calls=[])
+        return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")],
+                               usage=SimpleNamespace(prompt_tokens=prompt, completion_tokens=3))
+
+    c = GC.GroqClient.__new__(GC.GroqClient)
+    c._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+    c.model, c.usage = "openai/gpt-oss-120b", GC.Usage()
+    assert c.chat("sys", [{"role": "user", "content": "hi"}], max_tokens=4096).text == "ok"
+    assert seen[0] == 4096 and 5900 + seen[1] <= 8000 and len(seen) == 2
+    # a prompt that alone nearly fills the minute: a clear message, not a silent cut to a useless reply
+    seen.clear()
+
+    def huge(**kw):
+        seen.append(kw["max_tokens"])
+        raise TooLarge(f"Request too large ... tokens per minute (TPM): Limit 8000, Requested {7800 + kw['max_tokens']}")
+    c._client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=huge)))
+    try:
+        c.chat("sys", [{"role": "user", "content": "hi"}], max_tokens=4096)
+        assert False, "should have raised"
+    except RuntimeError as e:
+        assert "PROMPT alone" in str(e) and len(seen) == 1
+
+
 def test_report_normalises_brackets_and_flags_unbacked_numbers():
     from research_agent.agents.report import audit_numbers, normalise_citations
 
@@ -1911,7 +1952,7 @@ def test_extraction_records_results_and_report_appends_them(loaded_db):
                        llm_factory=lambda strong=False: FakeLLM())
     with get_conn() as pg:
         rows = pg.execute("""SELECT e.data FROM run_papers rp JOIN extractions e USING (paper_id)
-                             WHERE rp.run_id=%s AND e.schema_version='health-v3'""", (res["run_id"],)).fetchall()
+                             WHERE rp.run_id=%s AND e.schema_version='health-v4'""", (res["run_id"],)).fetchall()
     results = [it for r in rows for it in r["data"].get("reported_results") or []]
     assocs = [it for r in rows for it in r["data"].get("reported_associations") or []]
     assert rows and (results or assocs)
@@ -2011,7 +2052,7 @@ def test_research_versus_burden(ctx, monkeypatch, tmp_path):
     from research_agent.tools import claims as C
 
     rows = [{"paper_id": f"p{i}", "source": "abstract", "corpus": "pmc", "year": 2021, "title": "t",
-             "data": {"geography": g}} for i, g in enumerate(
+             "data": {"geography": g, "health_domains": ["malaria"]}} for i, g in enumerate(
         [["Kenya"], ["western Kenya"], ["Kenya", "Uganda"], ["Amhara region"], ["sub-Saharan Africa"], []])]
     monkeypatch.setattr(C, "_rows", lambda _ctx: rows)
     ctx.pg.execute("DELETE FROM burden")
@@ -2035,6 +2076,14 @@ def test_research_versus_burden(ctx, monkeypatch, tmp_path):
     md = "\n".join(B.burden_markdown(ctx))
     assert "## Research versus burden (computed)" in md and "Nigeria" in md
     assert B.burden_chart(ctx, str(tmp_path / "burden.png")) and (tmp_path / "burden.png").stat().st_size > 1000
+    # the same places in a run about something else: no malaria burden, just where the studies come from
+    for r in rows:
+        r["data"]["health_domains"] = ["antimicrobial resistance"]
+    other = B.research_vs_burden(ctx)
+    assert not other["burden_applies"] and all(x["burden_share"] is None for x in other["countries"])
+    md = "\n".join(B.burden_markdown(ctx))
+    assert "## Where the studies come from (computed)" in md and "malaria" not in md and "Kenya" in md
+    assert B.burden_chart(ctx, str(tmp_path / "burden2.png")) is None
     # a CSV from another source, with country names instead of codes
     f = tmp_path / "map.csv"
     f.write_text("Country,Year,Cases\nCôte d'Ivoire,2022,\"7,000,000\"\nAtlantis,2022,5\n")
@@ -2292,6 +2341,51 @@ def test_run_graph_and_mind_map(loaded_db):
     client = TestClient(api.app)
     assert client.get(f"/runs/{rid}/graph").json()["stats"]["papers"] == n_papers
     assert client.get("/runs/00000000-0000-0000-0000-000000000000/graph").status_code == 404
+    # papers are told apart by a short tag, not a cut-off title; each lists where else it sits in the map
+    tags = [n["label"] for n in g["nodes"] if n["type"] == "paper"]
+    assert len(set(tags)) == len(tags) and all(" · " in t for t in tags)
+    first_paper = concept["children"][0]
+    assert first_paper["count"].startswith("also in") and all(k["type"] in ("attr", "more") for k in first_paper["children"])
+
+
+def test_graph_links_concepts_used_together_and_common_pairs_never_combined(loaded_db, monkeypatch):
+    """Co-use links rank by lift (a concept nearly every paper has links to nothing), and two common concepts no
+    paper combines get an "untried" link with the number expected by chance."""
+    import random
+
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.runstate import RunContext
+    from research_agent.tools import extraction as E
+    from research_agent.tools.graph import build_graph
+
+    rng = random.Random(5)
+    rows = []
+    for i in range(60):
+        lstm = i % 2 == 0
+        rows.append({"paper_id": f"PMC8{i:05d}", "source": "abstract", "corpus": "pmc", "year": 2015 + i % 8,
+                     "title": "Forecasting malaria incidence with machine learning",
+                     "data": {"methods": ["LSTM"] if lstm else ["ARIMA"],
+                              # LSTM goes with satellite data; ARIMA never does, though both are common
+                              "data_modalities": ["satellite"] if lstm and rng.random() < .9 else ["surveillance counts"],
+                              "geography": [rng.choice(["Kenya", "Uganda", "Malawi"])],
+                              "study_designs": ["modelling study"]}})          # every paper: no co-use links
+    monkeypatch.setattr(E, "_rows", lambda ctx: rows)
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: None)
+    try:
+        g = build_graph(ctx)
+    finally:
+        ctx.close()
+    by = {n["id"]: n for n in g["nodes"]}
+    pair = lambda l: {by[l["source"]]["label"], by[l["target"]]["label"]}
+    co = [l for l in g["links"] if l["type"] == "co"]
+    untried = [l for l in g["links"] if l["type"] == "untried"]
+    assert any(pair(l) == {"LSTM", "satellite"} for l in co)
+    assert not any("modelling study" in pair(l) for l in co)              # in every paper: links to nothing
+    arima_sat = [l for l in untried if pair(l) == {"ARIMA", "satellite"}]
+    assert arima_sat and arima_sat[0]["n"] == 0 and arima_sat[0]["expected"] >= 1.5
+    assert not any(pair(l) == {"LSTM", "satellite"} for l in untried)
 
 
 def test_old_runs_keep_the_extraction_version_they_were_read_with(loaded_db):
@@ -2565,3 +2659,109 @@ def test_researcher_scope_check_and_web(loaded_db, monkeypatch):
     assert client.post(f"/researchers/{rid}/status", json={"action": "stop"}).json()["ok"]
     assert client.post(f"/researchers/{rid}/status", json={"action": "resume"}).status_code == 409
     assert cli.main(["research", "status", str(rid)]) == 0
+
+
+def test_wider_extraction_form_covers_pharmacology_and_amr():
+    """health-v4: clinical, lab and pharmacology papers get their own fields, checked by quotes like the rest;
+    runs read under v3 keep the v3 form; plasma AUC is never ranked like a ROC AUC; malaria burden stays out
+    of other topics."""
+    from types import SimpleNamespace
+
+    from research_agent.tools.burden import is_malaria_run
+    from research_agent.tools.extraction import GENERAL_FIELDS, fields_for, known_fields
+    from research_agent.tools.reading import _verify
+    from research_agent.tools.results import metric_key
+
+    text = ("Title: Sertraline exposure in adolescents\n\nAbstract: In this randomised controlled trial of 84 "
+            "adolescents with major depressive disorder, sertraline was given once daily. Sertraline acts by "
+            "selective serotonin reuptake inhibition at the serotonin transporter. The AUC was 450 ng h/mL and "
+            "the odds ratio for remission was 2.1 compared with placebo. Isolates of Klebsiella pneumoniae "
+            "carried blaNDM-1.")
+    args = {"study_designs": ["randomised controlled trial"], "populations": ["adolescents with MDD"],
+            "organisms": ["Klebsiella pneumoniae"], "interventions": ["sertraline"],
+            "mechanisms": ["serotonin reuptake inhibition", "HPA axis dysregulation"],
+            "targets": ["serotonin transporter", "blaNDM-1"], "outcomes": ["remission"],
+            "reported_results": [
+                {"metric": "AUC", "value": "450", "model": "sertraline", "quote": "The AUC was 450 ng h/mL"},
+                {"metric": "odds ratio", "value": "2.1", "model": "sertraline",
+                 "quote": "the odds ratio for remission was 2.1 compared with placebo"}],
+            "evidence": {"study_designs": ["In this randomised controlled trial of 84 adolescents"],
+                         "populations": ["84 adolescents with major depressive disorder, sertraline was given"],
+                         "organisms": ["Isolates of Klebsiella pneumoniae carried blaNDM-1"],
+                         "interventions": ["sertraline was given once daily"],
+                         "mechanisms": ["the drug suppresses cortisol through the HPA axis"],   # not in the text
+                         "targets": ["selective serotonin reuptake inhibition at the serotonin transporter"]}}
+    base, _ = _verify(args, text, None, True)
+    assert base["interventions"] == ["sertraline"] and base["organisms"] == ["Klebsiella pneumoniae"]
+    assert base["study_designs"] == ["randomised controlled trial"] and base["outcomes"] == ["remission"]
+    assert base["mechanisms"] == [] and "mechanisms" in base["_unverified"]      # quote not found: dropped
+    res = {r["metric"]: r for r in base["reported_results"]}
+    assert res["plasma auc"]["higher_is_better"] is None and res["odds ratio"]["higher_is_better"] is None
+    assert metric_key("AUROC") == ("auc", True) and metric_key("AUC0-inf")[0] == "plasma auc"
+    assert metric_key("MIC90")[0] == "mic" and metric_key("hazard ratio")[0] == "hazard ratio"
+
+    v3_lists, v3_ev, _ = fields_for("health-v3")
+    assert not set(GENERAL_FIELDS) & set(v3_lists) and not set(GENERAL_FIELDS) & set(v3_ev)
+    old = SimpleNamespace(extraction_version="health-v3", notes=lambda: {})
+    new = SimpleNamespace(extraction_version="health-v4", notes=lambda: {})
+    assert "interventions" not in known_fields(old)[0] and "interventions" in known_fields(new)[0]
+
+    amr = SimpleNamespace(question="How common is carbapenem resistance in Klebsiella in East Africa?")
+    rows = [{"data": {"health_domains": ["antimicrobial resistance"]}}] * 3
+    assert not is_malaria_run(amr, rows)
+    assert is_malaria_run(SimpleNamespace(question="Can ML forecast malaria?"), [])
+    assert is_malaria_run(amr, [{"data": {"health_domains": ["malaria"]}}] * 2 + rows[:1])
+
+
+def test_protocol_enum_values_state_one_condition_each():
+    """A category joining two conditions with "and" leaves a study meeting only the first with nowhere to sit,
+    so it gets coded down and the field under-counts. The missing rung is added; a genuine "both" is left."""
+    from research_agent.opportunity.protocol import validate_protocol
+
+    clean, problems = validate_protocol({"fields": [
+        {"name": "mobile_element_context_reported", "type": "enum",
+         "values": ["none", "sequence_context_only", "plasmid_characterised_and_transfer_tested"],
+         "definition": "What the study reports about the genetic context of the resistance gene."},
+        {"name": "isolate_source_setting", "type": "enum", "values": ["hospital", "community", "hospital_and_community"],
+         "definition": "Where the isolates came from."},
+    ]})
+    ctx, setting = clean["fields"]
+    assert ctx["values"] == ["none", "sequence_context_only", "plasmid_characterised",
+                             "plasmid_characterised_and_transfer_tested", "not_stated"]
+    assert any("plasmid_characterised" in p and "nowhere to sit" in p for p in problems)
+    # "both" is a real category when each half is a category of its own: left exactly as the agent wrote it
+    assert setting["values"] == ["hospital", "community", "hospital_and_community", "not_stated"]
+
+
+def test_reread_fills_fields_that_an_abstract_could_not_quote(loaded_db, monkeypatch):
+    """A field left empty because the abstract had no sentence to quote is filled once the paper is read in
+    full; the run's report and claims are untouched."""
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.db import get_conn
+    from research_agent.runstate import RunContext
+    from research_agent.tools.extraction import extract_papers, extraction_coverage
+
+    rid = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    with get_conn() as pg:
+        report = pg.execute("SELECT report_md FROM runs WHERE run_id=%s", (rid,)).fetchone()["report_md"]
+        claims = pg.execute("SELECT count(*) n FROM claims WHERE run_id=%s", (rid,)).fetchone()["n"]
+        # put the run back as if every paper had been read from its abstract only
+        pg.execute("""UPDATE extractions SET source='abstract' WHERE schema_version=%s
+                      AND paper_id IN (SELECT paper_id FROM run_papers WHERE run_id=%s)""",
+                   (settings.extraction_schema_version, rid))
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False, step=None: FakeLLM())
+    try:
+        assert extraction_coverage(ctx)["by_source"]["fulltext"] == 0
+        res = extract_papers(ctx, depth="fulltext", limit=3)
+        read_in_full = extraction_coverage(ctx)["by_source"]["fulltext"]
+        assert 0 < read_in_full <= res["newly_extracted"] == 3      # a paper with no full text stays on its abstract
+        # papers already read in full are skipped; only the ones still on their abstract are tried again
+        assert extract_papers(ctx, depth="fulltext", limit=3)["newly_extracted"] == 3 - read_in_full
+        # force reads them all again, for a re-read after the protocol fields or the instructions changed
+        assert extract_papers(ctx, depth="fulltext", limit=3, force=True)["newly_extracted"] == 3
+    finally:
+        ctx.close()
+    with get_conn() as pg:
+        assert pg.execute("SELECT report_md FROM runs WHERE run_id=%s", (rid,)).fetchone()["report_md"] == report
+        assert pg.execute("SELECT count(*) n FROM claims WHERE run_id=%s", (rid,)).fetchone()["n"] == claims

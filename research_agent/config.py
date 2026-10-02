@@ -95,14 +95,16 @@ class Settings:
     # agents whose final answer is a long structured list (map protocol, gap reasoning, designs)
     long_output_max_tokens: int = int(os.getenv("LONG_OUTPUT_MAX_TOKENS", "8192"))
     # evidence quotes make extractions longer; a cut-off extraction now fails loudly instead of saving blanks
-    extraction_max_tokens: int = int(os.getenv("EXTRACTION_MAX_TOKENS", "2000"))
+    extraction_max_tokens: int = int(os.getenv("EXTRACTION_MAX_TOKENS", "2800"))
     tool_result_chars: int = int(os.getenv("TOOL_RESULT_CHARS", "9000"))
     # When an agent's conversation exceeds this many characters, older tool results are shortened.
     context_budget_chars: int = int(os.getenv("CONTEXT_BUDGET_CHARS", "60000"))
 
     # v2 adds evidence quotes; v1 extractions are not reused because their fields were never checked
     # v3 adds reported results and associations (what papers found); v2 records are read again when needed
-    extraction_schema_version: str = "health-v3"
+    # v4 widens the form beyond AI papers (study designs, populations, organisms, interventions, mechanisms,
+    #    targets, outcomes); runs read under v3 keep their records and their form
+    extraction_schema_version: str = "health-v4"
     extra: dict = field(default_factory=dict)
 
 

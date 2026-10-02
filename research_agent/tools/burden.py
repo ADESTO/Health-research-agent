@@ -146,15 +146,32 @@ def _latest_burden(pg) -> tuple[dict[str, float], int | None, str | None]:
 
 
 # ---------------------------------------------------------------- research versus burden
+_MALARIA = re.compile(r"malaria|plasmod", re.I)
+
+
+def is_malaria_run(ctx, rows=None) -> bool:
+    """The burden data are malaria cases, so they only mean something for a run about malaria: the question
+    names it, or at least half of the analysed papers have it as a health domain."""
+    from research_agent.tools.extraction import _values
+
+    if _MALARIA.search(ctx.question or ""):
+        return True
+    rows = rows or []
+    hits = sum(1 for r in rows if any(_MALARIA.search(str(v)) for v in _values(r["data"], "health_domains")))
+    return bool(rows) and hits * 2 >= len(rows)
+
+
 def research_vs_burden(ctx) -> dict:
-    """Countries: papers analysed in this run that use data from them, against their share of malaria cases."""
+    """Countries: papers analysed in this run that use data from them, against their share of malaria cases
+    (only for runs about malaria; other runs get where their studies come from)."""
     from research_agent.tools import claims as C
     from research_agent.tools.extraction import _values
 
     papers: dict[str, set] = {}
     regions: dict[str, set] = {}
     unplaced = 0
-    for r in C._rows(ctx):
+    all_rows = C._rows(ctx)
+    for r in all_rows:
         isos, regs = set(), set()
         for g in _values(r["data"], "geography"):
             iso, region = to_country(g)
@@ -168,8 +185,9 @@ def research_vs_burden(ctx) -> dict:
             regions.setdefault(g, set()).add(r["paper_id"])
         if not isos and not regs:
             unplaced += 1
+    applies = is_malaria_run(ctx, all_rows)
     try:
-        cases, year, source = _latest_burden(ctx.pg)
+        cases, year, source = _latest_burden(ctx.pg) if applies else ({}, None, None)
     except Exception:
         cases, year, source = {}, None, None
     total_cases = sum(cases.values()) or 0
@@ -188,6 +206,7 @@ def research_vs_burden(ctx) -> dict:
     over = [x for x in rows if x["burden_share"] is not None and x["papers"] >= 2 and (x["ratio"] or 0) > 2]
     return {"countries": rows, "regions": {k: len(v) for k, v in sorted(regions.items(), key=lambda kv: -len(kv[1]))},
             "papers_without_place": unplaced, "burden_year": year, "burden_source": source,
+            "burden_applies": applies,
             "under_researched": under[:10], "over_researched": sorted(over, key=lambda x: -x["ratio"])[:10],
             "note": "Shares are of papers with a country-level place, and of cases in the burden data. A paper "
                     "using data from several countries counts once for each."}
@@ -198,6 +217,15 @@ def burden_markdown(ctx) -> list[str]:
     placed = [x for x in rb["countries"] if x["papers"]]
     if not placed:
         return []
+    if not rb.get("burden_applies", True):
+        L = ["## Where the studies come from (computed)", "",
+             "Countries the analysed papers take their data or samples from.", "",
+             "| Country | Papers |", "|---|---|"]
+        L += [f"| {x['country']} | {x['papers']} |" for x in sorted(placed, key=lambda y: -y["papers"])[:15]] + [""]
+        if rb["regions"]:
+            L += ["Papers describing only a region: " + ", ".join(f"{k} ({v})" for k, v in rb["regions"].items())
+                  + ".", ""]
+        return L
     L = ["## Research versus burden (computed)", ""]
     if rb["burden_year"]:
         L += [f"Where the analysed papers' data come from, against each country's share of estimated malaria "
