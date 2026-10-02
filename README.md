@@ -1,7 +1,8 @@
 # Health Research Intelligence Agent
 
 A multi-agent system that researches questions over the health-research subset of arXiv
-(`secemp9/arxiv-complete`) and writes an evidence-checked report.
+(`secemp9/arxiv-complete`) and topic slices of PubMed Central's open-access set, and writes an
+evidence-checked report.
 
 ```
                                  USER QUESTION
@@ -21,7 +22,16 @@ A multi-agent system that researches questions over the health-research subset o
                                            ▼
                  SHARED RUN STATE (Postgres): shortlist · extractions · notes · claims · events
                                            │
-                   corpus: papers + tsvector + pgvector (HNSW) · all-arXiv year denominators
+      ┌───────────────┬───────────────┬────┴──────────┬───────────────┬───────────────┐
+      ▼               ▼               ▼               ▼               ▼               ▼
+  FOLLOW-UPS      MAP VIEWS       DRAFTS          RESEARCHER      RE-READ         EXPORTS
+  count again,    graph · mind    proposal or     its own         papers read     md · docx · bib
+  read in full,   map · grid,     review, with    questions,      again in        · ris · csv · xlsx
+  same checks     from the same   real papers     tested and      full, fields    · protocol
+  as the report   records         cited           graded by code  re-coded        · PRISMA · burden
+
+      corpus: arXiv + PubMed Central (open access) · tsvector + pgvector (HNSW) · year denominators
+              per corpus, so a trend is normalised against the corpus it was measured in
 ```
 
 ## What makes it more than RAG
@@ -103,6 +113,12 @@ it downloads those papers, reads them, updates their records and counts again, r
 and after and which papers changed. The conversation is saved with the run. In the web page, a panel under the report does the same,
 and clicking any id in the report (C12, G2, N1, H4, D1) starts a question about it.
 API: `POST /runs/{id}/followups {"question": ..., "about": "C12"}`, then poll `GET /runs/{id}/followups`.
+
+Re-reading a finished run: `python -m research_agent.cli reread <run_id> [--limit N] [--force]`. A field is
+often empty only because the paper was read from its abstract, which carries no sentence to quote for it;
+this reads the run's papers in full again and re-codes both the general and the question-specific fields,
+then prints which fields moved. `--force` reads again even papers already read in full, for after the
+reading instructions change. The report and its claims are left as they are.
 
 ### What papers found, and how the literature fits together
 
@@ -305,14 +321,38 @@ across runs, so repeated questions on overlapping literature get cheaper. `MAX_S
 
 ## Layout
 
+An LLM reads a paper in exactly one place, `tools/reading.py`, and writes a structured record with a quote
+behind every value. Everything after that is SQL and Python over those records, so counts, trends, gaps,
+map items and the researcher's statistics are computed, not generated.
+
+```
+papers ─ingestion/─→ Postgres+pgvector ─search─→ shortlist ─reading.py─→ extractions (quoted)
+                                                                              │
+                        ┌─────────────────────────────────────────────────────┤
+                        ↓                        ↓                ↓           ↓
+                 agents/ (a report)      opportunity/ (a map)  research/   tools/graph.py
+                        │                        │          (own findings)  (map views)
+                        └──→ claims, checked by code against the extractions ←┘
+```
+
 ```
 research_agent/
-  agents/        base loop, 7 specialists, orchestrator, report finalisation
-  tools/         search+shortlist, extraction+analysis, trends, claims/evidence
-  ingestion/     health filter, DuckDB→pgvector loader, full-text fetch + LaTeX cleaning
+  agents/        base loop, 7 specialists, orchestrator, report finalisation,
+                 follow-up questions, number check, proposal and review drafts
+  opportunity/   research opportunity map: protocol (per-run extra fields), agents, scoring, render
+  research/      open-ended researcher: patterns (statistics), gauntlet (the checks a
+                 finding must survive), researcher (agenda, tools, drift controls)
+  tools/         search+shortlist, extraction+analysis, reading, re-checks, trends,
+                 claims/evidence, reported results, citations, graph and mind map, burden, review record
+  ingestion/     health filter, DuckDB→pgvector loader, PMC topic slices, full-text fetch + cleaning
   llm/           provider seam: anthropic | groq | deepseek (same internal message format)
-  db/            schema.sql
-  api/           FastAPI
+  db/            schema.sql: papers, extractions, runs, claims, drafts, researchers, jobs…
+  api/           FastAPI + the single-page web app (api/static/index.html)
+  jobs.py        queue: runs, maps, drafts and researcher cycles, worked by the API or `cli worker`
+  runstate.py    one run's context: its papers, notes, token budget, extraction schema version
   cli.py
-tests/           fixtures, scripted LLM, end-to-end tests
+tests/           fixtures, scripted LLM, end-to-end tests (no API keys, real Postgres)
 ```
+
+A run's work is kept in Postgres rather than in memory, so a run can be resumed, re-read (`reread`),
+asked follow-up questions, drawn as a map, drafted from, and handed to the researcher, all after it ends.

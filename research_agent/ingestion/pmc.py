@@ -102,20 +102,33 @@ class PMCClient:
 MAX_IDS = 9999   # esearch returns at most this many ids per request
 
 
-def _date_term(query: str, start: date, end: date) -> str:
-    return f'({query}) AND {OA_FILTER} AND ("{start:%Y/%m/%d}"[PDAT] : "{end:%Y/%m/%d}"[PDAT])'
+def _date_term(query: str, start: date, end: date, field: str = "PDAT", extra: str = "") -> str:
+    return (f'({query}) AND {OA_FILTER} AND ("{start:%Y/%m/%d}"[{field}] : "{end:%Y/%m/%d}"[{field}])'
+            + extra)
 
 
-def _ids_in_range(client: PMCClient, query: str, start: date, end: date, log=print) -> list[str]:
-    root = ET.fromstring(client.get("esearch", term=_date_term(query, start, end), retmax=MAX_IDS))
+def _ids_in_range(client: PMCClient, query: str, start: date, end: date, log=print,
+                  field: str = "PDAT", extra: str = "") -> list[str]:
+    """Every id matching the query in a date range, by halving the range until each search fits under the
+    cap esearch will return."""
+    root = ET.fromstring(client.get("esearch", term=_date_term(query, start, end, field, extra), retmax=MAX_IDS))
     count = int(root.findtext("Count") or 0)
-    if count <= MAX_IDS or start >= end:
-        if count > MAX_IDS:
-            log(f"  warning: {count:,} matches on {start}; only the first {MAX_IDS:,} are reachable")
-        return [i.text for i in root.findall(".//IdList/Id") if i.text]
-    mid = start + (end - start) // 2
-    return (_ids_in_range(client, query, start, mid, log)
-            + _ids_in_range(client, query, mid + timedelta(days=1), end, log))
+    ids = [i.text for i in root.findall(".//IdList/Id") if i.text]
+    if count <= MAX_IDS:
+        return ids
+    if start < end:
+        mid = start + (end - start) // 2
+        return (_ids_in_range(client, query, start, mid, log, field, extra)
+                + _ids_in_range(client, query, mid + timedelta(days=1), end, log, field, extra))
+    if field == "PDAT":
+        # One publication date over the cap. PubMed dates an article with no stated day to 1 January, so a
+        # single "day" can hold a whole year of them. Split that day again by the date each record entered
+        # PubMed, which is spread out, instead of losing everything past the cap.
+        day = f' AND ("{start:%Y/%m/%d}"[PDAT] : "{start:%Y/%m/%d}"[PDAT])'
+        return _ids_in_range(client, query, date(1900, 1, 1), date.today(), log, field="CRDT", extra=day)
+    log(f"  warning: {count:,} matches on {start} ({field}); only the first {MAX_IDS:,} are reachable. "
+        "Narrow the search (add terms, or ingest a few years at a time).")
+    return ids
 
 
 def search_ids(client: PMCClient, query: str, from_year: int | None = None, to_year: int | None = None,

@@ -34,11 +34,15 @@ def _to_openai_messages(system: str, messages: list[dict]) -> list[dict]:
     return out
 
 
-def _recover_rejected_call(exc, tools) -> LLMResponse | None:
+def _recover_rejected_call(exc, tools, force_tool=None) -> LLMResponse | None:
     """Groq validates tool arguments against the JSON schema on its side and rejects the whole
     response on any mismatch (e.g. a string where the schema says array). When the rejected call is
-    still valid JSON naming a real tool, return it instead: the agent loop repairs minor type
-    mismatches itself. Only ever runs on a Groq `tool_use_failed` error."""
+    still valid JSON carrying a usable payload, return it instead: the agent loop repairs minor type
+    mismatches itself. Only ever runs on a Groq `tool_use_failed` error.
+
+    Open-weight models also mislabel the call itself, most often as "json" or "function" with the real
+    arguments inside. When exactly one tool was asked for, the name carries no information anyway, so the
+    payload is taken as a call to that tool."""
     body = getattr(exc, "body", None)
     err = body.get("error", body) if isinstance(body, dict) else None
     if not isinstance(err, dict) or err.get("code") != "tool_use_failed" or not tools:
@@ -56,7 +60,18 @@ def _recover_rejected_call(exc, tools) -> LLMResponse | None:
             args = json.loads(args)
         except json.JSONDecodeError:
             return None
-    if name not in {t["name"] for t in tools} or not isinstance(args, dict):
+    known = {t["name"] for t in tools}
+    if name not in known:
+        # The name is wrong, not the payload. Only safe when there is no choice of tool to get wrong, and
+        # only with something to act on: an empty payload is worse than asking the model again.
+        only = force_tool if force_tool in known else (tools[0]["name"] if len(tools) == 1 else None)
+        if not isinstance(args, dict) or not args:
+            args = {k: v for k, v in gen.items() if k not in ("name", "arguments", "parameters")} \
+                if isinstance(gen, dict) else {}            # the payload sent as the object itself
+        if not only or not args:
+            return None
+        name = only
+    if not isinstance(args, dict):
         return None
     call_id = f"call_{uuid.uuid4().hex[:12]}"
     content = [{"type": "tool_use", "id": call_id, "name": name, "input": args}]
@@ -121,7 +136,7 @@ class GroqClient:
                 # over: give the reply that much less room and send it again (most replies are far shorter).
                 kwargs["max_tokens"] = fit
         if resp is None:
-            recovered = _recover_rejected_call(exc, tools)
+            recovered = _recover_rejected_call(exc, tools, force_tool)
             if recovered is not None:
                 return recovered
             if getattr(exc, "status_code", None) == 413 or "request too large" in str(exc).lower():

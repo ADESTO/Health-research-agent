@@ -446,6 +446,17 @@ def test_groq_rejected_call_is_recovered_only_when_valid():
     assert _recover_rejected_call(Err('{"name": "finish", "arguments": {"obs'), tools) is None  # truncated
     assert _recover_rejected_call(Err('{"name": "nope", "arguments": {}}'), tools) is None     # unknown tool
     assert _recover_rejected_call(Err("{}", code="other"), tools) is None
+    # open-weight models also mislabel the call itself, most often as "json", with the real payload inside.
+    # The name carries no information when only one tool was asked for, so the payload is used.
+    mis = Err('{"name": "json", "arguments": {"observations": "x"}}')
+    assert _recover_rejected_call(mis, tools, "finish").tool_calls[0].name == "finish"
+    assert _recover_rejected_call(mis, tools).tool_calls[0].name == "finish"          # only one tool offered
+    bare = Err('{"name": "json", "observations": "x"}')                               # payload as the object
+    assert _recover_rejected_call(bare, tools, "finish").tool_calls[0].input == {"observations": "x"}
+    two = tools + [{"name": "other", "description": "", "input_schema": {"type": "object"}}]
+    assert _recover_rejected_call(mis, two) is None             # a real choice of tool: never guess which
+    empty = Err('{"name": "json", "arguments": {}}')
+    assert _recover_rejected_call(empty, tools, "finish") is None    # nothing to act on: ask again instead
 
 
 def test_groq_request_over_the_minute_limit_is_resent_with_a_smaller_reply_allowance():
@@ -968,6 +979,33 @@ def test_pmc_search_splits_large_results_and_retries(monkeypatch):
     ids = pmc.search_ids(client, "malaria", 2018, 2021, log=lambda *_: None)
     assert len(ids) == 12 and len(set(ids)) == 12 and all(i.startswith("PMC") for i in ids)
     assert len(calls) > 1                       # the range was split to stay under the cap
+
+    # One publication date over the cap: PubMed dates an article with no stated day to 1 January, so a single
+    # "day" can hold a year of them. That day is split again by the date each record entered PubMed.
+    seen = []
+
+    def jan_first(request):
+        term = request.url.params["term"]
+        seen.append(term)
+        days = __import__("re").findall(r'"(\d{4}/\d\d/\d\d)"\[PDAT\]', term)
+        if "[CRDT]" in term:                      # the 1 January pile, re-split by creation date: small windows
+            lo = int(__import__("re").findall(r'"(\d{4})/\d\d/\d\d"\[CRDT\]', term)[0])
+            ids = [f"crdt{lo}{k}" for k in range(3)]
+        elif days[0] <= "2012/01/01" <= days[1]:  # every article with no stated day, piled on one date
+            return httpx.Response(200, text="<eSearchResult><Count>10110</Count><IdList>"
+                                            "<Id>a</Id><Id>b</Id><Id>c</Id><Id>d</Id></IdList></eSearchResult>")
+        else:
+            ids = ["x"] if days[0] == days[1] else ["x", "y"]
+        return httpx.Response(200, text=f"<eSearchResult><Count>{len(ids)}</Count><IdList>"
+                                        + "".join(f"<Id>{i}</Id>" for i in ids) + "</IdList></eSearchResult>")
+
+    warned = []
+    jan = pmc.PMCClient(transport=httpx.MockTransport(jan_first))
+    jan._min_gap = 0
+    got = pmc.search_ids(jan, "malaria", 2012, 2012, log=warned.append)
+    assert any("[CRDT]" in t and '"2012/01/01"[PDAT]' in t for t in seen)   # the day kept, split on creation date
+    assert any("crdt" in i for i in got) and not warned                     # ids the cap would have hidden
+    assert all(i.startswith("PMC") for i in got)
 
     # transient 503s are retried instead of killing a long ingest
     flaky = pmc.PMCClient(transport=_pmc_transport([_pmc_article("PMC777", "Malaria", "by")], fail_first=2))
