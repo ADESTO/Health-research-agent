@@ -131,11 +131,15 @@ def main(argv: list[str] | None = None) -> int:
     p_ask.add_argument("--mode", choices=["orchestrated", "pipeline"], default="orchestrated")
     p_ask.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
     p_ask.add_argument("--out", help="write the report to this .md file")
+    p_ask.add_argument("--systematic", action="store_true",
+                       help="find papers by a fixed search, screen every hit against the protocol, and analyse all eligible ones (a random sample past SYSTEMATIC_MAX_ANALYSED) instead of letting an agent choose")
     p_map = sub.add_parser("map", help="build a Research Opportunity Map for a question")
     p_map.add_argument("question", nargs="?", help="omit when using --resume")
     p_map.add_argument("--resume", metavar="RUN_ID", help="continue a failed map run")
     p_map.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
     p_map.add_argument("--out", help="write the map to this .md file")
+    p_map.add_argument("--systematic", action="store_true",
+                       help="find papers by a fixed search, screen every hit against the protocol, and analyse all eligible ones (a random sample past SYSTEMATIC_MAX_ANALYSED) instead of letting an agent choose")
     p_rep = sub.add_parser("report"); p_rep.add_argument("run_id")
     p_fp = sub.add_parser("fieldpass", help="fill ONE field from full text in the papers that left it blank")
     p_fp.add_argument("run_id")
@@ -305,7 +309,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"will re-run: {', '.join(redo)}")
         try:
             res = run_research(args.question, mode=args.mode, provider=args.provider, on_event=_print_event,
-                               resume=args.resume)
+                               resume=args.resume, search="systematic" if args.systematic else None)
         except Exception as exc:
             print(f"\n✖ Run stopped: {exc}")
             if getattr(exc, "run_id", None):
@@ -323,7 +327,8 @@ def main(argv: list[str] | None = None) -> int:
         if not args.question and not args.resume:
             ap.error("give a question, or --resume RUN_ID")
         try:
-            res = run_map(args.question, provider=args.provider, on_event=_print_event, resume=args.resume)
+            res = run_map(args.question, provider=args.provider, on_event=_print_event, resume=args.resume,
+                          search="systematic" if args.systematic else None)
         except Exception as exc:
             print(f"\n✖ Map stopped: {exc}")
             if getattr(exc, "run_id", None):

@@ -35,6 +35,30 @@ def _grade(g: dict) -> str:
     return f"**{g['grade']}**: " + "; ".join(g["reasons"])
 
 
+def _corpus_lines(c: dict) -> list[str]:
+    """The corpus check in the report: titles and abstracts across the topic, then full texts, then the papers
+    a reader should open before believing the gap."""
+    unread = c.get("not_analysed") or 0
+    L = [f"- **Corpus check:** {c['matching']} of {c['topic_total']} topic papers in the whole corpus match "
+         f"`{c['search']}` in their title or abstract"
+         + (f"; {unread} of them were not analysed in this run." if unread else ".")]
+    ft = c.get("fulltext")
+    if ft and ft.get("full_texts_read"):
+        L.append(f"- **Full texts:** {ft['matching']} of the {ft['full_texts_read']} topic papers whose full text "
+                 f"could be searched mention it (of the {ft['topic_papers_checked']} best matches to the topic). "
+                 "A mention is not a finding: the passages are below.")
+        for cand in ft.get("candidates", [])[:5]:
+            tag = "" if cand["analysed_in_this_run"] else " (not analysed in this run)"
+            L.append(f"  - [{cand['paper_id']}]{tag}: \"{cand['passage'][:320]}\"")
+    elif ft is not None:
+        L.append("- **Full texts:** none of the topic papers' full texts could be searched, so this rests on "
+                 "titles and abstracts alone.")
+    elif unread:
+        ex = ", ".join(f"[{x['paper_id']}]" for x in (c.get("not_analysed_examples") or [])[:5])
+        L.append(f"- **Not analysed but mentioning it:** {ex}. Read these before treating the gap as real.")
+    return L
+
+
 def render_map(question: str, protocol: dict, m: dict, reasoning: dict | None, designs: list[dict],
                notes: dict) -> str:
     L: list[str] = [f"# Research Opportunity Map", "", f"**Question:** {question}", ""]
@@ -86,9 +110,7 @@ def render_map(question: str, protocol: dict, m: dict, reasoning: dict | None, d
               f"{g['N_fulltext']} papers read in full.{_members(g)}",
               f"- **Gap confidence:** {_grade(g['confidence'])}"]
         if g.get("corpus_check"):
-            c = g["corpus_check"]
-            L += [f"- **Corpus check:** {c['matching']} of {c['topic_total']} topic papers in the whole corpus "
-                  f"match `{c['search']}` in their title or abstract (full texts are not searched here)."]
+            L += _corpus_lines(g["corpus_check"])
         r = by_gap.get(g["id"])
         if r:
             L += _reasoning_lines(r)

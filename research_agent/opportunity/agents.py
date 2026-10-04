@@ -10,6 +10,8 @@ validation strategy and baseline, each tied to map items and to papers that supp
 """
 from __future__ import annotations
 
+import re
+
 from research_agent.agents.base import Agent
 from research_agent.tools.base import STR, STRS, Tool, obj
 from research_agent.tools.claims import PREDICATE_DOC, TEST_TOOL, _measure, _norm, _validate
@@ -179,6 +181,12 @@ Rules:
 - Each hypothesis is tested once; to use a result again, cite its H id rather than re-running it.
 - Reasoning you cannot test may go in `speculation`, clearly labelled.
 - Cite papers only by ids that tools returned.
+- Say what your counts are counted over. A count over the analysed papers is about the analysed papers:
+  write "none of the 91 analysed papers", never "no paper in the corpus" or "the field". Each gap's
+  corpus_check says how many topic papers OUTSIDE the analysed set mention it (not_analysed) and, where full
+  texts were searched, gives the passages. Those papers were not read: name how many, and read the passages
+  before calling the practice absent. A passage that says a study did NOT do it is evidence for the gap; one
+  that says it did is evidence against.
 Start with get_map. Aim for 2-4 tested hypotheses per high or moderate confidence gap.""",
     tools=MAP_TOOLS + [TEST_TOOL, HYPOTHESIS_TOOL, PASSAGE_TOOL, RECHECK_TOOL]
     + [t for t in RESULT_TOOLS if t.name == "contradictions"]
@@ -251,6 +259,59 @@ field already uses.""",
 
 
 # ---------------------------------------------------------------- post-checks on the agents' output
+# A sentence about absence ("no paper", "none of", "0/91") that names the corpus, the literature or the field
+# when what was counted is the analysed papers. The claims layer already refuses that wording; gap reasoning
+# never went through it, which is how "No paper in the corpus reports a rainfall x temperature interaction"
+# reached a report beside a corpus check that had found ten candidate papers.
+_ABSENCE = re.compile(r"\b(no|none|never|zero|nothing|absent|absence)\b|\b0\s*(/|of)\s*\d", re.I)
+_WIDE = [
+    (re.compile(r"\bno (paper|papers|study|studies) in the (whole |wider |entire |full )?(corpus|literature|field)\b", re.I),
+     "no analysed paper"),
+    (re.compile(r"\bnone of the (papers|studies) in the (whole |wider |entire |full )?(corpus|literature|field)\b", re.I),
+     "none of the analysed papers"),
+    (re.compile(r"\b(in|across|throughout) the (whole |wider |entire |full )?(corpus|literature|field)\b", re.I),
+     "in the analysed papers"),
+]
+
+
+def _gap_corpus(m: dict, gid: str) -> dict:
+    return next((g.get("corpus_check") or {} for g in m.get("gaps", []) if g.get("id") == gid), {})
+
+
+def scope_wording(text: str, corpus: dict | None = None) -> tuple[str, str | None]:
+    """Rewrite absence sentences that claim more than was counted, and add what the corpus check found
+    outside the analysed papers. Returns (text, a note saying what was changed, or None)."""
+    if not text:
+        return text, None
+    changed = False
+    out = []
+    for sentence in re.split(r"(?<=[.!?])\s+", text):
+        if _ABSENCE.search(sentence):
+            for rx, rep in _WIDE:
+                # keep a capital where the sentence had one ("No paper in the corpus" -> "No analysed paper")
+                sentence, n = rx.subn(lambda m, r=rep: r[0].upper() + r[1:] if m.group(0)[0].isupper() else r,
+                                      sentence)
+                changed = changed or bool(n)
+        out.append(sentence)
+    text = " ".join(out)
+    unread = (corpus or {}).get("not_analysed") or 0
+    ft = (corpus or {}).get("fulltext") or {}
+    extra = []
+    if unread and "not analysed" not in text and "not read" not in text:
+        extra.append(f"{unread} further topic papers mention it in their title or abstract and were not analysed.")
+    if ft.get("matching") and "full text" not in text.lower():
+        extra.append(f"{ft['matching']} of {ft['full_texts_read']} topic papers mention it in their full text; "
+                     "a mention is not a finding, and their passages are listed with the corpus check.")
+    if extra:
+        text = (text.rstrip() + " " + " ".join(extra)).strip()
+    note = None
+    if changed or extra:
+        note = ("absence was stated for the corpus but counted over the analysed papers; the wording was "
+                "narrowed" if changed else "") + ("; " if changed and extra else "") + \
+               ("what the corpus check found outside the analysed papers was added" if extra else "")
+    return text, note
+
+
 def check_gap_reasoning(ctx, raw: dict) -> tuple[dict, list[str]]:
     """Keep only references that exist: map ids, tested hypotheses, shortlisted papers."""
     m = _map(ctx)
@@ -280,12 +341,15 @@ def check_gap_reasoning(ctx, raw: dict) -> tuple[dict, list[str]]:
                 near.append(nm)
             else:
                 dropped.append(f"{gid}: near miss {nm.get('paper_id')} is not in the analysed papers")
-        out.append({"gap_id": gid, "explanation": g.get("explanation", ""),
+        scoped, note = scope_wording(g.get("explanation", ""), _gap_corpus(m, gid))
+        if note:
+            dropped.append(f"{gid}: {note}")
+        out.append({"gap_id": gid, "explanation": scoped,
                     "hypotheses": [hyps[h] for h in hids], "artifact_risk": g.get("artifact_risk"),
-                    "artifact_reason": g.get("artifact_reason", ""), "linked_gaps": links,
+                    "artifact_reason": scope_wording(g.get("artifact_reason", ""))[0], "linked_gaps": links,
                     "near_misses": near, "would_change_if": g.get("would_change_if", ""),
                     "speculation": g.get("speculation", "")})
-    return {"gaps": out, "cross_cutting": raw.get("cross_cutting") or []}, dropped
+    return {"gaps": out, "cross_cutting": [scope_wording(str(x))[0] for x in raw.get("cross_cutting") or []]}, dropped
 
 
 def _paper_card(ctx, pid: str, rows_by_id: dict) -> dict:

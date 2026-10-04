@@ -101,6 +101,13 @@ class Settings:
     # come out thin: the same allowance the extraction step gets, unless set otherwise
     # how close in meaning two driver or outcome phrases must be to count as the same thing when papers'
     # statements are set beside each other (tools/corroboration.py); 1 turns meaning-based merging off
+    # a gap's corpus check also searches the full texts of up to this many papers on the topic (fetched once,
+    # kept for later runs); 0 searches titles and abstracts only
+    # systematic search: at most this many identified papers are screened, and this many eligible ones analysed;
+    # beyond either, a seeded random sample is taken so the shares stay unbiased
+    systematic_max_screened: int = int(os.getenv("SYSTEMATIC_MAX_SCREENED", "600"))
+    systematic_max_analysed: int = int(os.getenv("SYSTEMATIC_MAX_ANALYSED", "150"))
+    fulltext_check_max: int = int(os.getenv("FULLTEXT_CHECK_MAX", "300"))
     corroboration_similarity: float = float(os.getenv("CORROBORATION_SIMILARITY", "0.88"))
     resolve_max_papers: int = int(os.getenv("RESOLVE_MAX_PAPERS", "0")) or int(os.getenv("MAX_FULLTEXT", "20"))
     # agents whose final answer is a long structured list (map protocol, gap reasoning, designs)

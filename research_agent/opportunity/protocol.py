@@ -102,14 +102,21 @@ Rules:
   query names the practice only (e.g. "spatial cross-validation" OR "leave-one-district-out"); the topic is
   added separately from topic_query.
 You may use hybrid_search and corpus_count to see how papers in this area describe things.
-Also write the setting (population, place, time frame), 3-6 inclusion and exclusion criteria, and a
-topic_query that finds this topic's papers across the corpus (used to check whether a gap is real).""",
+Also write the setting (population, place, time frame), 3-6 inclusion and exclusion criteria, a
+topic_query that finds this topic's papers across the corpus (used to check whether a gap is real), and a
+search_query for a systematic search: the question's own concepts joined with AND, each with its synonyms
+and spellings joined with OR, written to find EVERY eligible study rather than the best few (e.g. malaria AND
+(rainfall OR precipitation OR temperature) AND (Kenya OR Uganda OR Tanzania OR "East Africa")). Check its
+yield with corpus_count: aim for roughly 30 to 600 papers; if it finds thousands it is the topic, not the
+question.""",
     tools=[t for t in SEARCH_TOOLS if t.name in ("hybrid_search", "corpus_count")],
     finish_schema=obj({
         "setting": STR,
         "topic_query": {"type": "string", "description": "Keyword query (web-search syntax) that finds papers "
                                                           "on this question's topic across the corpus, e.g. "
                                                           "malaria (forecast OR prediction OR \"early warning\")"},
+        "search_query": {"type": "string", "description": "Boolean query for a systematic search: concepts "
+                                                           "joined with AND, synonyms with OR"},
         "inclusion": STRS,
         "exclusion": STRS,
         "fields": {"type": "array", "items": _FIELD_SPEC},
@@ -268,6 +275,7 @@ def validate_protocol(raw: dict) -> tuple[dict, list[str]]:
         problems.append("no usable question-specific fields")
     clean = {"setting": _clip(raw.get("setting"), 900),
              "topic_query": " ".join(str(raw.get("topic_query") or "").split())[:300],
+             "search_query": " ".join(str(raw.get("search_query") or "").split())[:600],
              "inclusion": [_clip(x, 400) for x in (raw.get("inclusion") or [])][:8],
              "exclusion": [_clip(x, 400) for x in (raw.get("exclusion") or [])][:8],
              "fields": fields}

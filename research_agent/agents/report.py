@@ -336,10 +336,10 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
     except Exception:
         pass
     try:
-        from research_agent.tools import cohort
+        from research_agent.tools import cohort, systematic
 
-        # before anything else that quotes a denominator: it says what the denominators are
-        computed = cohort.markdown(ctx) + computed
+        # before anything else that quotes a denominator: how the papers were found, and what is counted
+        computed = systematic.markdown(ctx) + cohort.markdown(ctx) + computed
     except Exception:
         pass
     try:

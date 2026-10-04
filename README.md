@@ -264,6 +264,65 @@ The pass is bounded twice, by claims and by papers over the whole pass, so a run
 `RESOLVE_MAX_CLAIMS` (4), `RESOLVE_PAPERS_PER_CLAIM` (8), `RESOLVE_MAX_PAPERS` (defaults to `MAX_FULLTEXT`).
 `RESOLVE_EVIDENCE=0` turns it off.
 
+### Purposive or systematic: how the papers are found
+
+By default an agent searches, reads results and **chooses** up to `MAX_SHORTLIST` papers. That is quick and
+right for exploring a question, but every number it produces is a share of what the agent picked, and its
+gaps can be overturned by papers it never added.
+
+A **systematic search** replaces the choice with a procedure anyone can repeat:
+
+1. **Identify.** The protocol writes a `search_query` for the question itself (concepts joined with AND,
+   synonyms with OR, checked with `corpus_count` to land roughly between 30 and 600 papers) before any result
+   is read. Every paper it matches is logged as identified.
+2. **Screen.** Each paper's title and abstract is judged against the protocol's inclusion and exclusion
+   criteria, twenty to a call, and every decision is logged with its reason. A paper the abstract does not
+   settle is kept for the full read, which is the safe error at this stage.
+3. **Include.** Every eligible paper is analysed. Past `SYSTEMATIC_MAX_ANALYSED` (150), a **random sample**
+   is analysed, drawn with a seed taken from the run and recorded, so the shares it produces estimate the
+   eligible set without bias; the top of a relevance ranking would not. The same applies when more papers are
+   identified than `SYSTEMATIC_MAX_SCREENED` (600) can be screened.
+4. **Check recall.** The question's nearest papers by meaning that the query did not match are listed in the
+   report as what the query may have missed. They are not added, since that would make the set depend on
+   judgement again; widen the query and run again instead.
+
+No agent adds papers afterwards, the screening log and PRISMA counts describe a real search, and the report
+opens with how the papers were found. The ceiling is the corpus: this is a systematic search of what is loaded
+(open-access PMC topic slices and arXiv), and the report says "of the corpus", never "of the literature".
+
+```bash
+python -m research_agent.cli map "..." --systematic
+python -m research_agent.cli ask "..." --systematic
+```
+
+On the web page it is the **Papers** choice under the run type: *Chosen by an agent* or *Systematic search*.
+
+### A gap is checked against full texts, and against the papers nobody read
+
+A gap is computed from the analysed papers, and its **corpus check** widens that to every paper on the topic.
+Titles and abstracts alone are a weak test, because what gaps are about (a validation design, an interaction
+term, a safety endpoint) is exactly what abstracts leave out. So the check now has two tiers:
+
+- **Titles and abstracts across the whole topic**, as before, now also counting and naming the papers that
+  mention the practice but were **not analysed** in this run. Each of those could overturn the gap.
+- **Full texts of the topic's papers.** Up to `FULLTEXT_CHECK_MAX` (300) papers that best match the topic are
+  fetched (arXiv from the local files, PMC from NCBI twenty to a request) and kept, so later runs on the same
+  topic reuse them, then searched with the same query. Every match comes back with the passage around it,
+  because a mention is not a finding: "we did not model the interaction" matches a search for an interaction
+  and says the opposite. Absence is only ever stated over texts that were actually searched. `0` turns this
+  tier off.
+
+Both feed the gap's confidence grade (absent from 30 or more searched full texts raises it; full-text mentions
+or five or more unread mentions lower it), the report prints the passages, and the gap reasoning agent sees
+them and is told to read them before calling anything absent.
+
+**Absence is stated over what was counted.** A sentence such as "No paper in the corpus reports a
+rainfall-temperature interaction (0/91)" counts the 91 analysed papers and claims the corpus. The claims
+layer already refused that wording; gap reasoning did not go through it. Now any absence sentence that names
+the corpus, the literature or the field is narrowed to the analysed papers, and what the corpus check found
+outside them is added: "No analysed paper reports... 10 further topic papers mention it in their title or
+abstract and were not analysed."
+
 ### Untried combinations, and the null they are judged against
 
 A pair of components that are each common and never appear together is a candidate research opportunity.

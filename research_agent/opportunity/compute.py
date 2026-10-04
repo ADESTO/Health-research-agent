@@ -406,6 +406,24 @@ def _gap_confidence(s: dict, corpus: dict | None, corpus_sizes: dict) -> dict:
         else:
             why.append(f"{corpus['matching']} of {corpus['topic_total']} topic papers across the corpus mention "
                        "it in their title or abstract")
+        unread = corpus.get("not_analysed") or 0
+        if unread:
+            # papers that mention it and were never read are the most direct threat to calling it a gap
+            if unread >= 5:
+                pts -= 1
+            why.append(f"{unread} papers outside the analysed set mention it in their title or abstract and were "
+                       "not read, so the gap holds for the analysed papers only until they are")
+        ft = corpus.get("fulltext") or {}
+        if ft.get("full_texts_read", 0) >= 30:
+            if ft["matching"] == 0:
+                pts += 1
+                why.append(f"absent from all {ft['full_texts_read']} topic papers whose full text was searched")
+            else:
+                pts -= 1
+                why.append(f"{ft['matching']} of {ft['full_texts_read']} topic papers mention it in their full "
+                           "text: read those passages before calling it absent")
+        elif ft.get("full_texts_read"):
+            why.append(f"only {ft['full_texts_read']} topic full texts could be searched, too few to weigh")
     why.append(f"true rate in this literature plausibly up to {s['ci95'][1]:.0%} (95% upper bound)")
     grade = "high" if pts >= 4 else ("moderate" if pts >= 2 else "low")
     return {"grade": grade, "points": pts, "reasons": why}
@@ -425,8 +443,30 @@ def _corpus_check(ctx, topic_query: str, search: str) -> dict | None:
             FROM papers""", {**t_params, **s_params}).fetchone()
     if not row["topic_total"]:
         return None
-    return {"topic_query": topic_query, "search": search, "topic_total": row["topic_total"],
-            "matching": row["matching"], "share": round(row["matching"] / row["topic_total"], 4)}
+    out = {"topic_query": topic_query, "search": search, "topic_total": row["topic_total"],
+           "matching": row["matching"], "share": round(row["matching"] / row["topic_total"], 4)}
+    # the papers that mention it and were NOT analysed: each one could overturn the gap, so name them
+    unread = ctx.pg.execute(
+        f"""SELECT paper_id, title, year FROM papers p WHERE tsv @@ ({t_sql}) AND tsv @@ ({s_sql})
+              AND NOT EXISTS (SELECT 1 FROM run_papers rp WHERE rp.run_id = %(run)s AND rp.paper_id = p.paper_id)
+            ORDER BY year DESC NULLS LAST, paper_id LIMIT 12""",
+        {**t_params, **s_params, "run": ctx.run_id}).fetchall()
+    n_unread = ctx.pg.execute(
+        f"""SELECT count(*) n FROM papers p WHERE tsv @@ ({t_sql}) AND tsv @@ ({s_sql})
+              AND NOT EXISTS (SELECT 1 FROM run_papers rp WHERE rp.run_id = %(run)s AND rp.paper_id = p.paper_id)""",
+        {**t_params, **s_params, "run": ctx.run_id}).fetchone()["n"]
+    out["not_analysed"] = n_unread
+    out["not_analysed_examples"] = [{"paper_id": r["paper_id"], "title": (r["title"] or "")[:160], "year": r["year"]}
+                                    for r in unread]
+    try:
+        from research_agent.tools.fulltext_check import search_fulltexts
+
+        ft = search_fulltexts(ctx, topic_query, search)
+        if ft is not None:
+            out["fulltext"] = ft
+    except Exception as exc:          # the full-text tier is an addition; the abstract count stands without it
+        out["fulltext_problem"] = str(exc)[:200]
+    return out
 
 
 def compute_map(ctx, protocol: dict) -> dict:
@@ -545,6 +585,14 @@ def compact_map(m: dict) -> dict:
         for k in ("strength", "confidence", "trend", "corpus_check"):
             if it.get(k):
                 keep[k] = it[k]
+        cc = keep.get("corpus_check")
+        if cc and cc.get("fulltext"):
+            # the agent needs the passages to judge them, but not twelve long ones per gap
+            ft = cc["fulltext"]
+            keep["corpus_check"] = {**cc, "fulltext": {
+                **{k: ft[k] for k in ("topic_papers_checked", "full_texts_read", "matching", "not_analysed", "note")
+                   if k in ft},
+                "candidates": [{**x, "passage": x["passage"][:300]} for x in ft.get("candidates", [])[:5]]}}
         keep["example_paper_ids"] = it.get("paper_ids", [])[:6]
         return keep
     return {"N": m["N"], "N_fulltext": m.get("N_fulltext"), "corpora": m.get("corpora"),

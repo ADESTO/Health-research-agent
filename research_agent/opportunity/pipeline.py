@@ -24,7 +24,7 @@ def _step_done(ctx, name: str) -> bool:
 
 
 def run_map(question: str | None = None, provider: str | None = None, llm_factory=None, on_event=None,
-            run_id: str | None = None, resume: str | None = None) -> dict:
+            run_id: str | None = None, resume: str | None = None, search: str | None = None) -> dict:
     from research_agent.db import init_schema
 
     init_schema()  # older databases lack the map's tables; this only adds what is missing
@@ -35,6 +35,10 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
                                 run_id=run_id)
     question = ctx.question
     ctx.save_note("mode", {"mode": "map"})       # lets the web page label the run before the map exists
+    from research_agent.tools import systematic
+
+    if search and not resume:
+        systematic.set_mode(ctx, search)
     if on_event:
         on_event("system", "run", {"run_id": ctx.run_id, "resumed": bool(resume)})
     dropped: list[str] = []
@@ -58,6 +62,13 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
                                           "central ones in full.")):
             if resume and _already_done(ctx, name):
                 ctx.emit(name, "skipped", {"reason": "finished in the earlier attempt"})
+                continue
+            if name == "discovery" and systematic.is_systematic(ctx):
+                if not ctx.shortlist_ids():
+                    systematic.systematic_discovery(ctx, protocol)
+                if not ctx.shortlist_ids():
+                    raise RuntimeError("the systematic search found no eligible papers; widen the question or "
+                                       "its search query")
                 continue
             res = run_specialist(ctx, name, task)
             if "error" in res:
@@ -143,6 +154,12 @@ def _computed_sections(ctx) -> list[str]:
     opportunity has been done already, and whether the papers back each other up. Each is optional, so one
     that fails costs its own section and never the map."""
     out: list[str] = []
+    try:
+        from research_agent.tools import systematic
+
+        out += systematic.markdown(ctx)
+    except Exception as exc:
+        ctx.emit("search", "error", {"error": str(exc)[:300]})
     try:
         from research_agent.tools import cohort
 

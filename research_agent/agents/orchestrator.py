@@ -40,6 +40,13 @@ def _precondition(ctx: RunContext, agent: str) -> str | None:
 def run_specialist(ctx: RunContext, agent_name: str, task: str) -> dict:
     """Run one specialist on its own DB connection (so several can run in parallel)."""
     agent = SPECIALISTS[agent_name]
+    if agent_name == "discovery":
+        from research_agent.tools import systematic
+
+        if systematic.is_systematic(ctx) and ctx.shortlist_ids():
+            # the set of papers is the search's result, not a choice: no agent adds to it in this mode
+            return {"note": "This run's papers were found by a systematic search and screened against the "
+                            "protocol. Discovery does not add papers in this mode; go on to literature."}
     err = _precondition(ctx, agent_name)
     if err:
         return {"error": err}
@@ -210,7 +217,7 @@ def _already_done(ctx: RunContext, name: str) -> bool:
 
 def run_research(question: str | None = None, mode: str = "orchestrated", provider: str | None = None,
                  llm_factory=None, on_event=None, run_id: str | None = None,
-                 resume: str | None = None) -> dict:
+                 resume: str | None = None, search: str | None = None) -> dict:
     from research_agent.db import init_schema
 
     init_schema()   # older databases lack newer tables and indexes; this only adds what is missing
@@ -224,15 +231,29 @@ def run_research(question: str | None = None, mode: str = "orchestrated", provid
         on_event("system", "run", {"run_id": ctx.run_id, "resumed": bool(resume)})
     try:
         ctx.save_note("mode", {"mode": mode})
-        if settings.ask_protocol:
+        from research_agent.tools import systematic
+
+        if search and not resume:
+            systematic.set_mode(ctx, search)
+        protocol = None
+        if settings.ask_protocol or systematic.is_systematic(ctx):
             # Question-specific fields: the general extraction form cannot anticipate every concept a
             # question turns on (vector data, attention models...). A failed protocol never stops the run.
             try:
                 from research_agent.opportunity.protocol import ensure_protocol
 
-                ensure_protocol(ctx, question)
+                protocol = ensure_protocol(ctx, question)
             except Exception as exc:
                 ctx.emit("protocol", "error", {"error": str(exc)[:300]})
+        if systematic.is_systematic(ctx) and not ctx.shortlist_ids():
+            # the search needs the protocol's query and criteria; without them there is nothing to be systematic
+            # about, so the run says so instead of quietly falling back to an agent's choice
+            if not protocol:
+                raise RuntimeError("a systematic search needs the protocol (its search query and criteria), and "
+                                   "the protocol could not be written")
+            systematic.systematic_discovery(ctx, protocol)
+            if not ctx.shortlist_ids():
+                raise RuntimeError("the systematic search found no eligible papers; widen the question")
         if mode == "pipeline":
             for name in ORDER:
                 if name != "discovery" and not ctx.shortlist_ids():
@@ -245,6 +266,9 @@ def run_research(question: str | None = None, mode: str = "orchestrated", provid
                     raise RuntimeError(res["error"])
         else:
             task = "Plan and run the research, then have synthesis write the report."
+            if systematic.is_systematic(ctx):
+                task += (" The papers were found by a systematic search and screened against the protocol, so "
+                         "the shortlist is fixed: do not call discovery, start with literature.")
             if resume:
                 task += (" This run is being RESUMED: check get_status and only delegate the work that is "
                          "still missing.")

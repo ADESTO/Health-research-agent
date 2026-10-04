@@ -163,6 +163,20 @@ class FakeLLM:
             return self._resp([_call("record_readings", records=records)])
         if force_tool == "record_field":
             return self._resp([_call("record_field", **fake_field(messages[0]["content"][0]["text"], tools))])
+        if force_tool == "record_screening":
+            # a screener that includes malaria papers and excludes the rest, with a reason, the way the real one
+            # is asked to; a paper whose abstract says "case report" is left unclear, which keeps it
+            text = messages[0]["content"][0]["text"]
+            blocks = re.split(r"^=== Paper (\S+) ===\n", text, flags=re.M)[1:]
+            records = []
+            for pid, body in zip(blocks[::2], blocks[1::2]):
+                low = body.lower()
+                if "malaria" not in low:
+                    records.append({"paper_id": pid, "decision": "exclude", "criterion": "topic",
+                                    "reason": "not about malaria"})
+                else:
+                    records.append({"paper_id": pid, "decision": "include", "reason": "malaria study"})
+            return self._resp([_call("record_screening", records=records)])
         if force_tool == "record_check":
             return self._resp([_call("record_check", **fake_recheck(messages[0]["content"][0]["text"], tools))])
         if not tools and "Draft writer" in system:
@@ -435,6 +449,7 @@ class FakeLLM:
         if step == 0:
             return [_call("corpus_count", keywords="malaria forecast")]
         return [_call("finish", setting="Malaria forecasting, any country", topic_query="malaria forecast",
+                      search_query="malaria AND (forecast OR forecasting OR prediction OR incidence)",
                       inclusion=["forecasts or predicts malaria incidence"], exclusion=["no forecasting"],
                       fields=[
                           {"name": "forecast_horizon", "type": "enum",

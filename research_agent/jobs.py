@@ -92,14 +92,15 @@ def execute(kind: str, payload: dict, attempt: int) -> None:
                          provider=payload.get("provider"), llm_factory=factory)
         else:
             run_research(payload["question"], mode=payload.get("mode", "orchestrated"), provider=payload.get("provider"),
-                         run_id=payload["run_id"], llm_factory=factory)
+                         run_id=payload["run_id"], llm_factory=factory, search=payload.get("search"))
     elif kind == "map":
         from research_agent.opportunity.pipeline import run_map
 
         if attempt > 1:
             run_map(resume=payload["run_id"], provider=payload.get("provider"), llm_factory=factory)
         else:
-            run_map(payload["question"], provider=payload.get("provider"), run_id=payload["run_id"], llm_factory=factory)
+            run_map(payload["question"], provider=payload.get("provider"), run_id=payload["run_id"], llm_factory=factory,
+                    search=payload.get("search"))
     elif kind == "followup":
         from research_agent.agents import followup
 

@@ -62,6 +62,8 @@ class RunRequest(BaseModel):
     question: str = Field(min_length=10, max_length=600)
     mode: str = Field(default="orchestrated", pattern="^(orchestrated|pipeline|map)$")
     provider: str | None = Field(default=None, pattern="^(anthropic|groq|deepseek)$")
+    # purposive: an agent chooses the papers; systematic: a fixed query, every hit screened, all eligible analysed
+    search: str = Field(default="purposive", pattern="^(purposive|systematic)$")
 
 
 @app.get("/", include_in_schema=False)
@@ -106,8 +108,9 @@ def start_run(req: RunRequest, request: Request):
         pg.execute("INSERT INTO runs (run_id, question, status) VALUES (%s,%s,'queued')", (run_id, req.question))
     # a durable job: it survives a server restart, and a worker that dies mid-run is replaced
     job = enqueue("map" if req.mode == "map" else "run",
-                  {"run_id": run_id, "question": req.question, "mode": req.mode, "provider": req.provider})
-    return {"run_id": run_id, "mode": req.mode, "job_id": job, "poll": f"/runs/{run_id}"}
+                  {"run_id": run_id, "question": req.question, "mode": req.mode, "provider": req.provider,
+                   "search": req.search})
+    return {"run_id": run_id, "mode": req.mode, "search": req.search, "job_id": job, "poll": f"/runs/{run_id}"}
 
 
 @app.get("/runs/{run_id}")

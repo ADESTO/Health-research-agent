@@ -3659,3 +3659,145 @@ def test_papers_back_each_other_up_counted_in_independent_sources(ctx, monkeypat
     # the follow-up tool sees the same thing, trimmed for a model
     tool = CB.corroborate_tool(ctx, driver="TRT")
     assert tool["findings"] and all(f["driver"] == therapy for f in tool["findings"])
+
+
+def test_corpus_check_reads_full_texts_and_names_what_it_did_not_read(loaded_db):
+    """The corpus check goes past titles and abstracts: it searches the full texts of the topic's papers and
+    returns each match with its passage, because a mention is not a finding. Papers that mention it but were
+    never analysed are named, and gap reasoning may not call an absence corpus-wide when it counted the
+    analysed papers."""
+    from research_agent.opportunity import compute as C
+    from research_agent.opportunity.agents import scope_wording
+    from research_agent.opportunity.pipeline import run_map
+    from research_agent.opportunity.render import _corpus_lines
+    from research_agent.runstate import RunContext
+    from research_agent.tools.fulltext_check import search_fulltexts, search_terms
+
+    rid = run_map("Can machine learning improve 1-6 month malaria forecasting?",
+                  llm_factory=lambda strong=False: FakeLLM())["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: None)
+    try:
+        # the fixture papers report calibration in their results sections, never in an abstract
+        c = C._corpus_check(ctx, "malaria", "calibration")
+        assert c["matching"] == 0, "the abstracts do not say it"
+        ft = c["fulltext"]
+        assert ft["full_texts_read"] > 0 and ft["matching"] > 0, "the full texts do"
+        cand = ft["candidates"][0]
+        assert "calibration" in cand["passage"].lower(), "every match comes with the passage it came from"
+        assert "analysed_in_this_run" in cand and ft["topic_papers_checked"] >= ft["full_texts_read"]
+        # absence is only ever stated over texts that were actually searched
+        none = search_fulltexts(ctx, "malaria", '"mosquito larval habitat mapping"')
+        assert none["matching"] == 0 and none["full_texts_read"] == ft["full_texts_read"]
+        # the topic's texts are fetched once per run, then reused by every gap
+        assert ctx._topic_texts["malaria"]["readable"]
+        # 0 turns the full-text tier off
+        assert search_fulltexts(ctx, "malaria", "calibration", limit=0) is None
+
+        # papers that mention it and were not analysed are counted and named
+        assert "not_analysed" in c and isinstance(c["not_analysed_examples"], list)
+
+        # and the grade reflects what the full texts say
+        s = {"n_fulltext": 0, "N_fulltext": 20, "stated_rate": 0.9, "n": 0, "ci95": [0, 0.1]}
+        found = C._gap_confidence(s, {**c, "share": 0.0, "fulltext": {**ft, "full_texts_read": 40, "matching": 3}}, {})
+        clean = C._gap_confidence(s, {**c, "share": 0.0, "fulltext": {**ft, "full_texts_read": 40, "matching": 0}}, {})
+        assert clean["points"] > found["points"]
+        assert any("full text" in r for r in found["reasons"]) and any("absent from all 40" in r for r in clean["reasons"])
+        unread = C._gap_confidence(s, {**c, "share": 0.0, "not_analysed": 6}, {})
+        assert any("were not read" in r for r in unread["reasons"])
+
+        lines = "\n".join(_corpus_lines({**c, "not_analysed": 2}))
+        assert "Full texts:" in lines and "A mention is not a finding" in lines
+        assert "not analysed in this run" in lines or "analysed" in lines
+    finally:
+        ctx.close()
+
+    assert search_terms('malaria ("interaction" OR "effect modification" OR synergy) rainfall -review') == \
+        ["interaction", "effect modification", "malaria", "synergy", "rainfall"]
+    assert search_terms('rainfall NOT drought -"case report"') == ["rainfall"], "exclusions are never looked for"
+    assert search_terms("long-term follow-up") == ["long-term", "follow-up"], "a hyphen inside a word is kept"
+
+    # the sentence that reached a report: absence counted over 91 papers, written as the whole corpus
+    said = ("No paper in the corpus reports a rainfall×temperature interaction or joint term (0/91; 0/32 "
+            "full-text, H2). The corpus check found 10 papers in the corpus that mention interaction terms.")
+    fixed, note = scope_wording(said, {"not_analysed": 10, "fulltext": {"matching": 4, "full_texts_read": 210}})
+    assert fixed.startswith("No analysed paper reports a rainfall×temperature interaction")
+    assert "found 10 papers in the corpus" in fixed, "a sentence that is not about absence is left alone"
+    assert "10 further topic papers" in fixed and "4 of 210 topic papers mention it in their full text" in fixed
+    assert note and "narrowed" in note
+    # wording that already says what it counted is not touched
+    ok = "None of the 91 analysed papers reports one; 10 further topic papers were not analysed."
+    assert scope_wording(ok, {"not_analysed": 10})[0] == ok
+
+
+def test_systematic_search_finds_screens_and_analyses_every_eligible_paper(loaded_db):
+    """Systematic mode: the protocol's fixed query identifies papers, every hit is screened against the criteria
+    with a recorded reason, every eligible paper is analysed (a seeded random sample past the cap), and no agent
+    adds to the set afterwards."""
+    from research_agent.agents.orchestrator import run_research, run_specialist
+    from research_agent.opportunity.pipeline import run_map
+    from research_agent.runstate import RunContext
+    from research_agent.tools import systematic as SY
+    from research_agent.tools.review import prisma_counts, screening_rows
+
+    rid = run_map("Can machine learning improve 1-6 month malaria forecasting?",
+                  llm_factory=lambda strong=False: FakeLLM(), search="systematic")["run_id"]
+    ctx = RunContext.attach(rid, llm_factory=lambda strong=False: FakeLLM())
+    try:
+        n = ctx.notes()["search"]
+        assert n["mode"] == "systematic" and not n["query_was_fallback"]
+        assert n["query"] == "malaria AND (forecast OR forecasting OR prediction OR incidence)"
+        assert n["identified"] >= n["screened"] >= n["eligible"] >= n["analysed"] > 0
+        assert n["analysed"] == n["eligible"] and not n["analysed_is_sample"], "every eligible paper is analysed"
+        assert set(ctx.shortlist_ids()) == set(SY.identify(ctx, n["query"])) & set(ctx.shortlist_ids())
+
+        added = ctx.pg.execute("SELECT DISTINCT added_by FROM run_papers WHERE run_id=%s", (rid,)).fetchall()
+        assert [r["added_by"] for r in added] == ["systematic"], "no paper was chosen by an agent"
+        # every decision is on the record, and exclusions say why
+        log = screening_rows(ctx)
+        assert all(r["reason"] for r in log if r["stage"] == "excluded")
+        assert {r["stage"] for r in log} >= {"included"}
+        pc = prisma_counts(ctx)
+        assert pc["included"] == n["analysed"] and pc["identified"] >= n["identified"]
+
+        # the discovery agent cannot add to a systematic set
+        before = set(ctx.shortlist_ids())
+        res = run_specialist(ctx, "discovery", "add more papers")
+        assert "systematic search" in res["note"] and set(ctx.shortlist_ids()) == before
+
+        md = ctx.pg.execute("SELECT report_md FROM runs WHERE run_id=%s", (rid,)).fetchone()["report_md"]
+        assert "## How the papers were found (computed)" in md and n["query"] in md
+        assert "not of the literature" in md
+        assert SY.is_systematic(ctx)
+    finally:
+        ctx.close()
+
+    # past the cap, a seeded random sample is analysed, and the rest are logged as eligible but not sampled
+    ctx2 = RunContext.create("malaria forecasting sample", llm_factory=lambda strong=False, step=None: FakeLLM())
+    try:
+        protocol = {"search_query": "malaria AND (forecast OR forecasting OR prediction OR incidence)",
+                    "inclusion": ["malaria studies"], "exclusion": ["not malaria"], "fields": []}
+        s2 = SY.systematic_discovery(ctx2, protocol, max_analysed=3)
+        assert s2["analysed"] == 3 < s2["eligible"] and s2["analysed_is_sample"]
+        assert len(ctx2.shortlist_ids()) == 3
+        unsampled = [r for r in screening_rows(ctx2) if r["stage"] == "over_limit"]
+        assert len(unsampled) == s2["eligible"] - 3 and all(f"seed {s2['seed']}" in r["reason"] for r in unsampled)
+        # the same run draws the same sample: the seed comes from the run, not from the clock
+        assert SY._seed(ctx2) == s2["seed"]
+        # screening past its own cap samples the identified papers in the same way
+        ctx3 = RunContext.create("malaria screening sample", llm_factory=lambda strong=False, step=None: FakeLLM())
+        s3 = SY.systematic_discovery(ctx3, protocol, max_screened=4)
+        assert s3["screened"] == 4 and s3["screened_is_sample"] and s3["identified"] > 4
+        ctx3.close()
+        # without a specific query the broad topic query is used, and the report says so
+        ctx4 = RunContext.create("malaria fallback", llm_factory=lambda strong=False, step=None: FakeLLM())
+        s4 = SY.systematic_discovery(ctx4, {"topic_query": "malaria forecast", "fields": []})
+        assert s4["query_was_fallback"] and s4["query"] == "malaria forecast"
+        assert "broad topic query" in "\n".join(SY.markdown(ctx4))
+        ctx4.close()
+    finally:
+        ctx2.close()
+
+    # a report run can be systematic too
+    out = run_research("Which methods forecast malaria?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM(), search="systematic")
+    assert "## How the papers were found (computed)" in out["report"]

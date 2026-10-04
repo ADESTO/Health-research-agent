@@ -116,9 +116,9 @@ select.btn { padding-right: 10px; }
      background: var(--sunk); font-family: var(--f-read); font-size: 19px; line-height: 1.4; }
 #q::placeholder { color: var(--muted); font-style: italic; }
 .examples { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
-.examples button { border: 1px dashed var(--line-2); background: transparent; border-radius: 999px; padding: 4px 11px;
+.examples button { border: 0; background: var(--sunk); border-radius: 999px; padding: 5px 12px;
                    font-size: 12.5px; color: var(--ink-2); cursor: pointer; text-align: left; }
-.examples button:hover { border-color: var(--hema); color: var(--hema); }
+.examples button:hover { background: var(--hema-soft); color: var(--hema); }
 .modes { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 @media (max-width: 720px) { .modes { grid-template-columns: minmax(0, 1fr); } }
 .mode { position: relative; display: grid; gap: 3px; padding: 12px 14px; border: 1px solid var(--line-2); border-radius: 10px;
@@ -130,6 +130,8 @@ select.btn { padding-right: 10px; }
 .mode:has(input:focus-visible) { outline: 2px solid var(--hema); outline-offset: 2px; }
 .mode.map:has(input:checked) { border-color: var(--eosin); box-shadow: inset 0 0 0 1px var(--eosin); background: var(--eosin-soft); }
 .go { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.searchmode { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.searchmode .hint { flex: 1 1 260px; min-width: 0; }
 
 /* ---- run */
 .run { padding: 22px 24px 24px; display: grid; gap: 16px; }
@@ -436,6 +438,14 @@ details.log summary { cursor: pointer; font-size: 13px; color: var(--muted); }
           <span>A lead agent decides which specialists to run and when. Flexible, a little costlier.</span></label>
         <label class="mode map"><input type="radio" name="mode" value="map"><b>Opportunity map</b>
           <span>What is established, emerging and missing, with tested explanations and study designs. About twice the cost.</span></label>
+      </div>
+      <div class="searchmode">
+        <span class="status" id="searchLabel">Papers</span>
+        <span class="seg" role="group" aria-labelledby="searchLabel" id="searchMode">
+          <button type="button" aria-pressed="true" data-v="purposive">Chosen by an agent</button>
+          <button type="button" aria-pressed="false" data-v="systematic">Systematic search</button>
+        </span>
+        <span class="hint" id="searchHint"></span>
       </div>
       <div class="go">
         <button class="btn primary" id="go">Run research</button>
@@ -772,6 +782,17 @@ const EXAMPLES = [
 $("#examples").insertAdjacentHTML("beforeend", EXAMPLES.map(q => `<button type="button">${esc(q)}</button>`).join(""));
 $("#examples").addEventListener("click", ev => { const b = ev.target.closest("button"); if (b) { $("#q").value = b.textContent; $("#q").focus(); } });
 const mode = () => ($$('input[name="mode"]').find(i => i.checked) || {}).value || "pipeline";
+const SEARCH_HINTS = {
+  purposive: "An agent searches and picks up to 60 papers. Quick, good for exploring a question.",
+  systematic: "A fixed search over the corpus, every hit screened against the protocol, every eligible paper analysed (a random sample past 150). Shares then describe the corpus, and the run can be repeated.",
+};
+const searchMode = () => { const b = $('#searchMode button[aria-pressed="true"]'); return b ? b.dataset.v : "purposive"; };
+$("#searchMode").addEventListener("click", ev => {
+  const b = ev.target.closest("button"); if (!b) return;
+  $$("#searchMode button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  $("#searchHint").textContent = SEARCH_HINTS[b.dataset.v];
+});
+$("#searchHint").textContent = SEARCH_HINTS.purposive;
 function syncMode() { $("#go").textContent = mode() === "map" ? "Build map" : "Run research"; }
 $$('input[name="mode"]').forEach(i => i.onchange = syncMode);
 syncMode();
@@ -783,10 +804,10 @@ $("#go").onclick = async () => {
   try {
     const res = await api("/runs", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, provider: $("#provider").value, mode: mode() }),
+      body: JSON.stringify({ question, provider: $("#provider").value, mode: mode(), search: searchMode() }),
     });
     $("#status").textContent = "";
-    startRunView(res.run_id, { question, status: "queued", is_map: res.mode === "map", created_at: new Date().toISOString() });
+    startRunView(res.run_id, { question, status: "queued", is_map: res.mode === "map", search: res.search, created_at: new Date().toISOString() });
     timer = setInterval(() => poll().catch(e => logLine(esc(e.message), "err")), 3000);
     loadRuns();
   } catch (e) { $("#status").textContent = e.message; }
@@ -830,6 +851,7 @@ function renderHead(run, papers) {
   const meta = [`<span class="pill ${esc(r.status)}">${esc(r.status || "")}</span>`];
   if (papers != null) meta.push(`<span class="pill">${papers} papers analysed</span>`);
   if (r.model) meta.push(`<span class="pill">${esc(r.model)}</span>`);
+  if (r.search === "systematic") meta.push('<span class="pill">systematic search</span>');
   $("#runMeta").innerHTML = meta.join("");
 }
 
@@ -852,7 +874,8 @@ function renderEvent(e) {
   if (e.kind === "start") { stepState[e.agent] = "active"; logLine(`▶ ${a} ${esc((p.task || "").slice(0, 160))}`); }
   else if (e.kind === "finish") {
     stepState[e.agent] = "done";
-    if (e.agent === "map" && p.output) logLine(`✔ ${a} ${Object.entries(p.output).map(([k, v]) => `${v} ${k}`).join(", ")}`, "ok");
+    if ((e.agent === "map" || (e.agent === "discovery" && p.output && p.output.identified != null)) && p.output)
+      logLine(`✔ ${a} ${Object.entries(p.output).map(([k, v]) => `${v} ${k}`).join(", ")}`, "ok");
     else logLine(`✔ ${a} finished`, "ok");
   }
   else if (e.kind === "skipped") { stepState[e.agent] = "skipped"; logLine(`↷ ${a} skipped: ${esc(p.reason || "")}`); }
