@@ -241,6 +241,22 @@ def set_opportunity_state(run_id: str, item_id: str, body: dict):
         ctx.close()
 
 
+@app.get("/runs/{run_id}/corroboration")
+def get_corroboration(run_id: str, driver: str | None = None):
+    """Which papers back each other up, finding by finding, with quotes from each side."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools.corroboration import corroborate_tool
+
+    try:
+        ctx = RunContext.attach(run_id, llm_factory=lambda strong=False: None)
+    except ValueError:
+        raise HTTPException(404, "no such run")
+    try:
+        return corroborate_tool(ctx, driver=driver, limit=80, per_finding=40)
+    finally:
+        ctx.close()
+
+
 @app.post("/runs/{run_id}/precedent")
 def post_precedent(run_id: str, body: dict | None = None):
     """Search the whole corpus for studies that already do each of this run's opportunities."""
@@ -271,9 +287,40 @@ def get_cohort(run_id: str):
     except ValueError:
         raise HTTPException(404, "no such run")
     try:
-        return {"cohort": cohort.of(ctx), **cohort.summary(ctx)}
+        from research_agent.tools.extraction import _rows, _values, known_fields
+
+        lists, enums = known_fields(ctx)
+        # the fields a scope can be written on, each with the values these papers actually state, so the
+        # page can offer choices instead of asking for spellings
+        cohort.clear_cache(ctx)
+        rows = _rows_unscoped(ctx)
+        fields = {}
+        for f in ["geography", "study_designs", "populations", "organisms"] + [n for n in enums
+                                                                                  if n.startswith("q_")]:
+            if f not in lists and f not in enums:
+                continue
+            seen: dict[str, int] = {}
+            for r in rows:
+                for v in _values(r["data"], f):
+                    seen[v] = seen.get(v, 0) + 1
+            if seen:
+                fields[f] = [v for v, _ in sorted(seen.items(), key=lambda kv: -kv[1])][:40]
+        return {"cohort": cohort.of(ctx), **cohort.summary(ctx), "fields": fields}
     finally:
         ctx.close()
+
+
+def _rows_unscoped(ctx):
+    """Every analysed paper, ignoring the run's cohort: the choices offered must include what it excludes."""
+    from research_agent.tools import cohort
+    from research_agent.tools.extraction import _rows
+
+    saved = cohort.of(ctx)
+    ctx._cohort = None
+    try:
+        return _rows(ctx)
+    finally:
+        ctx._cohort = saved
 
 
 @app.post("/runs/{run_id}/cohort")

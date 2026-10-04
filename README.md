@@ -288,6 +288,55 @@ fields coincide by chance and folding those would hide real findings; the surviv
 under `also_recorded_as`. And the watch list drops items whose rise could not be less convincing: one map
 printed seventeen, every one at p = 1.00, which is the field inventory with a p-value stapled on.
 
+### Do the papers back each other up?
+
+Every association a paper reports, a driver moving an outcome with a quote code has checked, is set beside
+every other paper's statement about the same driver and outcome:
+
+```bash
+python -m research_agent.cli corroborate <run_id> [--driver "testosterone therapy"] [--all]
+python -m research_agent.cli export <run_id> -f corroboration
+```
+
+**Wordings meet.** Phrases naming one thing are grouped: identical once measurement noise is removed
+("serum testosterone levels" is "testosterone"), an acronym of the other ("TRT"), one the other with a word
+added, or very close in meaning by embedding (`CORROBORATION_SIMILARITY`, 0.88). The shorter phrase needs two
+words of its own before it can absorb a longer one, so "testosterone", an endogenous level, never swallows
+"testosterone therapy", a treatment. For outcomes, the measure is noise too: "malaria cases", "malaria
+incidence" and "malaria prevalence" are one outcome, while "malaria mortality" stays apart, since death is not
+a measure of how much disease there is. A qualified exposure is never merged with the plain one by any route:
+"heavy rainfall" lowering malaria does not contradict "rainfall" raising it, so the two stay separate even
+though the malaria driver list would join them. Every merge is listed. This replaced the malaria-only driver list in
+`contradictions` too, which is what lets it work on any topic.
+
+**Relations come from the extracted directions, not a model.** Same direction supports, opposite contradicts,
+an effect against no effect disputes whether there is one, nonlinear or mixed qualifies, and the same
+direction with one result not significant agrees in direction only.
+
+**Support is counted in independent sources.** Papers sharing a named dataset, two or more authors, or a
+citation are one source: two papers from one registry agreeing is one finding, not a replication. Support
+from the same kind of study (human, animal, in vitro) is counted apart from support across kinds. Each
+finding gets one verdict:
+
+| verdict | what it means |
+|---|---|
+| `corroborated` | independent papers report the same direction, and none the opposite |
+| `corroborated_across_systems_only` | the only independent agreement comes from a different kind of study |
+| `repeated_by_related_papers_only` | papers agree, but share a dataset, authors or a citation: one source |
+| `contested` | independent papers report it both ways; what separates the sides is listed |
+| `contradicted` | one paper each way, no replication on either side |
+| `qualified` | other papers report it as nonlinear or mixed |
+| `not_addressed_elsewhere` | one paper reports it: a fact about this corpus, not evidence against it |
+
+Agreement is not truth, since papers can share an assay or a publication bias, so a finding's corroboration
+sits beside a claim's state and never raises it. The report prints the table, the follow-up agent has a
+`corroborate` tool for "has anyone replicated this?", and the evidence package and workbook carry it. On the
+web page it has its own **Agreement** tab: each finding with its verdict, filterable by verdict, opening to the
+quote from every paper on each side. The run page also has a **Counting** panel to set the run's scope, and the
+Export menu carries the evidence package, the agreement table and the opportunities. The
+open-ended researcher does not get the tool: it works on a discovery half with the held-out half hidden, and
+corroboration reads every paper.
+
 ### One field, one axis
 
 A question-specific field that answers two questions at once loses one of them. The testosterone protocol's
@@ -570,7 +619,8 @@ research_agent/
                  epistemics (what each claim's number is worth), opportunities (what is worth doing),
                  fieldpass (one field, read for on purpose, in the papers that left it blank),
                  cohort (the scope every count shares), precedent (has anyone done it already),
-                 resolve (thin evidence read deeper before the report leans on it)
+                 resolve (thin evidence read deeper before the report leans on it),
+                 corroboration (which papers back each other up, in independent sources)
   ingestion/     health filter, DuckDB→pgvector loader, PMC topic slices, full-text fetch + cleaning
   llm/           provider seam: anthropic | groq | deepseek (same internal message format)
   db/            schema.sql: papers, extractions, runs, claims, drafts, researchers, jobs…

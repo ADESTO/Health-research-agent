@@ -112,7 +112,8 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
             opp = opportunities.markdown(ctx)
         except Exception:
             opp = []
-        extra = opp + results_markdown(ctx) + citation_markdown(ctx) + burden_markdown(ctx) + prisma_markdown(ctx)
+        extra = _computed_sections(ctx) + opp
+        extra += results_markdown(ctx) + citation_markdown(ctx) + burden_markdown(ctx) + prisma_markdown(ctx)
         if extra:
             md += "\n" + "\n".join(extra)
         cited = []
@@ -135,3 +136,31 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
         raise
     finally:
         ctx.close()
+
+
+def _computed_sections(ctx) -> list[str]:
+    """What every map gains from the run-level checks: the scope its numbers count over, whether each
+    opportunity has been done already, and whether the papers back each other up. Each is optional, so one
+    that fails costs its own section and never the map."""
+    out: list[str] = []
+    try:
+        from research_agent.tools import cohort
+
+        out += cohort.markdown(ctx)
+    except Exception as exc:
+        ctx.emit("cohort", "error", {"error": str(exc)[:300]})
+    try:
+        from research_agent.tools import precedent
+
+        precedent.check(ctx)
+        out += precedent.markdown(ctx)
+    except Exception as exc:
+        ctx.emit("precedent", "error", {"error": str(exc)[:300]})
+    try:
+        from research_agent.tools import corroboration
+
+        corroboration.corroborate(ctx)
+        out += corroboration.markdown(ctx)
+    except Exception as exc:
+        ctx.emit("corroboration", "error", {"error": str(exc)[:300]})
+    return out

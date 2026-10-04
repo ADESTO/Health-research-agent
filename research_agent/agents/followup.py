@@ -23,6 +23,7 @@ from research_agent.runstate import RunContext
 from research_agent.tools.base import INT, STR, STRS, Tool, obj
 from research_agent.tools.claims import PREDICATE_DOC, TEST_TOOL, propose_claim, verify_claims
 from research_agent.tools.extraction import ANALYSIS_TOOLS, _rows, protocol_of
+from research_agent.tools.corroboration import CORROBORATION_TOOL
 from research_agent.tools.fieldpass import FIELDPASS_TOOL
 from research_agent.tools.recheck import RECHECK_TOOL, _passages
 from research_agent.tools.burden import BURDEN_TOOL
@@ -301,6 +302,11 @@ How to work:
 - For a new count or a what-if ("does it hold in PMC only?", "what if LSTMs count as deep learning?"), use
   test_claim, then add_claim with text written from the measured numbers, and cite it. Use `where` for
   subgroups. Before calling something rare, run recheck_field.
+- When the researcher asks whether other papers support a finding, or whether a result has been replicated,
+  use corroborate (with the driver). Report support in INDEPENDENT sources as the tool counts them, quote
+  both sides, and say when the agreement comes only from a different kind of study (animal behind human) or
+  only from papers sharing a dataset or authors. A finding no other paper addresses is not addressed
+  elsewhere, never unsupported.
 - Every "n of N" you write must come from a claim or a tool result. Cite claims as [C12] and papers as
   [PMC123] or [arXiv:2401.00001], only ids the tools gave you. Quote papers word for word when you quote.
 - Say plainly when something cannot be answered from this run's papers, and what would answer it.
@@ -313,7 +319,7 @@ FOLLOWUP = FollowupAgent(
     role="Answers a researcher's follow-up questions about a finished run.",
     system=FOLLOWUP_SYSTEM,
     tools=[OVERVIEW_TOOL, ITEM_TOOL, READ_TOOL, READ_IN_FULL_TOOL, TEST_TOOL, ADD_CLAIM_TOOL, RECHECK_TOOL,
-           FIELDPASS_TOOL]
+           FIELDPASS_TOOL, CORROBORATION_TOOL]
     + [t for t in ANALYSIS_TOOLS if t.name in ("value_counts", "cross_tab", "list_extractions")] + RESULT_TOOLS
     + [CITATION_INFO_TOOL, BURDEN_TOOL] + [t for t in CITATION_TOOLS if t.name == "citation_graph"],
     finish_schema=obj({"answer": {**STR, "description": "The answer in Markdown, with citations"}}, ["answer"]),

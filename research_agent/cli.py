@@ -166,6 +166,12 @@ def main(argv: list[str] | None = None) -> int:
     p_pr.add_argument("run_id")
     p_pr.add_argument("--item", help="just one opportunity, e.g. G2 or N1")
     p_pr.add_argument("--candidates", type=int, default=40, help="papers to pull per opportunity")
+    p_cb = sub.add_parser("corroborate", help="which papers back each other up: every reported association set "
+                                             "beside every other about the same driver and outcome")
+    p_cb.add_argument("run_id")
+    p_cb.add_argument("--driver", help="just one driver, e.g. testosterone therapy")
+    p_cb.add_argument("--all", dest="show_all", action="store_true",
+                      help="also list findings only one paper reports")
     p_rr = sub.add_parser("reread", help="read a finished run's papers in full again and re-code their records")
     p_rr.add_argument("run_id")
     p_rr.add_argument("--limit", type=int, help="how many papers (default MAX_FULLTEXT)")
@@ -404,6 +410,8 @@ def main(argv: list[str] | None = None) -> int:
         return cohort_cmd(args)
     elif args.cmd == "precedent":
         return precedent_cmd(args)
+    elif args.cmd == "corroborate":
+        return corroborate_cmd(args)
     elif args.cmd == "report":
         from research_agent.db import get_conn
 
@@ -469,6 +477,37 @@ def _cohort_conditions(specs: list[str]) -> tuple[list[dict], str | None]:
             continue
         out.append({"field": field, "any_of": [v.strip() for v in values.split(",") if v.strip()]})
     return out, None
+
+
+def corroborate_cmd(args) -> int:
+    """Print which findings independent papers back, dispute or leave alone."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools.corroboration import MEANS, corroborate
+
+    ctx = RunContext.attach(args.run_id, llm_factory=lambda strong=False, step=None: None)
+    try:
+        res = corroborate(ctx, driver=args.driver)
+        if not res["findings"]:
+            print(res.get("note") or "No findings to compare."); return 0
+        print(f"{res['statements']} statements from the papers, in {len(res['findings'])} findings: "
+              + ", ".join(f"{n} {v.replace('_', ' ')}" for v, n in res["summary"].items()))
+        for f in res["findings"]:
+            if f["verdict"] == "not_addressed_elsewhere" and not args.show_all:
+                continue
+            dirs = ", ".join(f"{d}: {v['independent_sources']} source(s) {v['papers']}"
+                             for d, v in f["by_direction"].items())
+            print(f"\n{f['driver']} -> {f['outcome']}   [{f['verdict'].replace('_', ' ')}]")
+            print(f"   {dirs}")
+            if f.get("what_separates_the_sides"):
+                print("   sides differ in: " + "; ".join(x["attribute"] for x in f["what_separates_the_sides"][:3]))
+            if len(f["driver_wordings"]) > 1:
+                print("   treated as one driver: " + ", ".join(f["driver_wordings"]))
+        if not args.show_all and res["summary"].get("not_addressed_elsewhere"):
+            print(f"\n{res['summary']['not_addressed_elsewhere']} findings are reported by one paper only "
+                  "(--all to list them). " + MEANS["not_addressed_elsewhere"].capitalize() + ".")
+    finally:
+        ctx.close()
+    return 0
 
 
 def precedent_cmd(args) -> int:

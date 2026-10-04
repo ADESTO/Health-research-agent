@@ -342,18 +342,36 @@ def method_comparison(ctx, method_a: list[str], method_b: list[str], metric: str
 
 
 def associations(ctx, driver: str | None = None) -> dict:
-    want = driver_key(driver) if driver else None
+    """Reported associations grouped by driver. Drivers are grouped by meaning, not only by the malaria list:
+    "TRT", "testosterone therapy" and "testosterone replacement therapy" are one driver here (see
+    tools/corroboration.group_phrases), which is what lets contradictions work outside malaria."""
+    from research_agent.tools.corroboration import group_phrases
+
+    rows = _rows(ctx)
+    written = [it.get("driver_as_written") or it["driver"] for r in rows
+               for it in r["data"].get("reported_associations") or []]
+    canon = {w: driver_key(w) for w in written if driver_key(w) != w.lower().strip()}
+    groups = group_phrases(written, canonical=canon) if written else {}
+
+    def label(it):
+        w = it.get("driver_as_written") or it["driver"]
+        return groups.get(w, {}).get("group", it["driver"])
+
+    want = None
+    if driver:
+        want = groups.get(driver, {}).get("group") or driver_key(driver)
     out: dict[str, dict] = {}
-    for r in _rows(ctx):
+    for r in rows:
         seen = set()
         for it in r["data"].get("reported_associations") or []:
-            if want and it["driver"] != want:
+            name = label(it)
+            if want and name != want and it["driver"] != want:
                 continue
-            key = (it["driver"], it["direction"])
+            key = (name, it["direction"])
             if key in seen:
                 continue
             seen.add(key)
-            d = out.setdefault(it["driver"], {d: [] for d in DIRECTIONS})
+            d = out.setdefault(name, {d: [] for d in DIRECTIONS})
             d[it["direction"]].append({"paper_id": r["paper_id"], "lag": it["lag"], "significant": it["significant"],
                                        "quote": it["quote"]})
     return {"drivers": {k: {d: v for d, v in dirs.items() if v} for k, dirs in out.items()}}

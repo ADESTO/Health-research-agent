@@ -3541,3 +3541,121 @@ def test_a_design_field_never_makes_an_animal_trial_choose_what_it_was(loaded_db
                         "values": ["animal_study", "human_trial", "review"]}]}
     clean3, problems3 = validate_protocol(raw3)
     assert [x["name"] for x in clean3["fields"]] == ["q_kind"] and not any("moved" in p for p in problems3)
+
+
+def test_papers_back_each_other_up_counted_in_independent_sources(ctx, monkeypatch):
+    """Every reported association is set beside every other about the same driver and outcome. Wordings of
+    one driver meet; an endogenous level and a treatment do not. Papers sharing a dataset are one source, and
+    support from another kind of study is counted apart."""
+    from research_agent.tools import corroboration as CB
+    from research_agent.tools import extraction as E
+    from research_agent.tools.results import associations
+
+    def row(pid, assocs, organisms=None, datasets=None):
+        return {"paper_id": pid, "source": "fulltext", "corpus": "pmc", "year": 2015, "title": pid,
+                "data": {"organisms": organisms or [], "populations": [], "study_designs": [],
+                         "datasets": datasets or [], "geography": [], "methods": [],
+                         "reported_associations": [
+                             {"driver": d.lower(), "driver_as_written": d, "outcome": o, "direction": dr,
+                              "significant": sig, "lag": "", "quote": f"{pid}: {d} and {o}"}
+                             for d, o, dr, sig in assocs]}}
+    rows = [
+        # haematocrit: three human papers (two from one registry) and one rat study, all the same way
+        row("p1", [("testosterone replacement therapy", "haematocrit", "positive", "yes")], datasets=["REG-A"]),
+        row("p2", [("TRT", "serum haematocrit levels", "positive", "yes")]),
+        row("p3", [("testosterone therapy", "haematocrit", "positive", "yes")], datasets=["REG-A"]),
+        row("p4", [("testosterone therapy", "haematocrit", "positive", "yes")], organisms=["Wistar rats"]),
+        # PSA: two independent rises against one paper finding no change
+        row("p5", [("testosterone therapy", "PSA", "positive", "yes")]),
+        row("p6", [("TRT", "prostate specific antigen", "none", "no")]),
+        row("p7", [("testosterone therapy", "PSA", "positive", "yes")]),
+        # an endogenous level is a different driver from a treatment, and only one paper reports it
+        row("p8", [("testosterone", "mortality", "negative", "yes")]),
+        # agreement only between a human study and an animal one
+        row("p11", [("testosterone therapy", "bone density", "positive", "yes")]),
+        row("p12", [("testosterone therapy", "bone density", "positive", "yes")], organisms=["mice"]),
+        # agreement only between two papers from the same registry
+        row("p13", [("testosterone therapy", "waist circumference", "negative", "yes")], datasets=["REG-B"]),
+        row("p14", [("testosterone therapy", "waist circumference", "negative", "yes")], datasets=["REG-B"]),
+        # one paper each way, no replication on either side
+        row("p15", [("testosterone therapy", "blood pressure", "positive", "yes")]),
+        row("p16", [("testosterone therapy", "blood pressure", "negative", "yes")]),
+        # every statement nonlinear or mixed
+        row("p9", [("testosterone therapy", "depressive symptoms", "mixed", "not_stated")]),
+        row("p10", [("testosterone therapy", "depressive symptoms", "nonlinear", "not_stated")]),
+    ]
+    from research_agent.tools import claims as CL
+
+    monkeypatch.setattr(E, "_rows", lambda _ctx: rows)
+    monkeypatch.setattr(CL, "_rows", lambda _ctx: rows)      # results reads papers through the claims module
+
+    # grouping: what meets and what must not
+    g = CB.group_phrases(["testosterone replacement therapy", "TRT", "testosterone therapy", "testosterone",
+                          "serum testosterone levels"])
+    assert g["TRT"]["group"] == g["testosterone therapy"]["group"] == g["testosterone replacement therapy"]["group"]
+    assert g["testosterone"]["group"] == g["serum testosterone levels"]["group"]     # how it was measured is noise
+    assert g["testosterone"]["group"] != g["testosterone therapy"]["group"], "a level is not a treatment"
+    assert any("acronym" in r for r in g["TRT"]["why_merged"])
+    assert not CB._acronym_of("age", "androgen gel exposure"), "only capitals are read as an acronym"
+    # a qualified exposure is a different exposure, even where the malaria driver list would merge them
+    rain = CB.group_phrases(["rainfall", "precipitation", "heavy rainfall", "excess rainfall"],
+                            canonical={"rainfall": "rainfall", "precipitation": "rainfall",
+                                       "heavy rainfall": "rainfall", "excess rainfall": "rainfall"})
+    assert rain["rainfall"]["group"] == rain["precipitation"]["group"] == "rainfall"
+    assert rain["heavy rainfall"]["group"] != "rainfall" and rain["excess rainfall"]["group"] != "rainfall"
+    # for an outcome, the measure is noise: cases and incidence of one disease are the same outcome
+    out = CB.group_phrases(["malaria incidence", "malaria cases", "malaria prevalence", "malaria mortality"],
+                           outcomes=True)
+    assert out["malaria incidence"]["group"] == out["malaria cases"]["group"] == out["malaria prevalence"]["group"]
+    assert out["malaria mortality"]["group"] != out["malaria cases"]["group"], "death is not a measure of how much"
+
+    # relations come from directions alone
+    assert CB.relation("positive", "positive") == "supports"
+    assert CB.relation("positive", "negative") == "contradicts"
+    assert CB.relation("positive", "none") == "disputes_existence"
+    assert CB.relation("positive", "mixed") == "qualifies"
+    assert CB.relation("positive", "positive", "yes", "no") == "agrees_in_direction"
+
+    res = CB.corroborate(ctx)
+    by = {(f["driver"], f["outcome"]): f for f in res["findings"]}
+    # the group's label is its most used wording in THIS run, and every wording is listed with it
+    therapy = next(f["driver"] for f in res["findings"] if "TRT" in f["driver_wordings"])
+    assert therapy == "testosterone therapy"
+    assert g["TRT"]["group"] == "testosterone replacement therapy", "on a tie the spelled-out wording wins"
+
+    hct = next(f for (d, o), f in by.items() if d == therapy and "haematocrit" in o)
+    assert hct["verdict"] == "corroborated" and hct["papers"] == 4
+    assert hct["independent_sources"] == 3, "p1 and p3 share a registry, so they are one source"
+    p1 = next(s for s in hct["statements"] if s["paper_id"] == "p1")
+    assert p1["independent_support"] == 2 and p1["independent_support_same_system"] == 1
+    assert "p3" in p1["backed_by"] and any("REG-A" in x.lower() or "reg-a" in x for x in p1["linked_by"])
+    assert set(hct["driver_wordings"]) >= {"TRT", "testosterone therapy", "testosterone replacement therapy"}
+
+    psa = next(f for (d, o), f in by.items() if d == therapy and o in ("PSA", "prostate specific antigen"))
+    assert psa["verdict"] == "contested" and psa["by_direction"]["positive"]["independent_sources"] == 2
+    assert "p6" in next(s for s in psa["statements"] if s["paper_id"] == "p5")["against"]
+
+    alone = next(f for (d, o), f in by.items() if o == "mortality")
+    assert alone["verdict"] == "not_addressed_elsewhere" and alone["driver"] != therapy
+    assert "not evidence against" in alone["means"]
+
+    assert next(f for (d, o), f in by.items() if o == "bone density")["verdict"] == "corroborated_across_systems_only"
+    assert next(f for (d, o), f in by.items() if o == "waist circumference")["verdict"] == \
+        "repeated_by_related_papers_only"
+    assert next(f for (d, o), f in by.items() if o == "blood pressure")["verdict"] == "contradicted"
+    assert next(f for (d, o), f in by.items() if o == "depressive symptoms")["verdict"] == "qualified"
+
+    # the run keeps it, the report says it in plain terms, and nothing internal leaks into the note
+    note = ctx.notes()["corroboration"]
+    assert note["findings"] and all("_row" not in s for f in note["findings"] for s in f["statements"])
+    md = "\n".join(CB.markdown(ctx))
+    assert "Do the papers back each other up?" in md and "independent sources" in md
+    assert "not that they are unsupported" in md and "TRT" in md
+
+    # the old contradictions code now meets these wordings too, instead of only the malaria list
+    drivers = associations(ctx)["drivers"]
+    assert therapy in drivers and "TRT" not in drivers
+
+    # the follow-up tool sees the same thing, trimmed for a model
+    tool = CB.corroborate_tool(ctx, driver="TRT")
+    assert tool["findings"] and all(f["driver"] == therapy for f in tool["findings"])

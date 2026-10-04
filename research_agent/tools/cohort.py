@@ -77,6 +77,15 @@ def of(ctx) -> dict | None:
     return value
 
 
+def clear_cache(ctx) -> None:
+    """Forget the cohort read earlier on this context, so the next count reads what is stored now."""
+    try:
+        if hasattr(ctx, "_cohort"):
+            del ctx._cohort
+    except Exception:
+        pass
+
+
 def set_cohort(ctx, include=None, exclude=None, unstated: str = "keep", note: str = "") -> dict:
     """Store the scope this run's numbers are counted over. Re-settable: the next count uses the new one."""
     if unstated not in UNSTATED:

@@ -323,7 +323,16 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
     try:
         from research_agent.tools import precedent, resolve
 
+        # every opportunity is checked against the whole corpus before the report says anything about it
+        precedent.check(ctx)
         computed += precedent.markdown(ctx) + resolve.markdown(ctx)
+    except Exception:
+        pass
+    try:
+        from research_agent.tools import corroboration
+
+        corroboration.corroborate(ctx)
+        computed += corroboration.markdown(ctx)
     except Exception:
         pass
     try:

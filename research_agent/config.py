@@ -99,6 +99,9 @@ class Settings:
     resolve_papers_per_claim: int = int(os.getenv("RESOLVE_PAPERS_PER_CLAIM", "8"))
     # and a budget for the pass as a whole, so a run's full-text reads stay predictable however many claims
     # come out thin: the same allowance the extraction step gets, unless set otherwise
+    # how close in meaning two driver or outcome phrases must be to count as the same thing when papers'
+    # statements are set beside each other (tools/corroboration.py); 1 turns meaning-based merging off
+    corroboration_similarity: float = float(os.getenv("CORROBORATION_SIMILARITY", "0.88"))
     resolve_max_papers: int = int(os.getenv("RESOLVE_MAX_PAPERS", "0")) or int(os.getenv("MAX_FULLTEXT", "20"))
     # agents whose final answer is a long structured list (map protocol, gap reasoning, designs)
     long_output_max_tokens: int = int(os.getenv("LONG_OUTPUT_MAX_TOKENS", "8192"))

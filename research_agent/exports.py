@@ -32,6 +32,7 @@ FORMATS = {
     "burden": ("text/csv", "research_vs_burden.csv"), "burden_chart": ("image/png", "research_vs_burden.png"),
     "opportunities": ("text/csv", "research_opportunities.csv"),
     "package": ("application/zip", "evidence_package.zip"),
+    "corroboration": ("text/csv", "corroboration.csv"),
 }
 
 
@@ -375,6 +376,26 @@ def _opportunity_rows(ctx):
     return header, rows
 
 
+def _corroboration_rows(ctx):
+    from research_agent.tools.corroboration import corroborate
+
+    header = ["driver", "outcome", "verdict", "paper_id", "direction", "significant", "study_system",
+              "independent_support", "independent_support_same_system", "backed_by", "against", "quote",
+              "linked_to_other_papers_by"]
+    rows = []
+    for f in corroborate(ctx, save=False).get("findings") or []:
+        for st in f["statements"]:
+            rows.append([f["driver"], f["outcome"], f["verdict"], st["paper_id"], st["direction"], st["significant"],
+                         st["system"], st["independent_support"], st["independent_support_same_system"],
+                         "; ".join(st["backed_by"]), "; ".join(st["against"]), st["quote"],
+                         "; ".join(st["linked_by"])])
+    return header, rows
+
+
+def _export_corroboration(ctx):
+    return _csv(*_corroboration_rows(ctx))
+
+
 def _screening_rows(ctx):
     from research_agent.tools.review import screening_rows
 
@@ -437,6 +458,8 @@ PACKAGE = [
     ("opportunities.csv", "opportunities", "What the run says is worth doing: what supports each one, what "
                                           "weakens it, what is unresolved, and whether the corpus already "
                                           "holds a study that does it."),
+    ("corroboration.csv", "corroboration", "Every association a paper reports, with the papers that back it, "
+                                           "dispute it or qualify it, counted in independent sources."),
     ("extractions.csv", "csv", "One row per analysed paper: every extracted field and the verified quote "
                                "behind each one."),
     ("screening_log.csv", "screening", "Every paper the search surfaced and what happened to it "
@@ -525,7 +548,7 @@ def _export_xlsx(ctx):
 
     wb = Workbook()
     sheets = [("Papers", *_paper_rows(ctx)), ("Claims", *_claim_rows(ctx)),
-              ("Opportunities", *_opportunity_rows(ctx)), ("Screening", *_screening_rows(ctx)),
+              ("Opportunities", *_opportunity_rows(ctx)), ("Corroboration", *_corroboration_rows(ctx)), ("Screening", *_screening_rows(ctx)),
               ("Research vs burden", *_burden_rows(ctx))]
     res_rows, assoc_rows = [], []
     for r in C._rows(ctx):
