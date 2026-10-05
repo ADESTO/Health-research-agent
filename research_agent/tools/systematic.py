@@ -45,12 +45,22 @@ enough to decide, answer unclear: the paper goes on to be read in full, which is
 stage. Judge each paper on its own text; never carry a fact from one paper to another.
 
 Research question: {question}
-
+{places}
 Include papers that:
 {inclusion}
 
 Exclude papers that:
-{exclusion}"""
+{exclusion}
+
+When you exclude, set `criterion` to the criterion the decision turns on, copied from the lists above (for
+an inclusion criterion the paper fails, write "not met: " followed by it)."""
+
+PLACES_LINE = """
+Setting: the review covers studies whose data come from {countries}. A study whose data come only from other
+countries is excluded under "outside the review's countries"; a study that does not say where its data come
+from is unclear, not excluded.
+"""
+OUTSIDE = "outside the review's countries"
 
 
 def mode_of(ctx) -> str:
@@ -89,8 +99,10 @@ def _screen_batch(llm, ctx, papers: list[dict], protocol: dict) -> dict[str, dic
                     "criterion": {"type": "string", "description": "The criterion the decision turns on"},
                     "reason": {"type": "string", "description": "One short sentence"}},
                 "required": ["paper_id", "decision", "reason"]}}}, "required": ["records"]}}
+    countries = protocol.get("countries") or []
     system = SCREEN_SYSTEM.format(
         question=ctx.question,
+        places=PLACES_LINE.format(countries=", ".join(countries)) if countries else "",
         inclusion="\n".join(f"- {x}" for x in protocol.get("inclusion") or ["(none stated)"]),
         exclusion="\n".join(f"- {x}" for x in protocol.get("exclusion") or ["(none stated)"]))
     text = "\n\n".join(f"=== Paper {p['paper_id']} ===\nTitle: {p['title']}\nAbstract: {(p['abstract'] or '')[:2500]}"
@@ -172,12 +184,13 @@ def systematic_discovery(ctx, protocol: dict, max_analysed: int | None = None,
         if d["decision"] == "exclude":
             excluded.append(pid)
             log_decision(ctx, [pid], "excluded", (d.get("criterion") + ": " if d.get("criterion") else "")
-                         + (d.get("reason") or ""))
+                         + (d.get("reason") or ""), criterion=criterion_label(d.get("criterion"), protocol))
         else:
             eligible.append(pid)
     unscreened = [p for p in to_screen if p not in decisions]
     if unscreened:
-        log_decision(ctx, unscreened, "excluded", "could not be screened (no decision came back)")
+        log_decision(ctx, unscreened, "excluded", "could not be screened (no decision came back)",
+                     criterion="could not be screened")
 
     analysed = eligible
     if len(eligible) > max_analysed:
@@ -185,16 +198,53 @@ def systematic_discovery(ctx, protocol: dict, max_analysed: int | None = None,
         log_decision(ctx, sorted(set(eligible) - set(analysed)), "over_limit",
                      f"eligible; not in the random sample of {max_analysed} analysed (seed {seed})")
     _shortlist(ctx, analysed, decisions)
+    cohort_set = place_cohort(ctx, protocol)
     misses = recall_check(ctx, set(found))
     note = {"mode": "systematic", "query": query, "query_was_fallback": fallback, "seed": seed,
             "identified": len(found), "screened": len(to_screen), "screened_is_sample": len(found) > max_screened,
             "eligible": len(eligible), "excluded": len(excluded), "unscreened": len(unscreened),
             "analysed": len(analysed), "analysed_is_sample": len(eligible) > max_analysed,
-            "missed_by_query": misses}
+            "missed_by_query": misses, "countries": protocol.get("countries") or [],
+            "place_cohort_set": cohort_set}
     ctx.save_note("search", note)
     ctx.emit("discovery", "finish", {"output": {k: note[k] for k in ("identified", "screened", "eligible",
                                                                         "analysed")}})
     return note
+
+
+def criterion_label(written: str | None, protocol: dict) -> str:
+    """The criterion an exclusion is counted under in PRISMA: the protocol's own wording when the screener's
+    matches one of its criteria, so ten paraphrases of one criterion are one line, not ten."""
+    w = " ".join(str(written or "").split()).strip(" .:")
+    if not w:
+        return "no criterion named"
+    low = w.lower().removeprefix("not met:").strip()
+    if OUTSIDE in low:
+        return OUTSIDE
+    for kind, items in (("exclude", protocol.get("exclusion") or []), ("not met", protocol.get("inclusion") or [])):
+        for c in items:
+            cl = " ".join(str(c).split()).strip(" .").lower()
+            if cl and (cl == low or cl in low or (len(low) >= 12 and low in cl)):
+                return (c if kind == "exclude" else f"not met: {c}")[:120]
+    return w[:120]
+
+
+def place_cohort(ctx, protocol: dict) -> bool:
+    """When the protocol limits the review to named countries, count only papers whose quoted study location
+    is in them. Screening sees only an abstract and lets some through; the extracted `geography` field is
+    quote-checked, so after reading, code (not the screener) decides. A paper that names no country (only a
+    region, or nothing) is kept and counted as silent. Never replaces a cohort the user already set."""
+    from research_agent.tools import cohort
+
+    countries = [c for c in protocol.get("countries") or [] if str(c).strip()]
+    if not countries or cohort.of(ctx) or ctx.notes().get("place_cohort"):
+        return False          # set once per run: a user who clears it in the counting panel keeps it cleared
+    res = cohort.set_cohort(ctx, include=[{"field": "country", "any_of": countries}], unstated="keep",
+                            note="Set from the protocol's countries: papers whose data come only from other "
+                                 "countries are not counted.")
+    ok = "error" not in res
+    ctx.save_note("place_cohort", {"countries": countries, "set": ok, "error": res.get("error")})
+    return ok
 
 
 def _shortlist(ctx, ids: list[str], decisions: dict) -> None:

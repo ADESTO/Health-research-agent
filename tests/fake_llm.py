@@ -198,7 +198,7 @@ class FakeLLM:
     @staticmethod
     def _agent(system: str) -> str:
         for key, name in (("Protocol agent", "protocol"), ("Gap Reasoning agent", "gap_reasoning"),
-                          ("Research Design agent", "design"),
+                          ("Research Design agent", "design"), ("Research Design Writer", "design_writer"),
                           ("Research Manager", "orchestrator"), ("Discovery agent", "discovery"),
                           ("Literature Analyst", "literature"), ("Methods agent", "methods"),
                           ("Trend agent", "trends"), ("Research Gap agent", "gaps"),
@@ -512,16 +512,29 @@ class FakeLLM:
             cross_cutting=["Validation practice follows data access (H1)."])]
 
     def _design(self, step, last, messages):
+        # the planner outlines; each design is then written by the writer in its own call
         if step == 0:
             return [_call("get_map")]
         m = last[0]
         gap = m["gaps"][0]["id"]
         pid = m["established"][0]["example_paper_ids"][0]
         return [_call("finish", designs=[
-            {"title": "District-holdout 3-6 month forecasts", "target": "monthly cases per district",
-             "predictors": ["rainfall", "temperature"], "horizon": "3-6 months",
-             "validation_strategy": "leave-one-district-out", "baseline": "seasonal naive",
-             "addresses": [gap, "G99", "H1"], "rests_on": ["H77"], "builds_on": [pid],
-             "supporting": [{"paper_id": pid, "why": "uses the same surveillance data"}],
-             "challenging": [{"paper_id": "9999.99999", "why": "invented"}]},
-            {"title": "Unanchored idea", "target": "x", "validation_strategy": "y", "addresses": ["G99"]}])]
+            {"title": "District-holdout 3-6 month forecasts", "idea": "forecast monthly cases, test on held-out districts",
+             "addresses": [gap, "G99", "H1"], "rests_on": ["H77"], "papers": [pid]},
+            {"title": "Unanchored idea", "idea": "x", "addresses": ["G99"]}])]
+
+    def _design_writer(self, step, last, messages):
+        if step == 0:
+            return [_call("get_map")]
+        task = messages[0]["content"][0]["text"]
+        outline = json.loads(task.split("Outline:\n", 1)[1].split("\n\nCurrent shared state", 1)[0])
+        if outline["title"] != "District-holdout 3-6 month forecasts":
+            return [_call("finish", title=outline["title"], target="x", validation_strategy="y",
+                          addresses=outline["addresses"])]
+        pid = outline["papers"][0]
+        return [_call("finish", title=outline["title"], target="monthly cases per district",
+                      predictors=["rainfall", "temperature"], horizon="3-6 months",
+                      validation_strategy="leave-one-district-out", baseline="seasonal naive",
+                      addresses=outline["addresses"], rests_on=outline["rests_on"], builds_on=[pid],
+                      supporting=[{"paper_id": pid, "why": "uses the same surveillance data"}],
+                      challenging=[{"paper_id": "9999.99999", "why": "invented"}])]

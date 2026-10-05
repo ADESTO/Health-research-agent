@@ -254,6 +254,8 @@ def run_research(question: str | None = None, mode: str = "orchestrated", provid
             systematic.systematic_discovery(ctx, protocol)
             if not ctx.shortlist_ids():
                 raise RuntimeError("the systematic search found no eligible papers; widen the question")
+        if protocol:
+            systematic.place_cohort(ctx, protocol)   # count only the protocol's countries, in either mode
         if mode == "pipeline":
             for name in ORDER:
                 if name != "discovery" and not ctx.shortlist_ids():

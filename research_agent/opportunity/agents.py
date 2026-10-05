@@ -231,31 +231,92 @@ _DESIGN_ITEM = {"type": "object", "properties": {
     "risks": STRS,
 }, "required": ["title", "target", "validation_strategy", "addresses"]}
 
+_DESIGN_PLAN_ITEM = {"type": "object", "properties": {
+    "title": STR,
+    "idea": {**STR, "description": "The study in one or two sentences: what it estimates and how it is tested"},
+    "addresses": {**STRS, "description": "Map item ids this design targets (G#, N#, R#, E#) only"},
+    "rests_on": {**STRS, "description": "Tested hypothesis ids (H#) that justify the design"},
+    "papers": {**STRS, "description": "Paper ids you found that bear on it, for or against"},
+}, "required": ["title", "idea", "addresses"]}
+
+_DESIGN_BRIEF = """Each design is a study a researcher could actually run, filling specific gaps (G#) or testing
+novel combinations (N#) from the map. Ground choices in the map's numbers and the tested hypotheses from gap
+reasoning (get_map includes them). Prefer designs that fix a high-confidence gap with data the field already
+uses, and designs resting on supported hypotheses; one resting on a hypothesis that was not supported must
+say why it is still worth doing. Use only paper ids that tools returned."""
+
+# Designs are written one per call. Asking for all of them in one finish produced a long JSON that the output
+# limit cut off ("finish arguments were cut off"), losing the last design or all of them. The planner returns
+# short outlines; a writer turns each into a full design in its own call, so one long design can never take
+# the others down with it.
 DESIGN = Agent(
-    name="design",
+    name="design_plan",
     role="Turns the opportunity map into concrete candidate research designs with supporting and challenging "
          "papers.",
-    system="""You are the Research Design agent of a Research Opportunity Map. Propose 2-4 candidate studies that
-a researcher could actually run, each filling specific gaps (G#) or testing novel combinations (N#) from the map.
+    system="""You are the Research Design agent of a Research Opportunity Map. Choose 2-4 candidate studies and
+return a short outline of each: a title, the idea in one or two sentences, the map items it addresses, the
+hypotheses it rests on and the paper ids that bear on it. Each design is written out in full later, one at a
+time, so keep the outline short.
 
-For each design give: research question, target (with units), predictors, data sources, forecast horizon or
-time frame, spatial unit, validation strategy (how data is split: this is where most gaps are), baseline to
-beat, and the map items it addresses. Then:
-- supporting: papers whose data, methods or findings make the design feasible or promising, and why;
-- rests_on: the tested hypotheses (H#) that justify it. Prefer supported ones; a design resting on a
-  hypothesis that was not supported must say why it is still worth doing.
-- challenging: papers whose findings or stated limitations argue it may fail or be hard, and why. Look
-  for these honestly (find_passages on limitations): a design with no challenging evidence was not looked at
-  hard enough.
-Use only paper ids that tools returned, and ground choices in the map's numbers and the tested hypotheses
-from gap reasoning (get_map includes them). Prefer designs that fix a high-confidence gap with data the
-field already uses.""",
+""" + _DESIGN_BRIEF,
     tools=MAP_TOOLS + [PASSAGE_TOOL] + _analysis("value_counts", "cross_tab", "list_extractions"),
-    finish_schema=obj({"designs": {"type": "array", "items": _DESIGN_ITEM}}, ["designs"]),
-    max_turns=14,
+    finish_schema=obj({"designs": {"type": "array", "items": _DESIGN_PLAN_ITEM}}, ["designs"]),
+    max_turns=12,
     strong_model=True,
     long_output=True,
 )
+
+DESIGN_WRITER = Agent(
+    name="design_writer",
+    role="Writes one candidate research design in full.",
+    system="""You are the Research Design Writer of a Research Opportunity Map. Write ONE candidate study in
+full, from the outline in your task.
+
+Give: research question, target (with units), predictors, data sources, forecast horizon or time frame,
+spatial unit, validation strategy (how data is split: this is where most gaps are), baseline to beat, and the
+map items it addresses. Then:
+- supporting: papers whose data, methods or findings make the design feasible or promising, and why;
+- rests_on: the tested hypotheses (H#) that justify it;
+- challenging: papers whose findings or stated limitations argue it may fail or be hard, and why. Look for
+  these honestly (find_passages on limitations): a design with no challenging evidence was not looked at hard
+  enough.
+Keep each text field to one or two sentences.
+
+""" + _DESIGN_BRIEF,
+    tools=MAP_TOOLS + [PASSAGE_TOOL] + _analysis("list_extractions"),
+    finish_schema=_DESIGN_ITEM,
+    max_turns=6,
+    strong_model=True,
+    long_output=True,
+)
+
+
+def write_designs(ctx) -> dict:
+    """Plan the designs, then write each in its own call. Returns {"designs": [...]} for check_designs. A
+    design whose writer fails keeps its outline, so it is reported thinly rather than lost."""
+    import json as _json
+
+    ctx.emit("design", "start", {"task": "plan the designs, then write each one in its own call"})
+    plan = DESIGN.run(ctx, "Choose candidate research designs from the map and outline them.")
+    outlines = [o for o in plan.get("designs") or [] if isinstance(o, dict)][:4]
+    designs = []
+    for k, o in enumerate(outlines, 1):
+        task = (f"Write design {k} of {len(outlines)} in full. Outline:\n"
+                + _json.dumps({x: o.get(x) for x in ("title", "idea", "addresses", "rests_on", "papers")}))
+        try:
+            full = DESIGN_WRITER.run(ctx, task)
+        except Exception as exc:
+            ctx.emit("design_writer", "error", {"error": str(exc)[:300]})
+            full = {}
+        if not isinstance(full, dict) or not full.get("title"):
+            full = {"title": o.get("title"), "research_question": o.get("idea"),
+                    "_note": "written from the outline only"}
+        # the outline's references are kept when the writer leaves them out
+        full["addresses"] = full.get("addresses") or o.get("addresses") or []
+        full["rests_on"] = full.get("rests_on") or o.get("rests_on") or []
+        designs.append(full)
+    ctx.emit("design", "finish", {"output": {"designs": len(designs)}})
+    return {"designs": designs}
 
 
 # ---------------------------------------------------------------- post-checks on the agents' output

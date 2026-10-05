@@ -24,6 +24,12 @@ STRUCT_FIELDS = ["reported_results", "reported_associations"]
 SPLITS = ["test_or_holdout", "cross_validation", "in_sample", "not_stated"]
 DIRECTIONS = ["positive", "negative", "none", "nonlinear", "mixed"]
 
+# Measured quantities the extractor names itself (the `analyte` field). An abbreviation such as "E2" means
+# oestradiol in one paper and prostaglandin E2 in another, which no pattern can tell apart: the model reading
+# the paper decides, and code uses its answer only when the metric's name is not already unambiguous.
+ANALYTES = ["total testosterone", "free testosterone", "oestradiol", "psa", "body weight",
+            "waist circumference", "mic", "other"]
+
 RESULT_SCHEMA = {
     "type": "array", "description": (
         "Main numbers the paper reports (up to 12): model performance (RMSE, AUC, accuracy, R2, sensitivity...), "
@@ -34,7 +40,14 @@ RESULT_SCHEMA = {
         "metric": STR, "value": {**STR, "description": "The number exactly as written, e.g. 0.87 or 12.4%"},
         "unit": {**STR, "description": "The unit exactly as written next to the number (ng/dL, nmol/L, mg/L, "
                  "kg, cm, years, %...), or '' for a dimensionless number such as an AUC, an odds ratio or a "
-                 "correlation. Copy it; do not convert it."},
+                 "correlation. Only the unit: never a number, a range or a confidence interval. Copy it; do "
+                 "not convert it."},
+        "analyte": {"type": "string", "enum": ANALYTES, "description": (
+            "What is measured, when the number is a level or amount rather than a statistic. Decide from the "
+            "paper's meaning, not the abbreviation: 'E2' is oestradiol only when it is the hormone estradiol; "
+            "prostaglandin E2 (PGE2), E2 ubiquitin enzymes, a group or experiment called E2, or any other E2 "
+            "is 'other'. Organ, tumour or birth weight is 'other', not body weight. Use 'other' for a "
+            "statistic (AUC, odds ratio, RMSE...) and for anything not listed.")},
         "model": {**STR, "description": "Which model, method, drug, arm or group it belongs to"},
         "is_baseline": {"type": "boolean", "description": "true for a comparator: baseline model, placebo, "
                         "control arm"},
@@ -58,6 +71,11 @@ ASSOCIATION_SCHEMA = {
 
 STRUCT_SCHEMA = {"reported_results": RESULT_SCHEMA, "reported_associations": ASSOCIATION_SCHEMA}
 
+_NOT_BODY = (r"\b(prostate|prostatic|birth|organ|liver|hepatic|kidney|renal|testis|testes|testicular|testicle|"
+             r"heart|cardiac|spleen|splenic|brain|uterine|uterus|ovarian|ovary|seminal vesicle|epididymal|"
+             r"epididymis|adrenal|thymus|thymic|lung|placental|placenta|fetal|foetal|tumou?r|wet|dry|molecular|"
+             r"gland|tissue|seed|egg|carcass|fat pad|muscle)")
+
 # lower is better for errors; higher is better for skill scores
 _METRICS = [
     ("rmse", r"\brmse\b|root mean squared? error", False), ("mae", r"\bmae\b|mean absolute error", False),
@@ -75,10 +93,13 @@ _METRICS = [
     ("free testosterone", r"free\s+(and\s+)?(serum\s+|plasma\s+)?testosterone|testosterone,?\s*free|\bfai\b|"
                           r"free androgen index", None),
     ("total testosterone", r"testosterone", None),
-    ("oestradiol", r"o?estradiol|\be2\b", None),
+    # spelled out only: a bare "E2" is ambiguous (oestradiol, prostaglandin E2...) and is left to the
+    # extractor's `analyte` label, see ANALYTES
+    ("oestradiol", r"o?estradiol", None),
     ("psa", r"\bpsa\b|prostate[- ]specific antigen", None),
     ("waist circumference", r"waist", None),
-    ("body weight", r"body ?weight|\bweight\b(?!ed)", None),
+    # "weight" alone is body weight, unless it is an organ's, a tumour's, a baby's at birth or a molecule's
+    ("body weight", r"body ?weight|^(?!.*" + _NOT_BODY + r"\s*weights?\b).*\bweight\b(?!ed)", None),
     ("auc", r"\bau(roc|c)\b|area under", True), ("r2", r"\br\s*(2|²|squared)\b|coefficient of determination", True),
     ("accuracy", r"accuracy", True), ("sensitivity", r"sensitivity|recall", True),
     ("specificity", r"specificity", True), ("f1", r"\bf1\b|f-?score", True),
@@ -144,6 +165,21 @@ def in_bounds(metric: str, value: float | None) -> bool:
     return value is None or lo is None or lo <= value <= hi
 
 
+def resolve_metric(name: str, analyte: str | None = None) -> tuple[str, bool | None]:
+    """The metric bucket for a reported number. The name decides when it is unambiguous (a pattern in
+    _METRICS matches it); otherwise the extractor's `analyte` label does. That is how "E2" lands with
+    oestradiol in an endocrinology paper and stays apart as "pge2" or "e2" everywhere else: the model that
+    read the paper knows which one it meant, and code cannot."""
+    key, higher = metric_key(name)
+    if any(key == k for k, _, _ in _METRICS):
+        return key, higher
+    if analyte in ANALYTES and analyte != "other":
+        if analyte == "body weight" and re.search(_NOT_BODY + r"\s*weights?\b", (name or "").lower()):
+            return key, higher           # an organ's or a baby's weight is never body weight
+        return analyte, None
+    return key, higher
+
+
 def metric_key(name: str) -> tuple[str, bool | None]:
     low = (name or "").lower()
     for key, rx, higher in _METRICS:
@@ -161,6 +197,8 @@ def driver_key(name: str) -> str:
 
 
 def parse_number(value: str) -> float | None:
+    """The first number in a value as written. A percentage is returned as a proportion (12.4% -> 0.124, and
+    0.5% -> 0.005: a percentage below one is still a percentage, not a proportion already)."""
     m = re.search(r"-?\d+(?:[.,]\d+)?", str(value or ""))
     if not m:
         return None
@@ -168,7 +206,44 @@ def parse_number(value: str) -> float | None:
         x = float(m.group(0).replace(",", "."))
     except ValueError:
         return None
-    return x / 100 if "%" in str(value) and x > 1 else x
+    return x / 100 if _is_percent(str(value)) else x
+
+
+# Metrics that are proportions: stored and pooled on 0 to 1, whether the paper wrote 0.87 or 87%.
+PROPORTIONS = {"auc", "accuracy", "sensitivity", "specificity", "f1", "prevalence"}
+# What a unit can look like: letters, µ, %, /, ·, ^, superscripts and digits only AFTER a letter (m2, m³).
+# Anything else written where a unit should be (a value, a range, a confidence interval) is not a unit.
+_UNIT_SHAPE = re.compile(r"^(%|[a-zµμ°][a-zµμ°0-9²³⁻¹/·.*^ -]{0,22})$", re.I)
+_NUMBER_THEN_UNIT = re.compile(r"-?\d+(?:[.,]\d+)?\s*(%|[a-zµμ°][a-zµμ°0-9²³⁻¹/·.*^-]{0,22})?", re.I)
+
+
+def _is_percent(raw: str) -> bool:
+    """Is the FIRST number in this text a percentage? ("12.4% (95% CI ...)" yes; "0.87 (95% CI 0.8-0.9)" no)"""
+    m = re.search(r"-?\d+(?:[.,]\d+)?\s*(%)?", raw or "")
+    return bool(m and m.group(1))
+
+
+def read_unit(raw_value: str, unit_field: str) -> tuple[str | None, bool]:
+    """(the unit as written, or None when there is none or it cannot be read; whether it is a percentage).
+
+    The unit comes from the unit field, or failing that from the text right after the number in the value
+    ("318 ng/dL"). It is never the value itself: an empty unit field used to fall back to the whole value, so
+    "0.87" or "12.4%" was printed in the Unit column of the results table."""
+    field = " ".join(str(unit_field or "").split()).strip(" ()[],;")
+    if field:
+        if field in ("%", "percent", "per cent", "percentage"):
+            return "%", True
+        return (field if _UNIT_SHAPE.match(field) else None), False
+    m = _NUMBER_THEN_UNIT.search(str(raw_value or ""))
+    if not m or not m.group(1):
+        return None, False
+    unit = m.group(1).strip(" .-")
+    if unit == "%":
+        return "%", True
+    # words that follow a number without being its unit
+    if unit.lower() in ("in", "of", "to", "and", "or", "vs", "versus", "at", "for", "ci", "with", "per", "x"):
+        return None, False
+    return (unit if _UNIT_SHAPE.match(unit) else None), False
 
 
 def verify_structured(args: dict, text: str) -> tuple[dict, dict]:
@@ -193,19 +268,25 @@ def verify_structured(args: dict, text: str) -> tuple[dict, dict]:
                 num = re.search(r"\d+(?:[.,]\d+)?", raw)
                 if not num or num.group(0) not in quote:
                     continue
-                key, higher = metric_key(it.get("metric"))
+                key, higher = resolve_metric(it.get("metric"), it.get("analyte"))
+                unit_written, percent = read_unit(raw, it.get("unit"))
                 value_num = parse_number(raw)
+                if percent and not _is_percent(raw) and value_num is not None:
+                    value_num = value_num / 100          # "87" with the unit "%" written separately
                 # a bare "AUC" above 1 (and not a percentage) is a plasma exposure, not a ROC curve
-                if key == "auc" and value_num is not None and value_num > 1 and "%" not in raw:
+                if key == "auc" and value_num is not None and value_num > 1 and not percent:
                     key, higher = "plasma auc", None
+                if percent and key not in PROPORTIONS and value_num is not None:
+                    value_num = round(value_num * 100, 6)  # a percentage that is not a proportion stays in %
                 if not in_bounds(key, value_num):
                     continue            # outside what the metric can be: a reading error, not a result
-                # the unit may be written beside the number rather than in the unit field
-                unit_text = str(it.get("unit") or "") or raw
-                canon_num, canon_unit = normalise_unit(key, unit_text, value_num)
+                if key in PROPORTIONS:
+                    canon_num, canon_unit = value_num, "proportion"
+                else:
+                    canon_num, canon_unit = normalise_unit(key, unit_written or "", value_num)
                 good.append({"metric": key, "metric_as_written": str(it.get("metric") or "")[:60],
                              "value": raw[:40], "value_num": value_num,
-                             "unit_as_written": str(it.get("unit") or "")[:24],
+                             "unit_as_written": (unit_written or "")[:24],
                              "unit": canon_unit, "value_canonical": canon_num,
                              "higher_is_better": higher, "model": str(it.get("model") or "")[:80],
                              "is_baseline": bool(it.get("is_baseline")),

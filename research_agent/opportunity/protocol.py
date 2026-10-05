@@ -108,7 +108,10 @@ search_query for a systematic search: the question's own concepts joined with AN
 and spellings joined with OR, written to find EVERY eligible study rather than the best few (e.g. malaria AND
 (rainfall OR precipitation OR temperature) AND (Kenya OR Uganda OR Tanzania OR "East Africa")). Check its
 yield with corpus_count: aim for roughly 30 to 600 papers; if it finds thousands it is the topic, not the
-question.""",
+question.
+If the question limits the studies to a place, list in `countries` every country it covers, one country per
+entry and never a region (for East Africa, name each country you mean). Leave it empty when the question
+covers anywhere: it decides which papers are counted, so do not guess.""",
     tools=[t for t in SEARCH_TOOLS if t.name in ("hybrid_search", "corpus_count")],
     finish_schema=obj({
         "setting": STR,
@@ -119,11 +122,32 @@ question.""",
                                                            "joined with AND, synonyms with OR"},
         "inclusion": STRS,
         "exclusion": STRS,
+        "countries": {**STRS, "description": "Countries the studies' data must come from, one per entry; empty "
+                                              "when the question names no place"},
         "fields": {"type": "array", "items": _FIELD_SPEC},
     }, ["fields"]),
     max_turns=6,
     long_output=True,
 )
+
+
+def _countries_of(raw) -> tuple[list[str], list[str]]:
+    """(recognised country names, in the protocol's wording; entries dropped). Each kept entry maps to one
+    country, so the cohort built from it can be checked by code against a paper's quoted geography."""
+    from research_agent.tools.burden import country_name, to_country
+
+    keep, dropped, seen = [], [], set()
+    for x in (raw if isinstance(raw, list) else []):
+        name = " ".join(str(x or "").split())[:80]
+        if not name:
+            continue
+        iso3 = to_country(name)[0]
+        if not iso3:
+            dropped.append(name)
+        elif iso3 not in seen:
+            seen.add(iso3)
+            keep.append(country_name(iso3))
+    return keep[:60], dropped
 
 
 def _snake(v) -> str:
@@ -273,11 +297,16 @@ def validate_protocol(raw: dict) -> tuple[dict, list[str]]:
     problems += split
     if not fields:
         problems.append("no usable question-specific fields")
+    countries, places_dropped = _countries_of(raw.get("countries"))
+    if places_dropped:
+        problems.append("countries: dropped " + ", ".join(places_dropped)
+                        + " (not recognised as a country; regions must be written as their countries)")
     clean = {"setting": _clip(raw.get("setting"), 900),
              "topic_query": " ".join(str(raw.get("topic_query") or "").split())[:300],
              "search_query": " ".join(str(raw.get("search_query") or "").split())[:600],
              "inclusion": [_clip(x, 400) for x in (raw.get("inclusion") or [])][:8],
              "exclusion": [_clip(x, 400) for x in (raw.get("exclusion") or [])][:8],
+             "countries": countries,
              "fields": fields}
     return clean, problems
 

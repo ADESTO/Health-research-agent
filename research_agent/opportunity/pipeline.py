@@ -11,7 +11,7 @@ from __future__ import annotations
 import traceback
 
 from research_agent.agents.orchestrator import _already_done, run_specialist
-from research_agent.opportunity.agents import DESIGN, GAP_REASONING, check_designs, check_gap_reasoning
+from research_agent.opportunity.agents import GAP_REASONING, check_designs, check_gap_reasoning, write_designs
 from research_agent.opportunity.compute import compute_map
 from research_agent.opportunity.protocol import ensure_protocol, extract_protocol_fields, probe_concepts
 from research_agent.opportunity.render import references, render_map
@@ -76,6 +76,8 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
             if name == "discovery" and not ctx.shortlist_ids():
                 raise RuntimeError("discovery found no relevant papers; the map needs a shortlist")
 
+        systematic.place_cohort(ctx, protocol)   # purposive runs too: count only the protocol's countries
+
         # 4. question-specific fields for every paper (code + extraction calls) ------------------
         # (usually already done right after the literature step; this catches papers added since)
         earlier = ctx.notes().get("protocol_extraction")
@@ -100,7 +102,7 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
 
         # 7. candidate designs (LLM proposes, code checks references) -----------------------------
         if not (resume and _step_done(ctx, "design")):
-            raw = DESIGN.run(ctx, "Propose candidate research designs from the map.")
+            raw = write_designs(ctx)
             designs, gone = check_designs(ctx, raw)
             dropped += gone
             ctx.save_note("design", {"designs": designs, "dropped": gone})

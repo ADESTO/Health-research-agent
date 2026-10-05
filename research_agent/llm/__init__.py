@@ -15,7 +15,7 @@ from research_agent.llm.base import LLMClient, LLMResponse, ToolCall, Usage  # n
 CHEAP_STEPS = {"extraction", "protocol_fields", "recheck", "followup_reading", "number_check", "discovery",
                "literature", "evidence", "fieldpass"}
 # Judgement and writing: worth a stronger model.
-STRONG_STEPS = {"synthesis", "orchestrator", "gap_reasoning", "design", "followup", "contradictions",
+STRONG_STEPS = {"synthesis", "orchestrator", "gap_reasoning", "design", "design_plan", "design_writer", "followup", "contradictions",
                 "draft_plan", "draft", "research", "critic", "research_supervisor"}
 
 

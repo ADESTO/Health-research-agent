@@ -240,6 +240,8 @@ CREATE TABLE IF NOT EXISTS screening (
     ts       timestamptz DEFAULT now(),
     PRIMARY KEY (run_id, paper_id)
 );
+-- the criterion an exclusion turns on, so PRISMA can count exclusions by reason instead of by sentence
+ALTER TABLE screening ADD COLUMN IF NOT EXISTS criterion text;
 
 -- Citation graph from OpenAlex (cached; refreshed after CITATION_MAX_AGE_DAYS)
 CREATE TABLE IF NOT EXISTS openalex_works (

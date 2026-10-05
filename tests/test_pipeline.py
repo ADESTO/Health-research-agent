@@ -3801,3 +3801,166 @@ def test_systematic_search_finds_screens_and_analyses_every_eligible_paper(loade
     out = run_research("Which methods forecast malaria?", mode="pipeline",
                        llm_factory=lambda strong=False: FakeLLM(), search="systematic")
     assert "## How the papers were found (computed)" in out["report"]
+
+
+# ---------------------------------------------------------------- beta fixes: numbers, PRISMA, places, designs
+def test_e2_is_decided_by_the_extractor_not_by_a_pattern():
+    """"E2" is oestradiol in an endocrinology paper and prostaglandin E2 in an inflammation paper. No pattern
+    can tell them apart, so the model that read the paper labels the analyte and code follows its label; a
+    name that is already unambiguous is never overridden."""
+    from research_agent.tools.results import ANALYTES, RESULT_SCHEMA, metric_key, resolve_metric, verify_structured
+
+    assert "analyte" in RESULT_SCHEMA["items"]["properties"] and "oestradiol" in ANALYTES
+    assert metric_key("E2")[0] == "e2", "a bare E2 is no longer matched by code"
+    assert metric_key("serum estradiol")[0] == "oestradiol" and metric_key("oestradiol (E2)")[0] == "oestradiol"
+    assert resolve_metric("E2", "oestradiol")[0] == "oestradiol"
+    assert resolve_metric("E2", "other")[0] == "e2"
+    assert resolve_metric("PGE2", "oestradiol")[0] == "oestradiol"      # the label is the model's call
+    assert resolve_metric("prostaglandin E2", "other")[0] == "prostaglandin e2"
+    assert resolve_metric("RMSE", "oestradiol")[0] == "rmse", "a statistic's name is never overridden"
+
+    text = ("Serum E2 was 112 pg/mL in treated men. In the colitis model, PGE2 rose to 340 pg/mL after "
+            "challenge.")
+    kept, _ = verify_structured({"reported_results": [
+        {"metric": "E2", "analyte": "oestradiol", "value": "112", "unit": "pg/mL", "model": "treated",
+         "quote": "Serum E2 was 112 pg/mL in treated men"},
+        {"metric": "E2", "analyte": "other", "value": "340", "unit": "pg/mL", "model": "colitis",
+         "quote": "PGE2 rose to 340 pg/mL after challenge"}]}, text)
+    got = [(r["metric"], r["unit"]) for r in kept["reported_results"]]
+    assert got == [("oestradiol", "pmol/L"), ("e2", "pg/ml")]
+
+
+def test_organ_and_birth_weight_are_not_body_weight():
+    from research_agent.tools.results import metric_key, resolve_metric
+
+    for name in ("prostate weight", "relative prostate weight", "birth weight", "mean birth weight",
+                 "liver weight", "testis weights", "tumour weight", "wet weight of the seminal vesicle"):
+        assert metric_key(name)[0] != "body weight", name
+    for name in ("body weight", "bodyweight", "weight", "final weight", "weight gain"):
+        assert metric_key(name)[0] == "body weight", name
+    assert metric_key("weighted kappa")[0] != "body weight"
+    # even a label from the extractor cannot make an organ's weight a body weight
+    assert resolve_metric("prostate weight", "body weight")[0] == "prostate weight"
+
+
+def test_units_never_carry_values_and_percentages_are_read_once():
+    """The results table printed values in its Unit column (an empty unit fell back to the whole value), and
+    0.5% was read as the proportion 0.5. A unit is now only ever a unit, and a percentage is a percentage."""
+    from research_agent.tools import results as RS
+
+    assert RS.read_unit("0.87", "") == (None, False)
+    assert RS.read_unit("0.87 (95% CI 0.80-0.93)", "") == (None, False), "the CI's % is not the value's"
+    assert RS.read_unit("12.4%", "") == ("%", True)
+    assert RS.read_unit("318 ng/dL", "") == ("ng/dL", False)
+    assert RS.read_unit("45", "%") == ("%", True)
+    assert RS.read_unit("12.4", "0.8-0.9") == (None, False), "a range written in the unit field is not a unit"
+    assert RS.read_unit("3.2 in 10", "") == (None, False)
+    assert RS.parse_number("0.5%") == pytest.approx(0.005) and RS.parse_number("12.4%") == pytest.approx(0.124)
+
+    text = ("The model reached an AUC of 87% and an accuracy of 0.91. Prevalence was 45 per cent in the survey. "
+            "The MAPE was 12% at three months, and the RMSE was 4.2 cases.")
+    kept, _ = RS.verify_structured({"reported_results": [
+        {"metric": "AUC", "value": "87%", "model": "m", "quote": "The model reached an AUC of 87%"},
+        {"metric": "accuracy", "value": "0.91", "model": "m", "quote": "and an accuracy of 0.91"},
+        {"metric": "prevalence", "value": "45", "unit": "%", "model": "survey",
+         "quote": "Prevalence was 45 per cent in the survey"},
+        {"metric": "MAPE", "value": "12%", "model": "m", "quote": "The MAPE was 12% at three months"},
+        {"metric": "RMSE", "value": "4.2", "unit": "", "model": "m", "quote": "the RMSE was 4.2 cases"}]}, text)
+    got = {r["metric"]: r for r in kept["reported_results"]}
+    assert got["auc"]["value_canonical"] == pytest.approx(0.87) and got["auc"]["unit"] == "proportion"
+    assert got["accuracy"]["unit"] == "proportion"
+    assert got["prevalence"]["value_canonical"] == pytest.approx(0.45), "45% is kept, as a proportion"
+    assert got["mape"]["value_num"] == pytest.approx(12.0) and got["mape"]["unit"] == "%"
+    assert got["rmse"]["unit"] is None and got["rmse"]["unit_as_written"] == ""
+    for r in kept["reported_results"]:
+        assert not re.search(r"\d", r["unit"] or "") and not re.search(r"^\d", r["unit_as_written"] or "")
+
+
+def test_prisma_exclusion_reasons_add_up_to_the_excluded_total(loaded_db):
+    from research_agent.runstate import RunContext
+    from research_agent.tools import systematic as SY
+    from research_agent.tools.review import prisma_counts, prisma_markdown
+
+    protocol = {"search_query": "malaria OR pneumonia OR forecasting OR model",
+                "inclusion": ["malaria studies"], "exclusion": ["not about malaria"], "fields": []}
+    ctx = RunContext.create("prisma reasons", llm_factory=lambda strong=False, step=None: FakeLLM())
+    try:
+        SY.systematic_discovery(ctx, protocol, max_analysed=2)
+        c = prisma_counts(ctx)
+        assert c["excluded_at_screening"] > 0
+        assert sum(c["exclusion_breakdown"].values()) == c["excluded_at_screening"]
+        assert "no reason recorded" not in c["exclusion_breakdown"]
+        assert any("analysis cap" in k for k in c["exclusion_breakdown"])
+        md = "\n".join(prisma_markdown(ctx))
+        assert f"(all {c['excluded_at_screening']})" in md
+        for k in c["exclusion_breakdown"]:
+            assert k in md, "every reason is listed, not the top five"
+    finally:
+        ctx.close()
+
+    # paraphrases of one criterion are counted as that criterion
+    p = {"inclusion": ["Studies of malaria in humans"], "exclusion": ["Animal studies"]}
+    assert SY.criterion_label("animal studies.", p) == "Animal studies"
+    assert SY.criterion_label("not met: studies of malaria in humans", p) == "not met: Studies of malaria in humans"
+    assert SY.criterion_label("Outside the review's countries", p) == SY.OUTSIDE
+    assert SY.criterion_label("", p) == "no criterion named"
+
+
+def test_studies_outside_the_protocol_countries_are_not_counted(ctx):
+    """Screening reads an abstract and let studies from other countries through. The protocol now names its
+    countries; screening is told them, and after reading, code checks each paper's quoted study location."""
+    from research_agent.opportunity.protocol import _countries_of
+    from research_agent.tools import cohort as CO
+    from research_agent.tools import systematic as SY
+
+    kept, dropped = _countries_of(["Kenya", "Uganda", "United Republic of Tanzania", "East Africa", "Kenya"])
+    assert kept == ["Kenya", "Uganda", "Tanzania"] and dropped == ["East Africa"]
+
+    def row(pid, places):
+        return {"paper_id": pid, "source": "abstract", "corpus": "pmc", "year": 2020, "data": {"geography": places}}
+    rows = [row("ke", ["western Kenya"]), row("ng", ["Nigeria"]), row("mix", ["Kenya", "Ghana"]),
+            row("region", ["sub-Saharan Africa"]), row("none", [])]
+    assert SY.place_cohort(ctx, {"countries": ["Kenya", "Uganda"]})
+    assert not SY.place_cohort(ctx, {"countries": ["Kenya"]}), "set once per run"
+    got = [r["paper_id"] for r in CO.apply(ctx, rows)]
+    assert got == ["ke", "mix", "region", "none"]
+    ex = ctx._cohort_excluded
+    assert ex["out_of_scope"] == ["ng"] and ex["unstated"] == ["region", "none"]
+    assert "country in Kenya, Uganda" in CO.describe(CO.of(ctx))
+    assert "error" in CO.set_cohort(ctx, include=[{"field": "country", "any_of": ["East Africa"]}])
+
+    # the screener is told the countries
+    llm = FakeLLM()
+    seen = {}
+    orig = llm.chat
+
+    def spy(system, messages, **kw):
+        seen["system"] = system
+        return orig(system, messages, **kw)
+    llm.chat = spy
+    paper = ctx.pg.execute("SELECT paper_id, title, abstract FROM papers LIMIT 1").fetchone()
+    SY._screen_batch(llm, ctx, [paper], {"countries": ["Kenya", "Uganda"], "inclusion": [], "exclusion": []})
+    assert "come from Kenya, Uganda" in seen["system"] and SY.OUTSIDE in seen["system"]
+
+
+def test_designs_are_written_one_per_call(ctx, monkeypatch):
+    """One long finish holding every design was cut off by the output limit. The planner returns outlines and
+    each design is written in its own call; a writer that fails leaves its outline, not a hole."""
+    from research_agent.opportunity import agents as A
+
+    monkeypatch.setattr(A.DESIGN, "run", lambda c, t: {"designs": [
+        {"title": "One", "idea": "first", "addresses": ["G1"]},
+        {"title": "Two", "idea": "second", "addresses": ["G2"], "rests_on": ["H1"]}]})
+    calls = []
+
+    def writer(c, task):
+        calls.append(task)
+        if "Two" in task:
+            raise RuntimeError("finish arguments were cut off")
+        return {"title": "One", "target": "cases", "validation_strategy": "district holdout", "addresses": ["G1"]}
+    monkeypatch.setattr(A.DESIGN_WRITER, "run", writer)
+    out = A.write_designs(ctx)
+    assert len(calls) == 2 and "design 1 of 2" in calls[0]
+    assert [d["title"] for d in out["designs"]] == ["One", "Two"]
+    assert out["designs"][0]["target"] == "cases"
+    assert out["designs"][1]["research_question"] == "second" and out["designs"][1]["rests_on"] == ["H1"]

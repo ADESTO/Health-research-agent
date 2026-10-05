@@ -31,6 +31,41 @@ from __future__ import annotations
 import json
 
 UNSTATED = ("keep", "exclude")
+# A condition on `country` is read from the quote-checked `geography` field: each place a paper names is
+# mapped to a country, so "western Kenya", "Kisumu" and "Kenya" are all Kenya. A paper naming only a region
+# ("East Africa", "sub-Saharan Africa") or nothing names no country, and counts as silent, not out of scope.
+COUNTRY = "country"
+
+
+def _iso3(name) -> str | None:
+    from research_agent.tools.burden import to_country
+
+    n = str(name or "").strip()
+    if len(n) == 3 and n.isalpha() and n.isupper():
+        return n
+    return to_country(n)[0]
+
+
+def paper_countries(row: dict) -> set[str]:
+    """ISO3 codes of the countries a paper's data come from, as its quote-checked geography states them."""
+    from research_agent.tools.extraction import _values
+
+    return {c for c in (_iso3(v) for v in _values(row["data"], "geography")) if c}
+
+
+def _country_matches(row: dict, cond: dict) -> bool:
+    have = paper_countries(row)
+    want = {_iso3(x) for x in cond.get("any_of") or []} - {None}
+    avoid = {_iso3(x) for x in cond.get("none_of") or []} - {None}
+    return (not want or bool(have & want)) and not (have & avoid)
+
+
+def _matches(row: dict, cond: dict, enums) -> bool:
+    from research_agent.tools.claims import row_matches
+
+    if cond.get("field") == COUNTRY:
+        return _country_matches(row, cond)
+    return row_matches(row, cond, enums)
 
 
 def _conds(x) -> list[dict]:
@@ -44,7 +79,7 @@ def validate(ctx, include, exclude) -> str | None:
     from research_agent.tools.extraction import SPECIAL_FIELDS, known_fields
 
     lists, enums = known_fields(ctx)
-    known = set(lists) | set(enums) | set(SPECIAL_FIELDS) | {"source"}
+    known = set(lists) | set(enums) | set(SPECIAL_FIELDS) | {"source", COUNTRY}
     all_conds = _conds(include) + _conds(exclude)
     if not all_conds:
         return "a cohort needs at least one include or exclude condition"
@@ -55,6 +90,13 @@ def validate(ctx, include, exclude) -> str | None:
         if f == "year":
             if c.get("min") is None and c.get("max") is None:
                 return "a year condition needs min and/or max"
+        elif f == COUNTRY:
+            names = (c.get("any_of") or []) + (c.get("none_of") or [])
+            bad = [n for n in names if not _iso3(n)]
+            if not names:
+                return "a country condition needs any_of or none_of"
+            if bad:
+                return f"not recognised as countries: {', '.join(map(str, bad))} (name countries, not regions)"
         elif not (c.get("any_of") or c.get("none_of")):
             return f"condition on {f} needs any_of or none_of"
     return None
@@ -118,6 +160,8 @@ def _states(row: dict, field: str) -> bool:
 
     if field in ("corpus", "read", "source"):
         return True
+    if field == COUNTRY:
+        return bool(paper_countries(row))
     if field == "year":
         return bool(row.get("year"))
     return bool(_values(row["data"], field))
@@ -128,10 +172,10 @@ def apply(ctx, rows: list[dict]) -> list[dict]:
     cohort = of(ctx)
     if not cohort:
         return rows
-    from research_agent.tools.claims import row_matches
     from research_agent.tools.extraction import known_fields
 
     _, enums = known_fields(ctx)
+    row_matches = _matches
     include, exclude = _conds(cohort.get("include")), _conds(cohort.get("exclude"))
     keep_unstated = cohort.get("unstated", "keep") == "keep"
     kept, out_of_scope, unstated = [], [], []
