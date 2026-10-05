@@ -13,3 +13,7 @@ report_*.md
 map_*.md
 test_report*.md
 scope_sample.csv
+
+# hosted backups
+backups/
+*.dump

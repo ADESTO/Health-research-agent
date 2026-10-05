@@ -69,10 +69,6 @@ def _mark_failed(conn, kind: str, payload: dict, error: str) -> None:
     elif kind == "followup":
         conn.execute("UPDATE followups SET status='failed', content=%s WHERE id=%s",
                      (f"The follow-up failed: {error[:300]}", payload["answer_id"]))
-    elif kind == "research_cycle":
-        from research_agent.research import researcher
-
-        researcher.run_cycle(payload["researcher_id"], llm_factory=factory, schedule_next=True)
     elif kind == "draft":
         conn.execute("UPDATE drafts SET status='failed', content_md=%s, finished_at=now() WHERE id=%s",
                      (f"The draft failed: {error[:300]}", payload["draft_id"]))

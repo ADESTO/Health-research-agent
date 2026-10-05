@@ -13,7 +13,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -46,6 +46,77 @@ async def _lifespan(_app):
 
 app = FastAPI(title="Health Research Intelligence API", version="0.1.0", lifespan=_lifespan)
 
+@app.middleware("http")
+async def _access(request: Request, call_next):
+    """With AUTH_REQUIRED=1: who is asking, and may they touch this run? (see research_agent/auth.py)
+    Without it, everyone is a local admin and nothing changes."""
+    request.state.user = None
+    if not settings.auth_required:
+        return await call_next(request)
+    from research_agent import auth
+
+    path = request.url.path
+    with get_conn() as pg:
+        user = auth.user_for_token(pg, auth.token_from(request))
+        if user is None and path not in auth.PUBLIC:
+            return JSONResponse({"detail": "Sign in with your invite link to use this."}, status_code=401)
+        if user is not None:
+            run_id = auth.run_of_path(pg, path)
+            # a run you may not see is reported missing, so ids of other people's runs reveal nothing
+            verdict = "hidden" if run_id is False else (auth.access(pg, user, run_id, request.method) if run_id else "ok")
+            if verdict == "hidden":
+                return JSONResponse({"detail": "no such run"}, status_code=404)
+            if verdict == "read_only":
+                return JSONResponse({"detail": "This is a shared sample run, so it is read-only. Start your own "
+                                               "run to ask follow-ups or draft from it."}, status_code=403)
+    request.state.user = user
+    return await call_next(request)
+
+
+def _user(request: Request) -> dict | None:
+    return getattr(request.state, "user", None)
+
+
+@app.get("/login", include_in_schema=False)
+def login(token: str = ""):
+    """The invite link: store its token as a cookie, then open the app."""
+    from research_agent import auth
+
+    with get_conn() as pg:
+        user = auth.user_for_token(pg, token)
+    if not user:
+        return JSONResponse({"detail": "This invite link is not valid. Ask for a new one."}, status_code=401)
+    resp = RedirectResponse("/", status_code=303)
+    resp.set_cookie(auth.COOKIE, token, max_age=auth.COOKIE_DAYS * 86400, httponly=True, samesite="lax",
+                    secure=settings.public_url.startswith("https://"))
+    return resp
+
+
+@app.get("/logout", include_in_schema=False)
+def logout():
+    from research_agent import auth
+
+    resp = RedirectResponse("/", status_code=303)
+    resp.delete_cookie(auth.COOKIE)
+    return resp
+
+
+@app.get("/me")
+def me(request: Request):
+    """Who is signed in, and how many runs they have left today. auth=false on a local install."""
+    user = _user(request)
+    if not settings.auth_required:
+        return {"auth": False}
+    if user is None:
+        return {"auth": True, "signed_in": False}
+    from research_agent import auth
+
+    with get_conn() as pg:
+        used = auth.runs_today(pg, user["id"])
+    return {"auth": True, "signed_in": True, "name": user["name"], "is_admin": user["is_admin"],
+            "runs_per_day": settings.runs_per_day, "runs_left_today": max(0, settings.runs_per_day - used)}
+
+
 # Simple per-IP rate limit: runs cost money. A map costs about two ordinary runs, so it counts twice.
 _RUNS_PER_HOUR = 5
 _COST = {"map": 2}
@@ -73,11 +144,20 @@ def index():
 
 
 @app.get("/runs")
-def list_runs(limit: int = 10):
+def list_runs(request: Request, limit: int = 10):
+    user = _user(request)
+    where, params = "", []
+    if user is not None and not user["is_admin"]:
+        where, params = "WHERE owner_id = %s OR shared ", [user["id"]]
     with get_conn() as pg:
         rows = pg.execute(
-            f"SELECT run_id, question, status, provider, created_at, {_IS_MAP} AS is_map FROM runs "
-            "ORDER BY created_at DESC LIMIT %s", (max(1, min(int(limit), 50)),)).fetchall()
+            f"SELECT run_id, question, status, provider, created_at, shared, {_IS_MAP} AS is_map, "
+            f"(owner_id IS NOT DISTINCT FROM %s) AS mine FROM runs {where}"
+            "ORDER BY created_at DESC LIMIT %s",
+            [user["id"] if user else None] + params + [max(1, min(int(limit), 50))]).fetchall()
+    if user is None:
+        for r in rows:
+            r["mine"] = True
     return {"runs": rows}
 
 
@@ -90,14 +170,26 @@ def health():
 
 @app.post("/runs", status_code=202)
 def start_run(req: RunRequest, request: Request):
-    ip = request.client.host if request.client else "unknown"
-    q, now = _hits[ip], time.time()
-    while q and now - q[0] > 3600:
-        q.popleft()
+    user = _user(request)
     cost = _COST.get(req.mode, 1)
-    if len(q) + cost > _RUNS_PER_HOUR:
-        raise HTTPException(429, "Run limit reached; try again later.")
-    q.extend([now] * cost)
+    if user is not None:
+        # signed-in users: a daily allowance each, counted from the runs table
+        from research_agent import auth
+
+        if not user["is_admin"]:
+            with get_conn() as pg:
+                used = auth.runs_today(pg, user["id"])
+            if used + cost > settings.runs_per_day:
+                raise HTTPException(429, f"You have used today's {settings.runs_per_day} runs (a map counts as "
+                                         "two). More become available 24 hours after each one started.")
+    else:
+        ip = request.client.host if request.client else "unknown"
+        q, now = _hits[ip], time.time()
+        while q and now - q[0] > 3600:
+            q.popleft()
+        if len(q) + cost > _RUNS_PER_HOUR:
+            raise HTTPException(429, "Run limit reached; try again later.")
+        q.extend([now] * cost)
 
     import uuid
 
@@ -105,7 +197,8 @@ def start_run(req: RunRequest, request: Request):
 
     run_id = str(uuid.uuid4())
     with get_conn() as pg:
-        pg.execute("INSERT INTO runs (run_id, question, status) VALUES (%s,%s,'queued')", (run_id, req.question))
+        pg.execute("INSERT INTO runs (run_id, question, status, owner_id, requested_mode) "
+                   "VALUES (%s,%s,'queued',%s,%s)", (run_id, req.question, user["id"] if user else None, req.mode))
     # a durable job: it survives a server restart, and a worker that dies mid-run is replaced
     job = enqueue("map" if req.mode == "map" else "run",
                   {"run_id": run_id, "question": req.question, "mode": req.mode, "provider": req.provider,
@@ -435,10 +528,18 @@ class ResearcherRequest(BaseModel):
     provider: str | None = Field(default=None, pattern="^(anthropic|groq|deepseek)$")
 
 
+def _admin_only(request: Request, what: str) -> None:
+    user = _user(request)
+    if user is not None and not user["is_admin"] and settings.researchers_admin_only:
+        raise HTTPException(403, f"{what} is not available during the beta.")
+
+
 @app.post("/runs/{run_id}/researchers", status_code=202)
-def start_researcher(run_id: str, req: ResearcherRequest):
+def start_researcher(run_id: str, req: ResearcherRequest, request: Request):
     """Start an open-ended researcher on a finished run. It works in background cycles within its budget."""
     from research_agent.research import researcher as R
+
+    _admin_only(request, "Starting an open-ended researcher")
 
     with get_conn() as pg:
         run = pg.execute("SELECT status FROM runs WHERE run_id=%s", (run_id,)).fetchone()
@@ -493,9 +594,11 @@ def researcher_status(rid: int, req: ResearcherAction):
 
 
 @app.post("/researchers/{rid}/budget")
-def researcher_budget(rid: int, body: dict):
+def researcher_budget(rid: int, body: dict, request: Request):
     """Give a researcher more cycles or tokens. One that stopped for want of room starts working again."""
     from research_agent.research import researcher as R
+
+    _admin_only(request, "Changing a researcher's budget")
 
     res = R.set_budget(rid, max_cycles=body.get("max_cycles"), add_cycles=body.get("add_cycles"),
                        total_tokens=body.get("total_tokens"), add_tokens=body.get("add_tokens"),

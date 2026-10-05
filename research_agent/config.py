@@ -56,6 +56,15 @@ class Settings:
     # Per-step model routing, e.g. "cheap=deepseek:deepseek-flash; strong=anthropic:claude-sonnet-4-5"
     model_routes: str = os.getenv("MODEL_ROUTES", "")
 
+    # Access for hosted use. Off by default, so a local install works as before with no login. With
+    # AUTH_REQUIRED=1 every request needs an invite link (see `cli invite`), each user sees only their own
+    # runs plus any shared ones, and RUNS_PER_DAY caps what each user starts (a map counts twice).
+    auth_required: bool = os.getenv("AUTH_REQUIRED", "0").lower() in ("1", "true", "yes")
+    runs_per_day: int = int(os.getenv("RUNS_PER_DAY", "4"))
+    public_url: str = os.getenv("PUBLIC_URL", "http://127.0.0.1:8000").rstrip("/")
+    # open-ended researchers spend tokens on their own for hours; on a hosted beta only admins start them
+    researchers_admin_only: bool = os.getenv("RESEARCHERS_ADMIN_ONLY", "1").lower() in ("1", "true", "yes")
+
     # Run limits (cost guards)
     max_shortlist: int = int(os.getenv("MAX_SHORTLIST", "60"))
     max_fulltext: int = int(os.getenv("MAX_FULLTEXT", "20"))

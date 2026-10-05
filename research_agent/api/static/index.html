@@ -106,6 +106,13 @@ select.btn { padding-right: 10px; }
 .tag { font-size: 10.5px; font-weight: 600; letter-spacing: .05em; text-transform: uppercase; padding: 1px 6px; border-radius: 4px;
        background: var(--sunk); color: var(--ink-2); }
 .tag.map { background: var(--eosin-soft); color: var(--eosin); }
+.tag.shared { background: var(--hema); color: #fff; }
+.who { font-size: 12px; color: var(--ink-2); display: flex; gap: 10px; align-items: center; white-space: nowrap; }
+.who b { color: var(--ink); font-weight: 600; }
+.who a { color: var(--ink-2); }
+.signedout { max-width: 520px; margin: 12vh auto; padding: 0 16px; }
+.signedout h1 { font-size: 26px; margin: 0 0 12px; }
+.signedout p { color: var(--ink-2); line-height: 1.55; }
 
 /* ---- compose */
 .compose { padding: 24px; display: grid; gap: 16px; }
@@ -414,6 +421,7 @@ details.log summary { cursor: pointer; font-size: 13px; color: var(--muted); }
     <span>Health Research Intelligence<small>Evidence-checked answers from the literature</small></span>
   </a>
   <div class="corpus" id="corpus"><span class="chip">connecting…</span></div>
+  <div class="who" id="who" hidden></div>
 </header>
 
 <div class="shell">
@@ -809,7 +817,7 @@ $("#go").onclick = async () => {
     $("#status").textContent = "";
     startRunView(res.run_id, { question, status: "queued", is_map: res.mode === "map", search: res.search, created_at: new Date().toISOString() });
     timer = setInterval(() => poll().catch(e => logLine(esc(e.message), "err")), 3000);
-    loadRuns();
+    loadRuns(); loadMe();
   } catch (e) { $("#status").textContent = e.message; }
   $("#go").disabled = false;
 };
@@ -1100,7 +1108,7 @@ async function loadRuns() {
     $("#runs").innerHTML = runs.map(r => `
       <li><a href="#" data-id="${r.run_id}" class="${r.run_id === currentRun ? "on" : ""}">
         <span class="q">${esc(r.question || "")}</span>
-        <span class="m"><span class="dot ${esc(r.status)}"></span>${r.is_map ? '<span class="tag map">map</span>' : '<span class="tag">report</span>'}
+        <span class="m"><span class="dot ${esc(r.status)}"></span>${r.is_map ? '<span class="tag map">map</span>' : '<span class="tag">report</span>'}${r.shared && !r.mine ? '<span class="tag shared">sample</span>' : ""}
         ${new Date(r.created_at).toLocaleDateString(undefined, { day: "numeric", month: "short" })}</span></a></li>`).join("")
       || '<li class="status">No runs yet. Ask a question to start one.</li>';
     $$("#runs a").forEach(a => a.onclick = ev => { ev.preventDefault(); openRun(a.dataset.id); });
@@ -2248,8 +2256,25 @@ api("/health").then(h => {
   $("#corpus").innerHTML = (parts.length ? parts.join("") : `<span class="chip"><b>${h.papers.toLocaleString()}</b>papers</span>`)
     + '<span class="chip">health papers indexed</span>';
 }).catch(() => $("#corpus").innerHTML = '<span class="chip">API not reachable</span>');
-loadRuns();
-showInfo(null);
+// ---------------------------------------------------------------- who is signed in (hosted beta only)
+let me = { auth: false };
+async function loadMe() {
+  try { me = await api("/me"); } catch (e) { return; }
+  if (!me.auth) return;
+  if (!me.signed_in) {
+    const shell = document.querySelector(".shell");
+    shell.style.display = "block";
+    shell.innerHTML = `<section class="signedout">
+      <h1>This is a private beta</h1>
+      <p>Open the invite link you were sent to sign in. It keeps you signed in on this browser for 90 days.</p>
+      <p>No link, or it stopped working? Ask for a new one.</p></section>`;
+    return;
+  }
+  const left = me.is_admin ? "admin" : `${me.runs_left_today} of ${me.runs_per_day} runs left today`;
+  $("#who").innerHTML = `<span><b>${esc(me.name)}</b> · ${esc(left)}</span><a href="/logout">Sign out</a>`;
+  $("#who").hidden = false;
+}
+loadMe().then(() => { if (!me.auth || me.signed_in) { loadRuns(); showInfo(null); } });
 </script>
 </body>
 </html>

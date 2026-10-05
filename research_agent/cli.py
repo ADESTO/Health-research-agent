@@ -247,8 +247,22 @@ def main(argv: list[str] | None = None) -> int:
     p_use = sub.add_parser("usage", help="tokens (and cost) per step for a finished run")
     p_use.add_argument("run_id")
     sub.add_parser("runs", help="list recent runs (to find a run_id to resume)")
+    p_inv = sub.add_parser("invite", help="hosted use: add a user and print their invite link")
+    p_inv.add_argument("name"); p_inv.add_argument("--email"); p_inv.add_argument("--admin", action="store_true")
+    sub.add_parser("users", help="hosted use: list users")
+    p_relink = sub.add_parser("relink", help="hosted use: replace a user's link (lost or leaked); the old one stops")
+    p_relink.add_argument("user", help="user id, name or email")
+    p_deact = sub.add_parser("deactivate", help="hosted use: switch a user off (their runs are kept)")
+    p_deact.add_argument("user", help="user id, name or email")
+    p_share = sub.add_parser("share", help="hosted use: let every user read a run (e.g. the sample run)")
+    p_share.add_argument("run_id"); p_share.add_argument("--off", action="store_true")
+    p_own = sub.add_parser("assign", help="hosted use: give a run to a user (e.g. runs made before users existed)")
+    p_own.add_argument("run_id"); p_own.add_argument("user", help="user id, name or email")
     args = ap.parse_args(argv)
 
+    if args.cmd in ("invite", "users", "relink", "deactivate", "share", "assign"):
+        _users_cmd(args)
+        return 0
     if args.cmd == "init-db":
         from research_agent.db import init_schema
 
@@ -730,6 +744,50 @@ def _research_loop(rid: int, n: int) -> int:
         if any(k in out for k in ("skipped", "finished", "paused", "waiting")):
             break
     return 0
+
+
+def _find_user(pg, key: str) -> dict:
+    rows = pg.execute("SELECT id, name, email FROM users WHERE id::text=%s OR lower(name)=lower(%s) "
+                      "OR lower(email)=lower(%s)", (key, key, key)).fetchall()
+    if len(rows) != 1:
+        raise SystemExit(f"{'no user' if not rows else 'more than one user'} matches {key!r}; use the id from `users`")
+    return rows[0]
+
+
+def _users_cmd(args) -> None:
+    from research_agent import auth
+    from research_agent.db import get_conn, init_schema
+
+    init_schema()
+    with get_conn() as pg:
+        if args.cmd == "invite":
+            user, token = auth.create_user(pg, args.name, args.email, admin=args.admin)
+            print(f"{user['name']}{' (admin)' if user['is_admin'] else ''}: {user['id']}")
+            print(f"Invite link (shown once; send it privately): {auth.invite_link(token)}")
+        elif args.cmd == "users":
+            for u in pg.execute("SELECT u.id, u.name, u.email, u.is_admin, u.active, u.last_seen, "
+                                "(SELECT count(*) FROM runs r WHERE r.owner_id = u.id) AS runs "
+                                "FROM users u ORDER BY u.created_at").fetchall():
+                flags = ", ".join(f for f, on in (("admin", u["is_admin"]), ("inactive", not u["active"])) if on)
+                seen = u["last_seen"].strftime("%Y-%m-%d %H:%M") if u["last_seen"] else "never"
+                print(f"{u['id']}  {u['name']:<24} {u['email'] or '':<30} runs: {u['runs']:<4} last seen: {seen}"
+                      + (f"  [{flags}]" if flags else ""))
+        elif args.cmd == "relink":
+            u = _find_user(pg, args.user)
+            print(f"New link for {u['name']} (the old one no longer works): "
+                  f"{auth.invite_link(auth.new_token(pg, u['id']))}")
+        elif args.cmd == "deactivate":
+            u = _find_user(pg, args.user)
+            pg.execute("UPDATE users SET active=false WHERE id=%s", (u["id"],))
+            print(f"{u['name']} can no longer sign in; their runs are kept.")
+        elif args.cmd == "share":
+            n = pg.execute("UPDATE runs SET shared=%s WHERE run_id=%s RETURNING run_id",
+                           (not args.off, args.run_id)).fetchall()
+            print("no such run" if not n else f"run {args.run_id} is {'private' if args.off else 'shared with every user'}")
+        elif args.cmd == "assign":
+            u = _find_user(pg, args.user)
+            n = pg.execute("UPDATE runs SET owner_id=%s WHERE run_id=%s RETURNING run_id", (u["id"], args.run_id)).fetchall()
+            print("no such run" if not n else f"run {args.run_id} now belongs to {u['name']}")
 
 
 if __name__ == "__main__":

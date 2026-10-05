@@ -37,6 +37,22 @@ services:
       - ./data:/app/data              # optional local parquet downloads
       - fastembed-cache:/root/.cache  # embedding model downloaded once
 
+  # HTTPS for a hosted beta (deploy/README.md): docker compose --profile hosted up -d
+  caddy:
+    image: caddy:2
+    profiles: ["hosted"]
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+
 volumes:
   pgdata:
   fastembed-cache:
+  caddy-data:

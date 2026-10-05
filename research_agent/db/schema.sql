@@ -347,3 +347,20 @@ CREATE TABLE IF NOT EXISTS research_findings (
     evidence      jsonb,                           -- discovery, subgroups, traps, rivals, held-out, examples
     created_at    timestamptz DEFAULT now()
 );
+
+-- Users of a hosted instance (AUTH_REQUIRED=1). Only a hash of each invite token is stored.
+CREATE TABLE IF NOT EXISTS users (
+    id          uuid PRIMARY KEY,
+    name        text NOT NULL,
+    email       text,
+    token_hash  text NOT NULL UNIQUE,
+    is_admin    boolean NOT NULL DEFAULT false,
+    active      boolean NOT NULL DEFAULT true,
+    created_at  timestamptz DEFAULT now(),
+    last_seen   timestamptz
+);
+-- who started a run (NULL: started locally or before users existed), and whether every user may read it
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS owner_id uuid REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS shared boolean NOT NULL DEFAULT false;
+ALTER TABLE runs ADD COLUMN IF NOT EXISTS requested_mode text;   -- what was asked for: map counts twice in quotas
+CREATE INDEX IF NOT EXISTS runs_owner_idx ON runs (owner_id, created_at DESC);

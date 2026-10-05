@@ -3964,3 +3964,83 @@ def test_designs_are_written_one_per_call(ctx, monkeypatch):
     assert [d["title"] for d in out["designs"]] == ["One", "Two"]
     assert out["designs"][0]["target"] == "cases"
     assert out["designs"][1]["research_question"] == "second" and out["designs"][1]["rests_on"] == ["H1"]
+
+
+# ---------------------------------------------------------------- hosted beta: invite-only access
+def test_invite_only_access_keeps_each_users_runs_private(loaded_db, monkeypatch):
+    """With AUTH_REQUIRED=1 nothing works without an invite link; each user sees their own runs plus shared
+    ones; another user's run answers 404; a shared run is read-only; the daily allowance holds."""
+    from fastapi.testclient import TestClient
+
+    from research_agent import auth, jobs
+    from research_agent.api import main as api
+    from research_agent.config import settings
+    from research_agent.db import get_conn, init_schema
+
+    import dataclasses
+
+    init_schema()
+    hosted = dataclasses.replace(settings, auth_required=True, runs_per_day=3)
+    monkeypatch.setattr(api, "settings", hosted)
+    monkeypatch.setattr(auth, "settings", hosted)
+    monkeypatch.setattr(jobs, "enqueue", lambda kind, payload, **kw: 1)       # nothing actually runs
+    with get_conn() as pg:
+        ann, ann_token = auth.create_user(pg, "Ann", "ann@example.org")
+        _bob, bob_token = auth.create_user(pg, "Bob")
+        _boss, boss_token = auth.create_user(pg, "Boss", admin=True)
+        stored = pg.execute("SELECT token_hash FROM users WHERE id=%s", (ann["id"],)).fetchone()["token_hash"]
+    assert stored != ann_token and stored == auth.hash_token(ann_token), "only a hash is stored"
+    assert auth.invite_link(ann_token).endswith(f"/login?token={ann_token}")
+
+    anon = TestClient(api.app)
+    assert anon.get("/runs").status_code == 401
+    assert anon.get("/").status_code == 200 and anon.get("/health").status_code == 200
+    assert anon.get("/me").json() == {"auth": True, "signed_in": False}
+    assert anon.get("/login?token=nonsense", follow_redirects=False).status_code == 401
+
+    a, b, boss = TestClient(api.app), TestClient(api.app), TestClient(api.app)
+    r = a.get(f"/login?token={ann_token}", follow_redirects=False)
+    assert r.status_code == 303 and auth.COOKIE in r.cookies and "httponly" in r.headers["set-cookie"].lower()
+    b.headers["Authorization"] = f"Bearer {bob_token}"                         # scripts use a bearer token
+    boss.headers["Authorization"] = f"Bearer {boss_token}"
+    assert a.get("/me").json()["name"] == "Ann"
+
+    q = "Which climate variables predict malaria incidence in Kenya?"
+    run_a = a.post("/runs", json={"question": q}).json()["run_id"]
+    run_b = b.post("/runs", json={"question": q + " (Bob)"}).json()["run_id"]
+    assert [x["run_id"] for x in a.get("/runs").json()["runs"]] == [run_a]
+    assert a.get(f"/runs/{run_b}").status_code == 404, "another user's run does not exist for you"
+    assert a.get(f"/runs/{run_b}/report").status_code == 404
+    assert a.get(f"/runs/{run_a}").status_code == 200
+    assert {run_a, run_b} <= {x["run_id"] for x in boss.get("/runs?limit=50").json()["runs"]}
+
+    # a shared run: everyone reads it, nobody but its owner changes it
+    with get_conn() as pg:
+        pg.execute("UPDATE runs SET shared=true WHERE run_id=%s", (run_b,))
+    listed = {x["run_id"]: x for x in a.get("/runs").json()["runs"]}
+    assert run_b in listed and listed[run_b]["shared"] and not listed[run_b]["mine"]
+    assert a.get(f"/runs/{run_b}").status_code == 200
+    assert a.post(f"/runs/{run_b}/followups", json={"question": "why?"}).status_code == 403
+
+    # the daily allowance: Ann has used 1 of 3; a map counts twice
+    assert a.get("/me").json()["runs_left_today"] == 2
+    assert a.post("/runs", json={"question": q, "mode": "map"}).status_code == 202
+    assert a.post("/runs", json={"question": q}).status_code == 429
+    assert boss.post("/runs", json={"question": q}).status_code == 202, "admins have no allowance"
+
+    # open-ended researchers are admin-only in the beta
+    assert a.post(f"/runs/{run_a}/researchers", json={"goal": "find something new here"}).status_code == 403
+    # a switched-off user is out at once
+    with get_conn() as pg:
+        pg.execute("UPDATE users SET active=false WHERE id=%s", (ann["id"],))
+    assert a.get("/runs").status_code == 401
+
+
+def test_without_auth_nothing_changes(loaded_db):
+    from fastapi.testclient import TestClient
+
+    from research_agent.api.main import app
+
+    client = TestClient(app)
+    assert client.get("/me").json() == {"auth": False}
+    assert client.get("/runs").status_code == 200
