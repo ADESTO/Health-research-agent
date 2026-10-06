@@ -53,6 +53,11 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
         if protocol.get("exclusion"):
             scope += " Exclude papers that: " + "; ".join(protocol["exclusion"]) + "."
 
+        if not systematic.is_systematic(ctx):
+            from research_agent.uploads import attach_to_run
+
+            attach_to_run(ctx)               # the user's own documents, before discovery adds the rest
+
         # 2-3. discovery and literature (the same agents as `ask`) -------------------------------
         probes = probe_concepts(protocol)
         probe_note = (f" Run coverage_probe with topic '{protocol.get('topic_query')}' and these concepts: "

@@ -181,7 +181,8 @@ def protocol_markdown(ctx) -> str:
     disc = notes.get("discovery") or {}
     row = ctx.pg.execute("SELECT created_at FROM runs WHERE run_id=%s", (ctx.run_id,)).fetchone()
     corpus = {r["source"]: (r["n"], r["lo"], r["hi"]) for r in ctx.pg.execute(
-        "SELECT source, count(*) n, min(year) lo, max(year) hi FROM papers GROUP BY source").fetchall()}
+        "SELECT source, count(*) n, min(year) lo, max(year) hi FROM papers WHERE source <> 'upload' "
+        "GROUP BY source").fetchall()}
     L = ["# Review protocol", "", f"**Question:** {ctx.question}", "",
          f"**Registered:** {row['created_at']:%Y-%m-%d %H:%M} (run {ctx.run_id})" if row else "", "",
          "## Sources", ""]

@@ -12,7 +12,7 @@ from research_agent.tools.base import Tool, obj
 from research_agent.tools.extraction import extraction_coverage
 
 # Papers are cited as [arXiv:2401.00001] or [PMC1234567]; group 1 is the id either way.
-_CITE_PAPER = re.compile(r"\[(?:arXiv:([^\]\s]+)|(PMC\d+))\]")
+_CITE_PAPER = re.compile(r"\[(?:arXiv:([^\]\s]+)|(PMC\d+|UP\d+))\]")
 
 
 def _cited_ids(body: str) -> list[str]:
@@ -20,7 +20,7 @@ def _cited_ids(body: str) -> list[str]:
 
 
 def _cite(pid: str) -> str:
-    return f"[{pid}]" if pid.startswith("PMC") else f"[arXiv:{pid}]"
+    return f"[{pid}]" if pid.startswith(("PMC", "UP")) else f"[arXiv:{pid}]"
 _CITE_CLAIM = re.compile(r"\[C(\d+)\]")
 
 
@@ -198,8 +198,8 @@ def _clean_author(name: str) -> str:
 def normalise_citations(body: str) -> str:
     """Some models write citations with other bracket styles (e.g. 【C3】 or ［arXiv:…］). Convert
     them to [..] so the checks below see every citation."""
-    body = re.sub(r"[【［〔]\s*(C\d+|PMC\d+|arXiv:[^】］〕\s]+)\s*[】］〕]", r"[\1]", body)
-    body = re.sub(r"\[arXiv:(PMC\d+)\]", r"[\1]", body)  # a PMC id written in arXiv form
+    body = re.sub(r"[【［〔]\s*(C\d+|PMC\d+|UP\d+|arXiv:[^】］〕\s]+)\s*[】］〕]", r"[\1]", body)
+    body = re.sub(r"\[arXiv:((?:PMC|UP)\d+)\]", r"[\1]", body)  # a PMC or document id written in arXiv form
     return re.sub(r"\[\s*(C\d+)\s*,\s*(C\d+)\s*\]", r"[\1] [\2]", body)
 
 
@@ -209,12 +209,13 @@ def run_facts(ctx) -> dict:
     years = ctx.pg.execute(
         """SELECT min(p.year) lo, max(p.year) hi FROM run_papers rp JOIN papers p USING (paper_id)
            WHERE rp.run_id=%s""", (ctx.run_id,)).fetchone()
-    corpus = ctx.pg.execute("SELECT count(*) n, min(year) lo, max(year) hi FROM papers").fetchone()
+    corpus = ctx.pg.execute("SELECT count(*) n, min(year) lo, max(year) hi FROM papers "
+                            "WHERE source <> 'upload'").fetchone()
     shortlist_mix = {r["source"]: r["n"] for r in ctx.pg.execute(
         """SELECT p.source, count(*) n FROM run_papers rp JOIN papers p USING (paper_id)
            WHERE rp.run_id=%s GROUP BY p.source""", (ctx.run_id,)).fetchall()}
     corpus_mix = {r["source"]: r["n"] for r in ctx.pg.execute(
-        "SELECT source, count(*) n FROM papers GROUP BY source").fetchall()}
+        "SELECT source, count(*) n FROM papers WHERE source <> 'upload' GROUP BY source").fetchall()}
     try:
         from research_agent.tools import epistemics
 
@@ -318,7 +319,7 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
         gl_removed = 0
     cited = [pid for pid in dict.fromkeys(_cited_ids(body)) if pid in shortlist]
     papers = {r["paper_id"]: r for r in ctx.pg.execute(
-        "SELECT paper_id, source, title, year, authors, license FROM papers WHERE paper_id = ANY(%s)",
+        "SELECT paper_id, source, title, year, authors, license, journal_ref FROM papers WHERE paper_id = ANY(%s)",
         (list(shortlist),)).fetchall()}
 
     lo, hi = facts["years"]
@@ -438,6 +439,11 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
                 nc = " *(licence: non-commercial)*" if licence_is_noncommercial(p.get("license") or "") else ""
                 lines.append(f"- **{pid}** — {p['title']} ({authors}{etal}, {p['year']}). "
                              f"https://pmc.ncbi.nlm.nih.gov/articles/{pid}/{nc}")
+            elif p.get("source") == "upload":
+                from research_agent.uploads import where
+
+                lines.append(f"- **{pid}** — {p['title']} ({authors if names else 'no author given'}"
+                             f"{etal}, {p['year']}). {where(p)}")
             else:
                 lines.append(f"- **arXiv:{pid}** — {p['title']} ({authors}{etal}, {p['year']}). "
                              f"https://arxiv.org/abs/{pid}")

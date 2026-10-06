@@ -107,6 +107,18 @@ select.btn { padding-right: 10px; }
        background: var(--sunk); color: var(--ink-2); }
 .tag.map { background: var(--eosin-soft); color: var(--eosin); }
 .tag.shared { background: var(--hema); color: #fff; }
+.docs { display: grid; gap: 8px; }
+.docs-head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.doclist { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.doclist li { display: flex; gap: 10px; align-items: center; font-size: 13.5px; padding: 6px 10px; background: var(--sunk); border-radius: 8px; }
+.doclist li label { display: flex; gap: 8px; align-items: center; flex: 1; min-width: 0; cursor: pointer; }
+.doclist li .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.doclist li .m { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.doclist li button { border: 0; background: transparent; color: var(--muted); cursor: pointer; font-size: 12px; padding: 2px 4px; }
+.doclist li button:hover { color: var(--bad); }
+.docadd { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.docurl { flex: 1; min-width: 180px; border: 0; background: var(--sunk); border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 13.5px; color: var(--ink); }
+.docurl:focus { outline: 2px solid var(--hema); outline-offset: 0; }
 .who { font-size: 12px; color: var(--ink-2); display: flex; gap: 10px; align-items: center; white-space: nowrap; }
 .who b { color: var(--ink); font-weight: 600; }
 .who a { color: var(--ink-2); }
@@ -454,6 +466,22 @@ details.log summary { cursor: pointer; font-size: 13px; color: var(--muted); }
           <button type="button" aria-pressed="false" data-v="systematic">Systematic search</button>
         </span>
         <span class="hint" id="searchHint"></span>
+      </div>
+      <div class="docs" id="docs">
+        <div class="docs-head"><span class="status">Your documents</span>
+          <span class="hint">Papers or reports you hold, private to you. Ticked ones join this run and are read and counted like any study.</span></div>
+        <ul class="doclist" id="docList"></ul>
+        <div class="docadd">
+          <button type="button" class="btn small" id="docFileBtn">Add a file</button>
+          <input type="file" id="docFile" accept=".pdf,.docx,.txt,.md,.html,.htm" hidden>
+          <input type="url" id="docUrl" class="docurl" placeholder="or paste a link to a paper or report">
+          <button type="button" class="btn small" id="docUrlBtn">Add link</button>
+          <span class="seg" role="group" aria-label="What it is" id="docKind">
+            <button type="button" aria-pressed="true" data-v="paper">Paper</button>
+            <button type="button" aria-pressed="false" data-v="report">Report</button>
+          </span>
+          <span class="status" id="docStatus" role="status"></span>
+        </div>
       </div>
       <div class="go">
         <button class="btn primary" id="go">Run research</button>
@@ -812,7 +840,9 @@ $("#go").onclick = async () => {
   try {
     const res = await api("/runs", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ question, provider: $("#provider").value, mode: mode(), search: searchMode() }),
+      body: JSON.stringify({ question, provider: $("#provider").value, mode: mode(), search: searchMode(),
+                             documents: $$('#docList input[data-doc]:checked').map(i => +i.dataset.doc),
+                             include_papers: $$('#docList input[data-paper]:checked').map(i => i.dataset.paper) }),
     });
     $("#status").textContent = "";
     startRunView(res.run_id, { question, status: "queued", is_map: res.mode === "map", search: res.search, created_at: new Date().toISOString() });
@@ -2093,7 +2123,8 @@ $("#ddown").onclick = () => openDraft && download(`/drafts/${openDraft}/export/$
 
 // ---------------------------------------------------------------- open-ended researcher
 let rsTimer = null, rsCurrent = null, rsNew = false;
-const paperUrl = id => id.startsWith("PMC") ? `https://pmc.ncbi.nlm.nih.gov/articles/${id}/` : `https://arxiv.org/abs/${id}`;
+const paperUrl = id => id.startsWith("PMC") ? `https://pmc.ncbi.nlm.nih.gov/articles/${id}/`
+  : /^UP\d+$/.test(id) ? `/documents/${id.slice(2)}/file` : `https://arxiv.org/abs/${id}`;
 const pct = x => x == null ? "–" : `${Math.round(x * 100)}%`;
 const fmtP = p => p == null || p === "" ? "" : (+p < 0.0001 ? "< 0.0001" : String(p));
 
@@ -2256,6 +2287,61 @@ api("/health").then(h => {
   $("#corpus").innerHTML = (parts.length ? parts.join("") : `<span class="chip"><b>${h.papers.toLocaleString()}</b>papers</span>`)
     + '<span class="chip">health papers indexed</span>';
 }).catch(() => $("#corpus").innerHTML = '<span class="chip">API not reachable</span>');
+// ---------------------------------------------------------------- your documents
+let linkedPapers = [];            // links that pointed to papers already in the corpus
+async function loadDocs() {
+  let docs = [];
+  try { docs = (await api("/documents")).documents; } catch (e) { $("#docs").hidden = true; return; }
+  const kept = new Set($$('#docList input:checked').map(i => i.dataset.doc || i.dataset.paper));
+  const row = (key, attr, title, meta, removable) => `<li><label><input type="checkbox" ${attr}="${esc(key)}"
+      ${kept.has(String(key)) ? "checked" : ""}><span class="t">${esc(title)}</span><span class="m">${esc(meta)}</span></label>
+      ${removable ? `<button type="button" data-del="${esc(key)}" aria-label="Delete ${esc(title)}">Delete</button>` : ""}</li>`;
+  $("#docList").innerHTML = docs.map(d => row(d.id, "data-doc", d.title,
+      `${d.kind === "report" ? "report" : "paper"} · ${d.year || ""} · ${Math.round(d.n_chars / 1000)}k characters`, true)).join("")
+    + linkedPapers.map(p => row(p, "data-paper", p, "already in the corpus", false)).join("");
+  $$("#docList button[data-del]").forEach(b => b.onclick = async () => {
+    if (!confirm("Delete this document? It is removed from every run that used it.")) return;
+    try { await api(`/documents/${b.dataset.del}`, { method: "DELETE" }); loadDocs(); }
+    catch (e) { $("#docStatus").textContent = e.message; }
+  });
+}
+const docKind = () => { const b = $('#docKind button[aria-pressed="true"]'); return b ? b.dataset.v : "paper"; };
+$("#docKind").addEventListener("click", ev => {
+  const b = ev.target.closest("button"); if (!b) return;
+  $$("#docKind button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+});
+async function addDoc(body) {
+  $("#docStatus").textContent = "Reading it…";
+  try {
+    const res = await api("/documents", { method: "POST", headers: { "Content-Type": "application/json" },
+                                          body: JSON.stringify({ kind: docKind(), ...body }) });
+    if (res.corpus_paper_id) {
+      if (!linkedPapers.includes(res.corpus_paper_id)) linkedPapers.push(res.corpus_paper_id);
+      $("#docStatus").textContent = `${res.corpus_paper_id} is already in the corpus; it is listed for this run.`;
+    } else {
+      $("#docStatus").textContent = `Added: ${res.title} (${res.year}).`;
+    }
+    await loadDocs();
+    const box = res.corpus_paper_id ? $(`#docList input[data-paper="${res.corpus_paper_id}"]`) : $(`#docList input[data-doc="${res.id}"]`);
+    if (box) box.checked = true;
+  } catch (e) { $("#docStatus").textContent = e.message; }
+}
+$("#docFileBtn").onclick = () => $("#docFile").click();
+$("#docFile").onchange = () => {
+  const f = $("#docFile").files[0]; if (!f) return;
+  if (f.size > 20 * 1024 * 1024) { $("#docStatus").textContent = "That file is larger than 20 MB."; return; }
+  const r = new FileReader();
+  r.onload = () => addDoc({ filename: f.name, content_base64: r.result });
+  r.readAsDataURL(f);
+  $("#docFile").value = "";
+};
+$("#docUrlBtn").onclick = () => {
+  const url = $("#docUrl").value.trim();
+  if (!/^https?:\/\//i.test(url)) { $("#docStatus").textContent = "Paste a link starting with http:// or https://"; return; }
+  $("#docUrl").value = "";
+  addDoc({ url });
+};
+
 // ---------------------------------------------------------------- who is signed in (hosted beta only)
 let me = { auth: false };
 async function loadMe() {
@@ -2274,7 +2360,7 @@ async function loadMe() {
   $("#who").innerHTML = `<span><b>${esc(me.name)}</b> · ${esc(left)}</span><a href="/logout">Sign out</a>`;
   $("#who").hidden = false;
 }
-loadMe().then(() => { if (!me.auth || me.signed_in) { loadRuns(); showInfo(null); } });
+loadMe().then(() => { if (!me.auth || me.signed_in) { loadRuns(); loadDocs(); showInfo(null); } });
 </script>
 </body>
 </html>

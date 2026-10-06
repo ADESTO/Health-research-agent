@@ -18,17 +18,19 @@ import re
 
 STYLES = ("author-year", "numbered")
 _ID = r"(?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})"          # new and old arXiv ids
-_ONE = re.compile(rf"(?:arXiv[:\s]?\s*)?({_ID})(?:v\d+)?|(PMC)\s?(\d{{4,9}})", re.I)
-_GROUP = re.compile(rf"[\[(]\s*((?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}})"
-                    rf"(?:\s*[,;]\s*(?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}))*)\s*[\])]", re.I)
-_BARE = re.compile(rf"(?<![\[\w/.:])arXiv:\s?({_ID})(?:v\d+)?(?![\w\]])|(?<![\[\w])(PMC)(\d{{4,9}})(?![\w\]])")
-CITE = re.compile(r"\[(?:arXiv:([^\]\s]+)|(PMC\d+))\]")
-_C1 = r"\[(?:arXiv:[^\]\s]+|PMC\d+)\]"
+_ONE = re.compile(rf"(?:arXiv[:\s]?\s*)?({_ID})(?:v\d+)?|(PMC)\s?(\d{{4,9}})|\b(UP\d{{1,9}})\b", re.I)
+_GROUP = re.compile(rf"[\[(]\s*((?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}|UP\d{{1,9}})"
+                    rf"(?:\s*[,;]\s*(?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}|UP\d{{1,9}}))*)\s*[\])]",
+                    re.I)
+_BARE = re.compile(rf"(?<![\[\w/.:])arXiv:\s?({_ID})(?:v\d+)?(?![\w\]])|(?<![\[\w])(PMC)(\d{{4,9}})(?![\w\]])"
+                   rf"|(?<![\[\w/])(UP\d{{1,9}})(?![\w\]])")
+CITE = re.compile(r"\[(?:arXiv:([^\]\s]+)|(PMC\d+|UP\d+))\]")
+_C1 = r"\[(?:arXiv:[^\]\s]+|PMC\d+|UP\d+)\]"
 _RUN = re.compile(rf"{_C1}(?:\s*[,;]?\s*{_C1})*")
 
 
 def _tag(pid: str) -> str:
-    return f"[{pid}]" if pid.startswith("PMC") else f"[arXiv:{pid}]"
+    return f"[{pid}]" if pid.startswith(("PMC", "UP")) else f"[arXiv:{pid}]"
 
 
 def normalise(text: str, known: set[str]) -> str:
@@ -36,7 +38,7 @@ def normalise(text: str, known: set[str]) -> str:
     def ids_in(chunk: str) -> list[str]:
         out = []
         for m in _ONE.finditer(chunk):
-            pid = m.group(1) if m.group(1) else f"PMC{m.group(3)}"
+            pid = m.group(1) or (m.group(4).upper() if m.group(4) else f"PMC{m.group(3)}")
             out.append(pid)
         return out
 
@@ -47,7 +49,7 @@ def normalise(text: str, known: set[str]) -> str:
     text = _GROUP.sub(group, text)
 
     def bare(m):
-        pid = m.group(1) if m.group(1) else f"PMC{m.group(3)}"
+        pid = m.group(1) or (m.group(4).upper() if m.group(4) else f"PMC{m.group(3)}")
         return _tag(pid) if pid in known else m.group(0)
 
     return _BARE.sub(bare, text)
@@ -206,6 +208,10 @@ def _ref_authors(names: list[tuple[str, str]], style: str) -> str:
 
 
 def _where(p: dict) -> str:
+    if p["source"] == "upload":
+        from research_agent.uploads import where
+
+        return where(p)
     if p["source"] == "pmc":
         bits = [f"*{p['journal_ref']}*" if p.get("journal_ref") else "", f"https://doi.org/{p['doi']}" if p.get("doi") else "",
                 f"PMCID: {p['paper_id']}", f"https://pmc.ncbi.nlm.nih.gov/articles/{p['paper_id']}/"]

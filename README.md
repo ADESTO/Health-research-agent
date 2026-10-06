@@ -149,6 +149,17 @@ data export gets a sheet per condition. API: `POST /runs/{id}/meta {"condition":
 `GET /runs/{id}/meta?condition=...` and `GET /runs/{id}/meta/forest.png?condition=...`. It is a model-assisted
 analysis of the loaded corpus, not a registered systematic review, and says so.
 
+Your own documents: under "Your documents" in the run form, add a file (PDF, Word .docx, text, Markdown or HTML,
+up to 20 MB) or a link, mark it as a paper or an unpublished report, and tick it for a run. A ticked document is
+treated like any study: screened against the protocol in a systematic run (and never sampled out), put on the
+shortlist in an agent-chosen run, always read in full, every value backed by a quote checked by code, counted in
+claims and PRISMA (as "added by the user"), and cited as [UP12] with a reference that says it was supplied by
+the user. A link to a PMC or arXiv paper already in the corpus attaches that paper instead of a copy. Documents
+are private: every corpus search and count excludes them, agents cannot add them to a run, and only the owner
+can list, download, attach or delete them. Deleting one removes it from every run that used it. A scanned PDF
+without a text layer cannot be read; export it with OCR first. API: `POST /documents`, `GET /documents`,
+`DELETE /documents/{id}`, `GET /documents/{id}/file`, and `documents` / `include_papers` on `POST /runs`.
+
 Guideline library: a reference that reports compare against, never evidence that is counted.
 
     python -m research_agent.cli guideline-add --pmc PMC9876543 --issuer EULAR --condition "rheumatoid arthritis"

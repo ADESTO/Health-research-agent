@@ -180,7 +180,7 @@ When synthesis has written the report, call finish.""",
 
 def _no_evidence_report(ctx: RunContext) -> str:
     note = ctx.notes().get("discovery", {})
-    n_corpus = ctx.pg.execute("SELECT count(*) n FROM papers").fetchone()["n"]
+    n_corpus = ctx.pg.execute("SELECT count(*) n FROM papers WHERE source <> 'upload'").fetchone()["n"]
     searches = note.get("search_log") or []
     lines = [f"# No relevant papers found", "",
              f"**Question:** {ctx.question}", "",
@@ -254,6 +254,10 @@ def run_research(question: str | None = None, mode: str = "orchestrated", provid
             systematic.systematic_discovery(ctx, protocol)
             if not ctx.shortlist_ids():
                 raise RuntimeError("the systematic search found no eligible papers; widen the question")
+        if not systematic.is_systematic(ctx):
+            from research_agent.uploads import attach_to_run
+
+            attach_to_run(ctx)                       # the user's own documents, before discovery adds the rest
         if protocol:
             systematic.place_cohort(ctx, protocol)   # count only the protocol's countries, in either mode
         if mode == "pipeline":

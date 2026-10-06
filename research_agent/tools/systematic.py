@@ -86,7 +86,8 @@ def identify(ctx, query: str) -> list[str]:
 
     sql, params = tsquery_sql(query, prefix="q")
     return [r["paper_id"] for r in ctx.pg.execute(
-        f"SELECT paper_id FROM papers WHERE tsv @@ ({sql}) ORDER BY paper_id", params).fetchall()]
+        f"SELECT paper_id FROM papers WHERE source <> 'upload' AND tsv @@ ({sql}) ORDER BY paper_id",
+        params).fetchall()]
 
 
 def _screen_batch(llm, ctx, papers: list[dict], protocol: dict) -> dict[str, dict]:
@@ -167,14 +168,23 @@ def systematic_discovery(ctx, protocol: dict, max_analysed: int | None = None,
 
     found = identify(ctx, query)
     log_identified(ctx, found, f"systematic: {query}")
+    # the user's own documents join the identified records and are screened like any other, but are never
+    # sampled out: the user chose them
+    from research_agent.uploads import for_run
+
+    own = [p for p in for_run(ctx) if p not in set(found)]
+    log_identified(ctx, own, "added by the user")
     to_screen = found
     if len(found) > max_screened:
         to_screen = sorted(rng.sample(found, max_screened))
         rest = sorted(set(found) - set(to_screen))
         log_decision(ctx, rest, "over_limit", f"identified; not in the random sample of {max_screened} screened "
                                               f"(seed {seed})")
-    ctx.emit("discovery", "start", {"task": f"systematic search: {len(found)} identified by `{query[:120]}`; "
-                                            f"screening {len(to_screen)}"})
+    to_screen = to_screen + own
+    found = found + own
+    ctx.emit("discovery", "start", {"task": f"systematic search: {len(found)} identified by `{query[:120]}`"
+                                            + (f" and {len(own)} added by the user" if own else "")
+                                            + f"; screening {len(to_screen)}"})
     decisions = screen(ctx, to_screen, protocol)
     eligible, excluded = [], []
     for pid in to_screen:
@@ -194,7 +204,9 @@ def systematic_discovery(ctx, protocol: dict, max_analysed: int | None = None,
 
     analysed = eligible
     if len(eligible) > max_analysed:
-        analysed = sorted(rng.sample(eligible, max_analysed))
+        mine = [p for p in eligible if p in set(own)]
+        pool = [p for p in eligible if p not in set(own)]
+        analysed = sorted(rng.sample(pool, max(0, max_analysed - len(mine)))) + mine
         log_decision(ctx, sorted(set(eligible) - set(analysed)), "over_limit",
                      f"eligible; not in the random sample of {max_analysed} analysed (seed {seed})")
     _shortlist(ctx, analysed, decisions)
@@ -204,7 +216,7 @@ def systematic_discovery(ctx, protocol: dict, max_analysed: int | None = None,
             "identified": len(found), "screened": len(to_screen), "screened_is_sample": len(found) > max_screened,
             "eligible": len(eligible), "excluded": len(excluded), "unscreened": len(unscreened),
             "analysed": len(analysed), "analysed_is_sample": len(eligible) > max_analysed,
-            "missed_by_query": misses, "countries": protocol.get("countries") or [],
+            "missed_by_query": misses, "countries": protocol.get("countries") or [], "added_by_user": len(own),
             "place_cohort_set": cohort_set}
     ctx.save_note("search", note)
     ctx.emit("discovery", "finish", {"output": {k: note[k] for k in ("identified", "screened", "eligible",
@@ -266,7 +278,7 @@ def recall_check(ctx, found: set[str], probe: int = RECALL_PROBE) -> list[dict]:
 
     try:
         rows = ctx.pg.execute(
-            "SELECT paper_id, title, year FROM papers WHERE embedding IS NOT NULL "
+            "SELECT paper_id, title, year FROM papers WHERE embedding IS NOT NULL AND source <> 'upload' "
             "ORDER BY embedding <=> %s LIMIT %s", (get_embedder().embed_query(ctx.question), int(probe))).fetchall()
     except Exception:
         return []
@@ -284,7 +296,9 @@ def markdown(ctx) -> list[str]:
          f"as loaded. Query, fixed before any result was read: `{n['query']}`"
          + (" (the protocol wrote no specific search query, so its broad topic query was used)."
             if n.get("query_was_fallback") else "."), "",
-         f"- Identified: {n['identified']} papers matched the query.",
+         f"- Identified: {n['identified']} papers matched the query"
+         + (f", plus {n['added_by_user']} documents added by the user (screened the same way)" if n.get("added_by_user") else "")
+         + ".",
          f"- Screened on title and abstract: {n['screened']}"
          + (f" (a random sample, seed {n['seed']}, because more were identified than can be screened)."
             if n.get("screened_is_sample") else "."),

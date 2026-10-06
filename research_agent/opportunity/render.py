@@ -9,7 +9,7 @@ def _pct(x) -> str:
 
 
 def _cite(pid: str) -> str:
-    return f"[{pid}]" if pid.startswith("PMC") else f"[arXiv:{pid}]"
+    return f"[{pid}]" if pid.startswith(("PMC", "UP")) else f"[arXiv:{pid}]"
 
 
 def _ids(pids, k=4) -> str:
@@ -247,7 +247,7 @@ def _reasoning_lines(r: dict) -> list[str]:
 
 def references(pg, pids: list[str]) -> list[str]:
     rows = {r["paper_id"]: r for r in pg.execute(
-        "SELECT paper_id, source, title, year, authors, license FROM papers WHERE paper_id = ANY(%s)",
+        "SELECT paper_id, source, title, year, authors, license, journal_ref FROM papers WHERE paper_id = ANY(%s)",
         (pids,)).fetchall()}
     out = []
     for pid in pids:
@@ -255,6 +255,9 @@ def references(pg, pids: list[str]) -> list[str]:
         if not r:
             continue
         first = re.split(r",|\band\b", r["authors"] or "")[0].strip() or "Unknown"
+        if r["source"] == "upload":
+            out.append(f"- **{pid}**: {r['title']} ({r['year']}). {r['journal_ref'] or 'Document supplied by the user'}")
+            continue
         url = (f"https://pmc.ncbi.nlm.nih.gov/articles/{pid}/" if r["source"] == "pmc"
                else f"https://arxiv.org/abs/{pid}")
         out.append(f"- **{pid if r['source'] == 'pmc' else 'arXiv:' + pid}**: {r['title']} ({first} et al., "

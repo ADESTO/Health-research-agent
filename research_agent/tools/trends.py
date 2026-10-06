@@ -11,7 +11,8 @@ from research_agent.tools.search import SOURCE
 def corpus_sources(ctx) -> dict:
     """Which corpora are loaded, and how many papers and years each contributes."""
     rows = ctx.pg.execute(
-        "SELECT source, count(*) n, min(year) lo, max(year) hi FROM papers GROUP BY source ORDER BY source"
+        "SELECT source, count(*) n, min(year) lo, max(year) hi FROM papers WHERE source <> 'upload' "
+        "GROUP BY source ORDER BY source"
     ).fetchall()
     return {"sources": {r["source"]: {"papers": r["n"], "years": [r["lo"], r["hi"]]} for r in rows}}
 
@@ -42,10 +43,10 @@ def topic_series(ctx, keywords: str, year_from: int | None = None, year_to: int 
               "src": None if src == "all" else src}
     rows = ctx.pg.execute(
         """WITH m AS (SELECT year, count(*) n FROM papers
-                      WHERE tsv @@ (""" + tq_sql + """) """ + scope + """
+                      WHERE source <> 'upload' AND tsv @@ (""" + tq_sql + """) """ + scope + """
                         AND year BETWEEN %(yf)s AND %(yt)s
                         AND (%(src)s::text IS NULL OR source = %(src)s) GROUP BY year),
-                h AS (SELECT year, count(*) n FROM papers WHERE year BETWEEN %(yf)s AND %(yt)s """ + scope + """
+                h AS (SELECT year, count(*) n FROM papers WHERE source <> 'upload' AND year BETWEEN %(yf)s AND %(yt)s """ + scope + """
                         AND (%(src)s::text IS NULL OR source = %(src)s) GROUP BY year),
                 a AS (SELECT year, sum(n_papers) n FROM corpus_year_stats
                       WHERE year BETWEEN %(yf)s AND %(yt)s

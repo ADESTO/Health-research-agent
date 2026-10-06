@@ -15,7 +15,9 @@ SOURCE = {"type": "string", "enum": ["arxiv", "pmc", "all"],
 
 
 def _filters(year_from, year_to, categories, source=None) -> tuple[str, dict]:
-    clauses, params = [], {}
+    # a user's own documents are never part of the searchable corpus: they enter only the runs they are
+    # attached to, and other users never see them
+    clauses, params = ["source <> 'upload'"], {}
     if source and source != "all":
         clauses.append("source = %(src)s"); params["src"] = str(source)
     if year_from:
@@ -119,7 +121,7 @@ def find_similar(ctx, paper_id: str, limit: int = 10) -> dict:
     rows = ctx.pg.execute(
         """SELECT p.paper_id, p.title, p.year, round((1 - (p.embedding <=> s.embedding))::numeric, 3) AS similarity
            FROM papers s, papers p
-           WHERE s.paper_id = %s AND p.paper_id <> s.paper_id
+           WHERE s.paper_id = %s AND p.paper_id <> s.paper_id AND p.source <> 'upload'
            ORDER BY p.embedding <=> s.embedding LIMIT %s""",
         (paper_id, max(1, min(int(limit), 30)))).fetchall()
     from research_agent.tools.review import log_identified
@@ -159,8 +161,9 @@ def add_to_shortlist(ctx, paper_ids: list[str], reason: str, _agent: str = "disc
     """Add papers to the run's shortlist. The same study can exist twice, as an arXiv preprint and as
     its published PMC version; only one copy is kept (the published one), so nothing is counted twice."""
     cols = "paper_id, source, title, doi, authors"
+    # a user's document enters a run only when its owner attaches it, never through an agent
     rows = {r["paper_id"]: r for r in ctx.pg.execute(
-        f"SELECT {cols} FROM papers WHERE paper_id = ANY(%s)", (list(paper_ids),)).fetchall()}
+        f"SELECT {cols} FROM papers WHERE paper_id = ANY(%s) AND source <> 'upload'", (list(paper_ids),)).fetchall()}
     unknown = sorted(set(paper_ids) - set(rows))
     shortlist = {r["paper_id"]: r for r in ctx.pg.execute(
         f"SELECT {cols} FROM run_papers JOIN papers USING (paper_id) WHERE run_id=%s", (ctx.run_id,)).fetchall()}
@@ -209,6 +212,13 @@ def add_to_shortlist(ctx, paper_ids: list[str], reason: str, _agent: str = "disc
 
 
 def remove_from_shortlist(ctx, paper_ids: list[str], reason: str = "") -> dict:
+    mine = {r["paper_id"] for r in ctx.pg.execute(
+        "SELECT paper_id FROM run_papers WHERE run_id=%s AND added_by='user'", (ctx.run_id,)).fetchall()}
+    kept = [p for p in paper_ids if p in mine]
+    paper_ids = [p for p in paper_ids if p not in mine]
+    if kept and not paper_ids:
+        return {"removed": 0, "shortlist_size": len(ctx.shortlist_ids()),
+                "note": f"{', '.join(kept)} were added by the user and stay in the run"}
     cur = ctx.pg.execute("DELETE FROM run_papers WHERE run_id=%s AND paper_id = ANY(%s)",
                          (ctx.run_id, list(paper_ids)))
     from research_agent.tools.review import log_decision

@@ -4322,3 +4322,142 @@ def test_guidelines_are_cited_inside_reports_and_answers(loaded_db, monkeypatch,
         if gid:
             ctx.pg.execute("DELETE FROM guidelines WHERE id=%s", (gid,))
         ctx.close()
+
+
+# ---------------------------------------------------------------- the user's own documents
+_DOC_TEXT = ("# Abstract\nA household survey of malaria in Busia county, Kenya, in 2019. We tested 1,204 children "
+             "for malaria parasites by microscopy and fitted a logistic regression of infection on bed net use and "
+             "rainfall. Prevalence was 18% and bed net use was associated with lower risk.\n\n# Methods\nWe "
+             "sampled 600 households at random. Monthly rainfall came from CHIRPS. Models were validated on a "
+             "held-out sub-county.\n\n# Results\nThe model reached an AUC of 0.71 on the held-out sub-county.\n")
+
+
+def test_documents_are_read_from_common_formats(tmp_path):
+    from research_agent import uploads as U
+
+    md = U.sections_of("survey.md", _DOC_TEXT.encode())
+    assert [s["heading"] for s in md] == ["Abstract", "Methods", "Results"]
+    html = U.sections_of("page.html", b"<html><head><script>var x=1;</script></head><body><h1>Survey</h1>"
+                                      b"<p>Malaria in Busia.</p><nav>menu</nav><h2>Methods</h2><p>We sampled.</p></body></html>")
+    assert [s["heading"] for s in html] == ["Survey", "Methods"] and "var x" not in str(html) and "menu" not in str(html)
+    import docx
+
+    d = docx.Document()
+    d.add_heading("Results", 1)
+    d.add_paragraph("Prevalence was 18%.")
+    path = tmp_path / "r.docx"
+    d.save(str(path))
+    assert U.sections_of("r.docx", path.read_bytes()) == [{"heading": "Results", "text": "Prevalence was 18%."}]
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    fig = plt.figure()
+    fig.text(0.1, 0.5, "Malaria prevalence in Busia county was 18 percent")
+    pdf = tmp_path / "p.pdf"
+    fig.savefig(str(pdf))
+    plt.close(fig)
+    pages = U.sections_of("p.pdf", pdf.read_bytes())
+    assert pages[0]["heading"] == "Page 1" and "Busia" in pages[0]["text"]
+    assert U.is_upload("UP12") and not U.is_upload("PMC12") and U.doc_id("UP7") == 7
+
+
+def test_documents_are_private_and_counted_like_studies(ctx, monkeypatch):
+    """A document is found by no search, added by no agent, seen by no other user; attached to a run it is read
+    in full, counted, screened in a systematic run, cited as [UPn] and listed in the references."""
+    from research_agent import uploads as U
+    from research_agent.runstate import RunContext
+    from research_agent.tools import search as S
+    from research_agent.tools import systematic as SY
+    from research_agent.tools.extraction import extract_papers
+    from research_agent.tools.review import prisma_counts
+
+    res = U.add_document(ctx.pg, None, kind="report", title="Busia malaria survey 2019", year=2019,
+                         filename="busia.md", data=_DOC_TEXT.encode())
+    pid = res["paper_id"]
+    try:
+        assert pid.startswith("UP") and res["kind"] == "report"
+        assert "error" in U.add_document(ctx.pg, None, filename="x.txt", data=b"tiny")
+        # never found by searching, never added by an agent
+        hits = S.hybrid_search(ctx, "Busia household malaria survey bed net", limit=60)["results"]
+        assert pid not in [h["paper_id"] for h in hits]
+        assert S.corpus_count(ctx, "Busia")["matching_papers"] == 0
+        assert pid not in SY.identify(ctx, "malaria AND Busia")
+        assert S.add_to_shortlist(ctx, [pid], "agent tries")["added"] == 0
+
+        # an agent-chosen run: attached first, marked as the user's, kept when an agent tries to drop it
+        U.set_for_run(ctx.pg, ctx.run_id, [pid])
+        assert U.attach_to_run(ctx) == 1 and pid in ctx.shortlist_ids()
+        assert S.remove_from_shortlist(ctx, [pid], "off topic")["removed"] == 0 and pid in ctx.shortlist_ids()
+        out = extract_papers(ctx, [pid], depth="abstract")
+        src = ctx.pg.execute("SELECT source FROM extractions WHERE paper_id=%s", (pid,)).fetchone()["source"]
+        assert src == "fulltext", "a user's document is always read in full"
+        assert prisma_counts(ctx)["identified_by_corpus"].get("upload") == 1
+
+        # citations and references
+        from research_agent.agents.report import _cite
+        from research_agent.tools import citing
+
+        assert _cite(pid) == f"[{pid}]"
+        assert citing.normalise(f"as shown ({pid})", {pid}) == f"as shown [{pid}]"
+        text, refs, order = citing.render(ctx.pg, f"Prevalence was high [{pid}].")
+        assert order == [pid] and "Unpublished report supplied by the user" in refs[0]
+
+        # a systematic run screens it with the rest and never samples it out
+        ctx2 = RunContext.create("malaria prevalence", llm_factory=lambda strong=False, step=None: FakeLLM())
+        try:
+            U.set_for_run(ctx2.pg, ctx2.run_id, [pid])
+            note = SY.systematic_discovery(ctx2, {"search_query": "malaria AND (forecast OR forecasting)",
+                                                  "inclusion": ["malaria"], "exclusion": [], "fields": []},
+                                           max_analysed=2)
+            assert note["added_by_user"] == 1 and pid in ctx2.shortlist_ids()
+            assert "plus 1 documents added by the user" in "\n".join(SY.markdown(ctx2))
+        finally:
+            ctx2.close()
+
+        # deleting removes it everywhere
+        assert U.delete_document(ctx.pg, None, res["id"])
+        assert pid not in ctx.shortlist_ids()
+        assert not ctx.pg.execute("SELECT 1 FROM papers WHERE paper_id=%s", (pid,)).fetchone()
+    finally:
+        U.delete_document(ctx.pg, None, res["id"])
+
+
+def test_document_endpoints_keep_each_users_files_private(loaded_db, monkeypatch):
+    import base64
+    import dataclasses
+
+    from fastapi.testclient import TestClient
+
+    from research_agent import auth, jobs
+    from research_agent.api import main as api
+    from research_agent.config import settings
+    from research_agent.db import get_conn
+
+    hosted = dataclasses.replace(settings, auth_required=True, runs_per_day=10)
+    monkeypatch.setattr(api, "settings", hosted)
+    monkeypatch.setattr(auth, "settings", hosted)
+    monkeypatch.setattr(jobs, "enqueue", lambda kind, payload, **kw: 1)
+    with get_conn() as pg:
+        _a, ta = auth.create_user(pg, "Doc Owner")
+        _b, tb = auth.create_user(pg, "Someone Else")
+    a, b = TestClient(api.app), TestClient(api.app)
+    a.headers["Authorization"] = f"Bearer {ta}"
+    b.headers["Authorization"] = f"Bearer {tb}"
+    r = a.post("/documents", json={"filename": "busia.md", "kind": "paper",
+                                   "content_base64": base64.b64encode(_DOC_TEXT.encode()).decode()})
+    assert r.status_code == 201, r.text
+    doc = r.json()
+    assert [d["id"] for d in a.get("/documents").json()["documents"]] == [doc["id"]]
+    assert b.get("/documents").json()["documents"] == []
+    assert b.get(f"/documents/{doc['id']}/file").status_code == 404
+    assert a.get(f"/documents/{doc['id']}/file").content == _DOC_TEXT.encode()
+    assert b.delete(f"/documents/{doc['id']}").status_code == 404
+    q = "What is the prevalence of malaria in Busia county?"
+    assert b.post("/runs", json={"question": q, "documents": [doc["id"]]}).status_code == 404
+    run = a.post("/runs", json={"question": q, "documents": [doc["id"]]}).json()["run_id"]
+    with get_conn() as pg:
+        note = pg.execute("SELECT content FROM run_notes WHERE run_id=%s AND agent='user_documents'", (run,)).fetchone()
+    assert note["content"]["paper_ids"] == [doc["paper_id"]]
+    assert a.post("/documents", json={"filename": "x.txt", "content_base64": base64.b64encode(b"short").decode()}).status_code == 422
+    assert a.delete(f"/documents/{doc['id']}").status_code == 200

@@ -138,10 +138,10 @@ def _candidates(ctx, query: str, limit: int = CANDIDATES) -> list[dict]:
     sql = f"""
     WITH q AS (SELECT ({tq_sql}) AS tq),
     sem AS (SELECT paper_id, row_number() OVER (ORDER BY embedding <=> %(qvec)s) r
-            FROM (SELECT paper_id, embedding FROM papers WHERE embedding IS NOT NULL
+            FROM (SELECT paper_id, embedding FROM papers WHERE embedding IS NOT NULL AND source <> 'upload'
                   ORDER BY embedding <=> %(qvec)s LIMIT 120) s),
     kw AS (SELECT paper_id, row_number() OVER (ORDER BY rank DESC) r
-           FROM (SELECT paper_id, ts_rank_cd(tsv, q.tq) rank FROM papers, q WHERE tsv @@ q.tq
+           FROM (SELECT paper_id, ts_rank_cd(tsv, q.tq) rank FROM papers, q WHERE tsv @@ q.tq AND source <> 'upload'
                  ORDER BY rank DESC LIMIT 120) k)
     SELECT p.paper_id, p.title, p.year, p.source, p.abstract,
            coalesce(1.0/(60+sem.r), 0) + coalesce(1.0/(60+kw.r), 0) AS score

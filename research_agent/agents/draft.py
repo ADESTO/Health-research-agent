@@ -541,7 +541,7 @@ def _appendix(ctx, body: str) -> list[str]:
     for c in rows:
         r = c["result"] or {}
         matched = r.get("matched_paper_ids") or []
-        studies = " ".join(f"[arXiv:{p}]" if not p.startswith("PMC") else f"[{p}]" for p in matched[:8])
+        studies = " ".join(f"[arXiv:{p}]" if not p.startswith(("PMC", "UP")) else f"[{p}]" for p in matched[:8])
         if len(matched) > 8:
             studies += f" and {len(matched) - 8} more"
         result = _counted(r) or ""

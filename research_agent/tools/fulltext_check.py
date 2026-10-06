@@ -46,7 +46,7 @@ def topic_paper_ids(ctx, topic_query: str, limit: int) -> list[str]:
 
     sql, params = tsquery_sql(topic_query, prefix="t")
     return [r["paper_id"] for r in ctx.pg.execute(
-        f"SELECT paper_id FROM papers WHERE tsv @@ ({sql}) ORDER BY ts_rank_cd(tsv, ({sql})) DESC, paper_id "
+        f"SELECT paper_id FROM papers WHERE source <> 'upload' AND tsv @@ ({sql}) ORDER BY ts_rank_cd(tsv, ({sql})) DESC, paper_id "
         f"LIMIT %(lim)s", {**params, "lim": int(limit)}).fetchall()]
 
 

@@ -440,19 +440,19 @@ def _corpus_check(ctx, topic_query: str, search: str) -> dict | None:
     row = ctx.pg.execute(
         f"""SELECT count(*) FILTER (WHERE tsv @@ ({t_sql})) AS topic_total,
                    count(*) FILTER (WHERE tsv @@ ({t_sql}) AND tsv @@ ({s_sql})) AS matching
-            FROM papers""", {**t_params, **s_params}).fetchone()
+            FROM papers WHERE source <> 'upload'""", {**t_params, **s_params}).fetchone()
     if not row["topic_total"]:
         return None
     out = {"topic_query": topic_query, "search": search, "topic_total": row["topic_total"],
            "matching": row["matching"], "share": round(row["matching"] / row["topic_total"], 4)}
     # the papers that mention it and were NOT analysed: each one could overturn the gap, so name them
     unread = ctx.pg.execute(
-        f"""SELECT paper_id, title, year FROM papers p WHERE tsv @@ ({t_sql}) AND tsv @@ ({s_sql})
+        f"""SELECT paper_id, title, year FROM papers p WHERE p.source <> 'upload' AND tsv @@ ({t_sql}) AND tsv @@ ({s_sql})
               AND NOT EXISTS (SELECT 1 FROM run_papers rp WHERE rp.run_id = %(run)s AND rp.paper_id = p.paper_id)
             ORDER BY year DESC NULLS LAST, paper_id LIMIT 12""",
         {**t_params, **s_params, "run": ctx.run_id}).fetchall()
     n_unread = ctx.pg.execute(
-        f"""SELECT count(*) n FROM papers p WHERE tsv @@ ({t_sql}) AND tsv @@ ({s_sql})
+        f"""SELECT count(*) n FROM papers p WHERE p.source <> 'upload' AND tsv @@ ({t_sql}) AND tsv @@ ({s_sql})
               AND NOT EXISTS (SELECT 1 FROM run_papers rp WHERE rp.run_id = %(run)s AND rp.paper_id = p.paper_id)""",
         {**t_params, **s_params, "run": ctx.run_id}).fetchone()["n"]
     out["not_analysed"] = n_unread

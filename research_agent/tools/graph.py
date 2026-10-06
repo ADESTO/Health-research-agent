@@ -67,6 +67,8 @@ def _short(title: str, n: int = 48) -> str:
 
 
 def _url(pid: str, corpus: str | None) -> str:
+    if corpus == "upload" or pid.startswith("UP"):
+        return f"/documents/{pid[2:]}/file"
     return f"https://pmc.ncbi.nlm.nih.gov/articles/{pid}/" if (corpus == "pmc" or pid.startswith("PMC")) \
         else f"https://arxiv.org/abs/{pid}"
 

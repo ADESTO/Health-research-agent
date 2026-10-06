@@ -135,6 +135,9 @@ class RunRequest(BaseModel):
     provider: str | None = Field(default=None, pattern="^(anthropic|groq|deepseek)$")
     # purposive: an agent chooses the papers; systematic: a fixed query, every hit screened, all eligible analysed
     search: str = Field(default="purposive", pattern="^(purposive|systematic)$")
+    # the user's own documents to include (ids from /documents), and corpus papers a link pointed to
+    documents: list[int] = Field(default_factory=list, max_length=30)
+    include_papers: list[str] = Field(default_factory=list, max_length=30)
 
 
 @app.get("/", include_in_schema=False)
@@ -164,7 +167,7 @@ def list_runs(request: Request, limit: int = 10):
 @app.get("/health")
 def health():
     with get_conn() as pg:
-        rows = pg.execute("SELECT source, count(*) n FROM papers GROUP BY source").fetchall()
+        rows = pg.execute("SELECT source, count(*) n FROM papers WHERE source <> 'upload' GROUP BY source").fetchall()
     return {"ok": True, "papers": sum(r["n"] for r in rows), "by_source": {r["source"]: r["n"] for r in rows}}
 
 
@@ -196,9 +199,19 @@ def start_run(req: RunRequest, request: Request):
     from research_agent.jobs import enqueue
 
     run_id = str(uuid.uuid4())
+    from research_agent import uploads
+
     with get_conn() as pg:
+        docs = uploads.owned(pg, user["id"] if user else None, req.documents)
+        if len(docs) < len(set(req.documents)):
+            raise HTTPException(404, "one of the documents is not yours or no longer exists")
+        corpus = [r["paper_id"] for r in pg.execute(
+            "SELECT paper_id FROM papers WHERE paper_id = ANY(%s) AND source <> 'upload'",
+            (req.include_papers or [""],)).fetchall()]
         pg.execute("INSERT INTO runs (run_id, question, status, owner_id, requested_mode) "
                    "VALUES (%s,%s,'queued',%s,%s)", (run_id, req.question, user["id"] if user else None, req.mode))
+        if docs or corpus:
+            uploads.set_for_run(pg, run_id, [f"UP{d}" for d in docs] + corpus)
     # a durable job: it survives a server restart, and a worker that dies mid-run is replaced
     job = enqueue("map" if req.mode == "map" else "run",
                   {"run_id": run_id, "question": req.question, "mode": req.mode, "provider": req.provider,
@@ -370,6 +383,74 @@ def post_precedent(run_id: str, body: dict | None = None):
         return res
     finally:
         ctx.close()
+
+
+class DocumentRequest(BaseModel):
+    kind: str = Field(default="paper", pattern="^(paper|report)$")
+    title: str = Field(default="", max_length=300)
+    year: int | None = Field(default=None, ge=1900, le=2100)
+    authors: str = Field(default="", max_length=500)
+    filename: str | None = Field(default=None, max_length=200)
+    content_base64: str | None = Field(default=None, max_length=30_000_000)
+    url: str | None = Field(default=None, max_length=500)
+
+
+@app.post("/documents", status_code=201)
+def add_document(req: DocumentRequest, request: Request):
+    """Add one of your own documents (a file, as base64, or a link). Private to you; attach it to a run when
+    you start one."""
+    from research_agent import uploads
+
+    user = _user(request)
+    if not req.content_base64 and not req.url:
+        raise HTTPException(422, "add a file or a link")
+    try:
+        data = uploads.b64(req.content_base64) if req.content_base64 else None
+    except Exception:
+        raise HTTPException(422, "the file could not be decoded")
+    with get_conn() as pg:
+        res = uploads.add_document(pg, user["id"] if user else None, kind=req.kind, title=req.title,
+                                   year=req.year, authors=req.authors, filename=req.filename, data=data,
+                                   url=req.url)
+    if "error" in res:
+        raise HTTPException(422, res["error"])
+    return res
+
+
+@app.get("/documents")
+def list_documents(request: Request):
+    from research_agent import uploads
+
+    user = _user(request)
+    with get_conn() as pg:
+        return {"documents": uploads.list_documents(pg, user["id"] if user else None)}
+
+
+@app.delete("/documents/{doc_id}")
+def delete_document(doc_id: int, request: Request):
+    from research_agent import uploads
+
+    user = _user(request)
+    with get_conn() as pg:
+        if not uploads.delete_document(pg, user["id"] if user else None, doc_id):
+            raise HTTPException(404, "no such document")
+    return {"deleted": doc_id}
+
+
+@app.get("/documents/{doc_id}/file")
+def document_file(doc_id: int, request: Request):
+    from fastapi.responses import Response
+
+    from research_agent import uploads
+
+    user = _user(request)
+    with get_conn() as pg:
+        f = uploads.file_of(pg, user["id"] if user else None, doc_id)
+    if not f or f["content"] is None:
+        raise HTTPException(404, "no such document")
+    name = (f["filename"] or f"document-{doc_id}").replace('"', "")
+    return Response(bytes(f["content"]), media_type=f["content_type"] or "application/octet-stream",
+                    headers={"Content-Disposition": f'inline; filename="{name}"'})
 
 
 @app.get("/guidelines")

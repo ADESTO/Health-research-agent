@@ -396,3 +396,19 @@ CREATE TABLE IF NOT EXISTS guideline_recommendations (
     PRIMARY KEY (guideline_id, seq)
 );
 CREATE INDEX IF NOT EXISTS guideline_recs_tsv_idx ON guideline_recommendations USING gin (tsv);
+
+-- A user's own documents (papers, reports, links). Private to the owner; each is also a row in `papers` with
+-- source='upload' and id UP<id>, which every corpus-wide search excludes.
+CREATE TABLE IF NOT EXISTS user_documents (
+    id            bigserial PRIMARY KEY,
+    owner_id      uuid REFERENCES users(id) ON DELETE CASCADE,
+    kind          text NOT NULL DEFAULT 'paper',      -- paper | report
+    title         text NOT NULL,
+    filename      text NOT NULL DEFAULT '',
+    url           text NOT NULL DEFAULT '',
+    content       bytea,
+    content_type  text NOT NULL DEFAULT '',
+    n_chars       int,
+    created_at    timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS user_documents_owner_idx ON user_documents (owner_id);

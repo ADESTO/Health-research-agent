@@ -273,6 +273,13 @@ def extract_papers(ctx, paper_ids: list[str] | None = None, depth: str = "abstra
 
     fulltexts: dict[str, str | None] = {}
     ft_status: dict[str, str] = {}
+    own = [p for p in todo if p.startswith("UP") and p[2:].isdigit()]
+    if own and depth != "fulltext":
+        # a user's own document has no separate abstract worth reading alone, and its full text is already
+        # stored: it is always read in full
+        fulltexts.update({r["paper_id"]: select_for_reading(r["sections"] or [], budget=settings.fulltext_read_chars)
+                          for r in ctx.pg.execute("SELECT paper_id, sections FROM paper_fulltext WHERE "
+                                                  "paper_id = ANY(%s) AND status='ok'", (own,)).fetchall()})
     if depth == "fulltext" and todo:
         ft_status = fetch_fulltext(ctx.pg, todo)
         rows = ctx.pg.execute("SELECT paper_id, sections FROM paper_fulltext WHERE paper_id = ANY(%s) "
