@@ -398,6 +398,12 @@ Citing the studies (the document will be read by people who cannot see this syst
   weekly admissions [arXiv:2101.00001]". A count never stands alone in a paragraph without cited studies.
 - Mention unsupported claims only as not supported, without brackets ("claim C42, not supported"); never use
   numbers from rejected claims.
+- When the pack has `guidelines`, compare what the studies did with what the guidelines recommend where the
+  section calls for it (results on management, discussion, implications): name the guideline in the sentence
+  and cite the recommendation with its marker, e.g. "According to the 2022 EULAR recommendations, methotrexate
+  should be part of the first treatment strategy [GL1.3], yet only 4 of 14 studies that state their treatments
+  report it." A guideline is a reference, not a study: never count it as evidence, keep it in its own sentence
+  apart from study citations, and quote it only word for word.
 - Counts about the review itself (papers analysed, read in full, PRISMA stages) come from run_facts or the
   review record. Numbers in agent_notes_unverified are not verified: describe them in words.
 - Never add counts together, and never turn a count into a larger claim than it is.
@@ -555,6 +561,8 @@ def _figures(ctx, kind: str) -> tuple[list[str], list[str]]:
 
     for kind_ok, module, fn in ((kind == "review", "research_agent.tools.review", "prisma_markdown"),
                                 (True, "research_agent.tools.results", "results_markdown"),
+                                (True, "research_agent.tools.meta", "markdown"),
+                                (True, "research_agent.tools.guidelines", "markdown"),
                                 (True, "research_agent.tools.burden", "burden_markdown")):
         if not kind_ok:
             continue
@@ -658,7 +666,10 @@ def write_draft(ctx, kind: str, direction: str, about: list[str] | None = None,
              "to be completed by the authors._", ""])
     if warning:
         notice += f"\n\n> **Reading depth.** {warning}"
-    document = "\n".join([body.strip(), "", *tail, *figures, *_appendix(ctx, body)])
+    from research_agent.tools import guidelines as _gl
+
+    gl_refs = _gl.references_markdown(audit.get("guidelines_cited") or [])
+    document = "\n".join([body.strip(), "", *tail, *figures, *_appendix(ctx, body), *gl_refs])
     document, refs, cited = citing.render(ctx.pg, document, citation_style)
     content = "\n".join([f"# {title}", "", notice, "", document, f"## References ({len(refs)})", "",
                          *refs]) + "\n"

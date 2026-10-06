@@ -106,6 +106,15 @@ def execute(kind: str, payload: dict, attempt: int) -> None:
         from research_agent.research import researcher
 
         researcher.run_cycle(payload["researcher_id"], llm_factory=factory, schedule_next=True)
+    elif kind == "meta":
+        from research_agent.runstate import RunContext
+        from research_agent.tools import meta
+
+        ctx = RunContext.attach(payload["run_id"], provider=payload.get("provider"), llm_factory=factory)
+        try:
+            meta.prevalence_pass(ctx, payload["condition"], limit=payload.get("limit"))
+        finally:
+            ctx.close()
     elif kind == "draft":
         from research_agent.agents import draft
 

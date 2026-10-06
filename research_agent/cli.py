@@ -141,6 +141,36 @@ def main(argv: list[str] | None = None) -> int:
     p_map.add_argument("--systematic", action="store_true",
                        help="find papers by a fixed search, screen every hit against the protocol, and analyse all eligible ones (a random sample past SYSTEMATIC_MAX_ANALYSED) instead of letting an agent choose")
     p_rep = sub.add_parser("report"); p_rep.add_argument("run_id")
+    p_gl = sub.add_parser("guideline-add", help="add a clinical guideline to the reference library, from PMC "
+                                             "or a PDF/text file; its recommendations are recorded word for word")
+    src = p_gl.add_mutually_exclusive_group(required=True)
+    src.add_argument("--pmc", help="PMC id of an open-access guideline paper, e.g. PMC9876543")
+    src.add_argument("--file", help="a PDF, text or Markdown file of the guideline")
+    p_gl.add_argument("--issuer", required=True, help='who issued it, e.g. EULAR, ACR, "Kenya Ministry of Health"')
+    p_gl.add_argument("--condition", action="append", required=True,
+                      help='what it covers; repeat for several, e.g. --condition "rheumatoid arthritis"')
+    p_gl.add_argument("--title", help="title (taken from PMC when omitted)")
+    p_gl.add_argument("--year", type=int, help="year (taken from PMC when omitted)")
+    p_gl.add_argument("--region", default="international", help="international, Kenya, Uganda, East Africa...")
+    p_gl.add_argument("--url", default="", help="where it was obtained")
+    p_gl.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
+    p_gls = sub.add_parser("guidelines", help="list the guideline library, or show one guideline's recommendations")
+    p_gls.add_argument("guideline_id", nargs="?", type=int)
+    p_gls.add_argument("--condition")
+    p_glr = sub.add_parser("guideline-remove", help="remove a guideline and its recommendations")
+    p_glr.add_argument("guideline_id", type=int)
+    p_glc = sub.add_parser("guideline-compare", help="set a finished run's studies against the library's "
+                                                 "recommendations for a condition (added to drafts made after)")
+    p_glc.add_argument("run_id"); p_glc.add_argument("--condition")
+    p_glc.add_argument("--guideline", type=int, action="append", help="only these guideline ids")
+    p_meta = sub.add_parser("meta", help="meta-analysis of reported prevalence: read a run's papers for one "
+                                         "condition, check every number against a quote, pool in code")
+    p_meta.add_argument("run_id")
+    p_meta.add_argument("condition", help='e.g. "arthritis", "rheumatoid arthritis", "knee osteoarthritis"')
+    p_meta.add_argument("--limit", type=int, help="how many papers to read (default and maximum 150)")
+    p_meta.add_argument("--refresh", action="store_true", help="read papers already read for this condition again")
+    p_meta.add_argument("--out", default=".", help="folder for the forest plot, the table and the data (CSV)")
+    p_meta.add_argument("--provider", choices=["anthropic", "groq", "deepseek"])
     p_fp = sub.add_parser("fieldpass", help="fill ONE field from full text in the papers that left it blank")
     p_fp.add_argument("run_id")
     p_fp.add_argument("field", help="e.g. q_validation_split, q_forecast_horizon, validation_level")
@@ -421,6 +451,10 @@ def main(argv: list[str] | None = None) -> int:
         for r in rows:
             print(f"{r['run_id']}  {r['status']:<7} {r['created_at']:%Y-%m-%d %H:%M}  papers={r['n_papers']:<3} "
                   f"done=[{r['done'] or ''}]  {r['q']}")
+    elif args.cmd == "meta":
+        return meta_cmd(args)
+    elif args.cmd in ("guideline-add", "guidelines", "guideline-remove", "guideline-compare"):
+        return guidelines_cmd(args)
     elif args.cmd == "fieldpass":
         return fieldpass_cmd(args)
     elif args.cmd == "reread":
@@ -438,6 +472,117 @@ def main(argv: list[str] | None = None) -> int:
             row = pg.execute("SELECT status, report_md, error FROM runs WHERE run_id=%s", (args.run_id,)).fetchone()
         print(row["report_md"] if row and row["report_md"] else row)
     return 0
+
+
+def guidelines_cmd(args) -> int:
+    from research_agent.db import get_conn, init_schema
+    from research_agent.tools import guidelines as GL
+
+    init_schema()
+    if args.cmd == "guideline-compare":
+        from research_agent.agents.report import _cite
+        from research_agent.runstate import RunContext
+
+        ctx = RunContext.attach(args.run_id)
+        try:
+            res = GL.compare(ctx, args.condition, args.guideline)
+        finally:
+            ctx.close()
+        if not res["recommendations"]:
+            print("No recommendations in the library for this condition. Add a guideline first (guideline-add).")
+            return 1
+        n = res["papers_stating_interventions"]
+        print(f"{n} of the run's {res['papers_counted']} papers state which treatments they used or studied.")
+        for r in res["recommendations"]:
+            what = ", ".join(r["interventions"]) or "no treatment named"
+            print(f"- {r['guideline']} {r['number']}: [{r['strength_as_written'] or 'strength not stated'}] {what}: "
+                  f"{r['papers']} of {n} papers" + (f" ({', '.join(_cite(p) for p in r['paper_ids'][:4])})"
+                                                    if r["papers"] else ""))
+        print("Drafts made from this run now include the comparison. " + res["note"])
+        return 0
+    with get_conn() as pg:
+        if args.cmd == "guidelines" and args.guideline_id:
+            for r in GL.recommendations(pg, [args.guideline_id]):
+                grade = " / ".join(x for x in (r["strength_as_written"], r["evidence_as_written"]) if x)
+                print(f"{r['seq']:>3}. {('(' + r['number'] + ') ') if r['number'] else ''}{r['text']}")
+                print(f"     {r['action']}; {grade or 'grade not stated'}; about: {', '.join(r['interventions']) or '-'}")
+            return 0
+        if args.cmd == "guidelines":
+            rows = GL.list_guidelines(pg, args.condition)
+            if not rows:
+                print("The library is empty. Add one with guideline-add --pmc PMC... or --file guideline.pdf")
+            for g in rows:
+                print(f"{g['id']:>3}  {GL.label(g)}  [{', '.join(g['conditions'])}; {g['region']}]  "
+                      f"{g['n_recs']} recommendations" + (f"  ({g['chunks_failed']} parts unread)" if g["chunks_failed"] else ""))
+            return 0
+        if args.cmd == "guideline-remove":
+            n = pg.execute("DELETE FROM guidelines WHERE id=%s RETURNING id", (args.guideline_id,)).fetchall()
+            print("removed" if n else "no such guideline")
+            return 0
+        # guideline-add
+        from research_agent.llm import get_llm
+
+        if args.pmc:
+            meta, sections = GL.text_from_pmc(args.pmc)
+            source, licence = args.pmc.upper(), meta["licence"]
+            title, year = args.title or meta["title"], args.year or meta["year"]
+        else:
+            sections = GL.text_from_file(args.file)
+            source, licence = args.file.rsplit("/", 1)[-1], ""
+            title, year = args.title or source, args.year
+        print(f"Reading {title} ({sum(len(s['text']) for s in sections):,} characters) for its recommendations...")
+        res = GL.add_guideline(pg, lambda strong=False, step=None: get_llm(args.provider, strong=strong, step=step),
+                               title, args.issuer, year, args.condition, args.region, sections, source, licence,
+                               args.url)
+        if "error" in res:
+            print(res["error"]); return 1
+        print(f"Added guideline {res['guideline_id']}: {res['recommendations']} recommendations recorded word for word; "
+              f"{res['dropped_not_found_in_text']} dropped because they were not found in the text"
+              + (f"; {res['chunks_failed']} parts could not be read (run again or check the file)" if res["chunks_failed"] else ""))
+        print(f"Check them with: python -m research_agent.cli guidelines {res['guideline_id']}")
+        return 0
+
+
+def meta_cmd(args) -> int:
+    """Prevalence meta-analysis for one condition over a finished run's papers."""
+    import csv
+    from pathlib import Path
+
+    from research_agent.runstate import RunContext
+    from research_agent.tools import meta
+
+    ctx = RunContext.attach(args.run_id, provider=args.provider)
+    try:
+        res = meta.prevalence_pass(ctx, args.condition, limit=args.limit, refresh=args.refresh)
+        if "error" in res:
+            print(res["error"]); return 1
+        print(f"{res['papers_read']} papers read ({res['read_in_full']} in full); "
+              f"{res['papers_reporting_prevalence']} report a prevalence of {res['condition']}; "
+              f"{res['studies_pooled']} study estimates pooled.")
+        for a in res["analyses"]:
+            o = a["overall"]
+            if o:
+                pi = f", prediction interval {100 * o['pi'][0]:.1f} to {100 * o['pi'][1]:.1f}%" if o["pi"] else ""
+                print(f"  {a['condition']}: {100 * o['pooled']:.1f}% (95% CI {100 * o['ci'][0]:.1f} to "
+                      f"{100 * o['ci'][1]:.1f}%{pi}), {o['k']} studies, {o['n_total']:,} people, I2 {100 * o['i2']:.0f}%")
+            else:
+                print(f"  {a['condition']}: one study, not pooled")
+        if res["not_pooled"]:
+            print(f"  {len(res['not_pooled'])} estimates not pooled (numbers could not be checked); see the CSV")
+        if res["possible_duplicates"]:
+            print(f"  possible duplicate samples: {res['possible_duplicates']}")
+        out = Path(args.out)
+        out.mkdir(parents=True, exist_ok=True)
+        stem = "meta_" + meta._note_key(args.condition).removeprefix("meta:")
+        (out / f"{stem}.md").write_text("\n".join(meta.markdown(ctx, args.condition)))
+        header, rows = meta.export_rows(ctx, args.condition)
+        with open(out / f"{stem}.csv", "w", newline="") as f:
+            w = csv.writer(f); w.writerow(header); w.writerows(rows)
+        png = meta.forest_plot(ctx, args.condition, str(out / f"{stem}_forest.png"))
+        print(f"Wrote {out / (stem + '.md')}, {out / (stem + '.csv')}" + (f" and {png}" if png else ""))
+        return 0
+    finally:
+        ctx.close()
 
 
 def fieldpass_cmd(args) -> int:

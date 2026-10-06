@@ -4044,3 +4044,281 @@ def test_without_auth_nothing_changes(loaded_db):
     client = TestClient(app)
     assert client.get("/me").json() == {"auth": False}
     assert client.get("/runs").status_code == 200
+
+
+# ---------------------------------------------------------------- prevalence meta-analysis
+def test_random_effects_pooling_matches_a_reference_implementation():
+    """DerSimonian-Laird on logit proportions with an HKSJ interval, checked against statsmodels' results for
+    the same five studies (computed once, recorded here so the suite needs no extra package)."""
+    from research_agent.tools import meta as M
+
+    res = M.random_effects([(45, 300), (120, 1650), (12, 90), (80, 400), (5, 210)])
+    assert res["tau2"] == pytest.approx(0.460249, abs=1e-5)
+    assert res["pooled"] == pytest.approx(0.102065, abs=1e-5)
+    assert res["i2"] == pytest.approx(0.945170, abs=1e-5)
+    assert res["ci"][0] == pytest.approx(0.03747, abs=2e-4) and res["ci"][1] == pytest.approx(0.2494, abs=3e-4)
+    assert res["pi"][0] < res["ci"][0] and res["pi"][1] > res["ci"][1], "a prediction interval is wider"
+    assert res["k"] == 5 and res["n_total"] == 2650
+    assert M.random_effects([(10, 100)]) is None, "one study is not pooled"
+    two = M.random_effects([(10, 100), (12, 100)])
+    assert two["pi"] is None and two["tau2"] == 0.0
+    zero = M.random_effects([(0, 50), (3, 60), (5, 80)])          # a zero cell gets the continuity correction
+    assert 0 < zero["pooled"] < 0.1
+    lo, hi = M.wilson(45, 300)
+    assert lo == pytest.approx(0.114032, abs=1e-5) and hi == pytest.approx(0.194818, abs=1e-5)
+    assert M.t975(4) == pytest.approx(2.776, abs=1e-3) and M.t975(50) == pytest.approx(2.009, abs=2e-3)
+
+
+def test_prevalence_numbers_must_be_in_their_quotes():
+    from research_agent.tools import meta as M
+    from research_agent.tools.extraction import _words
+
+    text = ("We enrolled 1,650 adults aged 18 years and above in Kisumu. Rheumatoid arthritis was diagnosed by the "
+            "ACR/EULAR 2010 criteria in 21 participants (1.3%). Knee osteoarthritis was found in 212 (12.8%). "
+            "Gout affected 3.1% of men. The response rate was 91%.")
+    words = _words(text)
+    sh = {tuple(words[i:i + k]) for k in (3, 4, 5) for i in range(len(words) - k + 1)}
+
+    ra = M.check_estimate({"condition_type": "rheumatoid arthritis", "cases": "21", "sample_size": "1,650",
+                           "percent": "1.3%", "is_overall": True, "case_definition": "classification_criteria",
+                           "quote": "diagnosed by the ACR/EULAR 2010 criteria in 21 participants (1.3%)",
+                           "sample_size_quote": "We enrolled 1,650 adults aged 18 years and above"}, words, sh)
+    assert (ra["cases"], ra["n"], ra["problem"]) == (21, 1650, None) and ra["condition"] == "rheumatoid arthritis"
+    # the count is not in either quote: discarded, and the percentage with the sample size gives it, marked
+    oa = M.check_estimate({"condition_type": "knee osteoarthritis", "cases": "250", "sample_size": "1650",
+                           "percent": "12.8%", "quote": "Knee osteoarthritis was found in 212 (12.8%)",
+                           "sample_size_quote": "We enrolled 1,650 adults"}, words, sh)
+    assert oa["condition"] == "osteoarthritis (knee)" and oa["derived"] and oa["cases"] == 211 and oa["n"] == 1650
+    # a count that disagrees with its own percentage belongs to something else: listed, not pooled
+    bad = M.check_estimate({"condition_type": "knee OA", "cases": "212", "sample_size": "1650", "percent": "1.3%",
+                            "quote": "found in 212 (12.8%)", "sample_size_quote": "We enrolled 1,650 adults"},
+                           words, sh)
+    assert bad["cases"] is None or bad["problem"] is None
+    wrong = M.check_estimate({"condition_type": "rheumatoid arthritis", "cases": "21", "sample_size": "1,650",
+                              "percent": "12.8%", "quote": "in 21 participants (1.3%). Knee osteoarthritis was "
+                              "found in 212 (12.8%)", "sample_size_quote": "We enrolled 1,650 adults"}, words, sh)
+    assert wrong["cases"] is None and "not pooled" in wrong["problem"]
+    # no sample size anywhere: kept for the record, never pooled
+    gout = M.check_estimate({"condition_type": "gout", "percent": "3.1%", "quote": "Gout affected 3.1% of men"},
+                            words, sh)
+    assert gout["cases"] is None and "no sample size" in gout["problem"]
+    # an invented quote is no estimate at all
+    assert M.check_estimate({"condition_type": "gout", "percent": "9%", "quote": "Gout was seen in 9% of all "
+                             "patients attending"}, words, sh) is None
+
+    rob = M.check_rob({"non_response": {"answer": "low", "quote": "The response rate was 91%."},
+                       "random_selection": {"answer": "low", "quote": "Participants were randomly sampled"},
+                       "case_definition": {"answer": "high"}}, words, sh)
+    assert rob["non_response"]["answer"] == "low"
+    assert rob["random_selection"]["answer"] == "unclear", "a quote not in the paper makes it unclear"
+    assert rob["case_definition"]["answer"] == "unclear" and len(rob) == 10
+    assert M.rob_summary(rob)["overall"] == "low"
+
+
+def test_prevalence_pass_reads_checks_and_pools(ctx, monkeypatch):
+    """The whole pass on three made-up community surveys: one paper per call, numbers checked, one overall
+    estimate per study, pooled in code, written into a report section, a CSV and a forest plot."""
+    import tempfile
+
+    from research_agent.ingestion import fulltext as FT
+    from research_agent.tools import extraction as EX
+    from research_agent.tools import meta as M
+
+    papers = {
+        "TESTPREV1": ("A community survey of arthritis in Kisumu", "We surveyed 1,200 adults in Kisumu county. "
+                      "Rheumatoid arthritis was present in 18 participants (1.5%) by ACR/EULAR 2010 criteria. "
+                      "Among women, 12 of 640 had rheumatoid arthritis. The response rate was 88%.", 18, "1,200"),
+        "TESTPREV2": ("Arthritis in rural Uganda", "A household census of 800 adults in Mbale district found "
+                      "rheumatoid arthritis in 9 people (1.1%), confirmed by a rheumatologist.", 9, "800"),
+        "TESTPREV3": ("Joint disease in Nairobi", "Of 2,000 randomly selected residents, 50 had rheumatoid "
+                      "arthritis (2.5%) on clinical examination.", 50, "2,000"),
+    }
+    with ctx.pg.cursor() as cur:
+        for pid, (title, abstract, _c, _n) in papers.items():
+            cur.execute("INSERT INTO papers (paper_id, source, title, abstract, categories, year, health_reason) "
+                        "VALUES (%s,'pmc',%s,%s,%s,2020,'test') ON CONFLICT DO NOTHING",
+                        (pid, title, abstract, ["pmc"]))
+    try:
+        rows = [{"paper_id": p, "source": "abstract", "corpus": "pmc", "year": 2020, "title": t, "data": {}}
+                for p, (t, *_rest) in papers.items()]
+        monkeypatch.setattr(EX, "_rows", lambda _ctx: rows)
+        monkeypatch.setattr(FT, "fetch_fulltext", lambda pg, ids: {})
+
+        class Reader:
+            calls = 0
+
+            def chat(self, system, messages, tools=None, force_tool=None, max_tokens=0, temperature=0.0):
+                from research_agent.llm.base import LLMResponse, ToolCall
+
+                Reader.calls += 1
+                assert force_tool == "record_prevalence" and "rheumatoid arthritis" in system
+                text = messages[0]["content"][0]["text"]
+                pid = next(p for p, v in papers.items() if v[1] in text)
+                _t, abstract, cases, n = papers[pid]
+                sent = next(s for s in abstract.split(". ") if str(cases) in s.split(" (")[0] and "rheumatoid" in s.lower())
+                nsent = next(s for s in abstract.split(". ") if n in s)
+                est = [{"condition_type": "rheumatoid arthritis", "cases": str(cases), "sample_size": n,
+                        "is_overall": True, "setting": "community", "country": "Kenya" if pid != "TESTPREV2" else "Uganda",
+                        "case_definition": "classification_criteria", "quote": sent, "sample_size_quote": nsent}]
+                if pid == "TESTPREV1":   # a subgroup estimate is recorded but never pooled with the overall one
+                    est.append({"condition_type": "rheumatoid arthritis", "cases": "12", "sample_size": "640",
+                                "is_overall": False, "subgroup": "women", "quote": "Among women, 12 of 640 had "
+                                "rheumatoid arthritis"})
+                args = {"reports_prevalence": True, "estimates": est,
+                        "risk_of_bias": {"non_response": {"answer": "low", "quote": "The response rate was 88%"}}}
+                tc = ToolCall("p1", "record_prevalence", args)
+                return LLMResponse("", [tc], [{"type": "tool_use", "id": "p1", "name": tc.name, "input": args}],
+                                   "tool_use", {})
+        ctx.llm_factory = lambda strong=False, step=None: Reader()
+
+        res = M.prevalence_pass(ctx, "rheumatoid arthritis")
+        assert Reader.calls == 3 and res["papers_read"] == 3 and res["studies_pooled"] == 3
+        a = res["analyses"][0]
+        assert a["condition"] == "rheumatoid arthritis" and a["overall"]["k"] == 3
+        assert a["overall"]["n_total"] == 4000 and 0.011 < a["overall"]["pooled"] < 0.025
+        assert "country" in a["subgroups"]
+        # a second pass reads nothing it has already read
+        M.prevalence_pass(ctx, "rheumatoid arthritis")
+        assert Reader.calls == 3
+
+        md = "\n".join(M.markdown(ctx, "rheumatoid arthritis"))
+        assert "## Meta-analysis of reported prevalence: rheumatoid arthritis (computed)" in md
+        assert "| rheumatoid arthritis | 3 | 4,000 |" in md and "not a registered systematic review" in md
+        assert "women" in md, "the subgroup is listed in the study table"
+        header, data = M.export_rows(ctx, "rheumatoid arthritis")
+        assert len(data) == 4 and "quote" in header and "rob_non_response" in header
+        path = M.forest_plot(ctx, "rheumatoid arthritis", tempfile.mktemp(suffix=".png"))
+        assert path and open(path, "rb").read(4) == b"\x89PNG"
+    finally:
+        ctx.pg.execute("DELETE FROM papers WHERE paper_id = ANY(%s)", (list(papers),))
+
+
+# ---------------------------------------------------------------- guideline library
+def test_guideline_library_records_checks_and_compares(ctx, monkeypatch, tmp_path):
+    """A guideline's recommendations are recorded word for word (an invented one is dropped, a grade not in the
+    text is not kept), searched by code, and set against a run's studies without ever counting as evidence."""
+    from research_agent.tools import extraction as EX
+    from research_agent.tools import guidelines as GL
+
+    doc = tmp_path / "ra_guideline.md"
+    doc.write_text("# Background\nRheumatoid arthritis affects joints.\n\n# Recommendations\n"
+                   "Methotrexate should be part of the first treatment strategy in patients with active "
+                   "rheumatoid arthritis. (SoR A)\n"
+                   "Short-term glucocorticoids should be considered when starting or changing csDMARDs. (SoR A)\n"
+                   "Exercise should be encouraged in all patients.\n")
+    sections = GL.text_from_file(str(doc))
+    assert [s["heading"] for s in sections] == ["Background", "Recommendations"]
+    res = GL.add_guideline(ctx.pg, lambda strong=False, step=None: FakeLLM(), "RA management", "EULAR", 2022,
+                           ["rheumatoid arthritis"], "international", sections, doc.name)
+    assert res["recommendations"] == 3 and res["dropped_not_found_in_text"] == 1, "the invented one is dropped"
+    recs = GL.recommendations(ctx.pg, [res["guideline_id"]])
+    mtx = next(r for r in recs if r["text"].startswith("Methotrexate"))
+    assert mtx["strength_as_written"] == "SoR A" and mtx["strength"] == "strong"
+    ex = next(r for r in recs if r["text"].startswith("Exercise"))
+    assert ex["strength_as_written"] == "" and ex["strength"] == "not_stated", "a grade not in the text is dropped"
+    assert ex["interventions"] == ["exercise"]
+    assert all("something not in the text" not in r["interventions"] for r in recs)
+
+    hits = GL.search(ctx.pg, "methotrexate first treatment", "rheumatoid arthritis")
+    assert hits and hits[0]["text"].startswith("Methotrexate")
+    assert GL.search(ctx.pg, "methotrexate", "gout") == [], "a guideline is found only for its conditions"
+    assert [g["id"] for g in GL.list_guidelines(ctx.pg, "rheumatoid arthritis")] == [res["guideline_id"]]
+
+    # matching treatments: classes count their members, whole words only
+    assert GL.term_matches("csDMARDs", "sulfasalazine") and GL.term_matches("glucocorticoids", "prednisolone")
+    assert GL.term_matches("methotrexate", "methotrexate monotherapy") and GL.term_matches("MTX", "methotrexate")
+    assert not GL.term_matches("steroid", "non-steroidal anti-inflammatory drugs")
+    assert not GL.term_matches("methotrexate", "csDMARDs"), "a class named by a study is not each member"
+
+    def row(pid, interventions):
+        return {"paper_id": pid, "source": "abstract", "corpus": "pmc", "year": 2021, "title": "t",
+                "data": {"interventions": interventions}}
+    rows = [row("PMC1", ["methotrexate", "prednisolone"]), row("PMC2", ["hydroxychloroquine"]),
+            row("PMC3", ["physiotherapy"]), row("PMC4", [])]
+    monkeypatch.setattr(EX, "_rows", lambda _ctx: rows)
+    cmp = GL.compare(ctx, "rheumatoid arthritis")
+    by = {r["text"][:12]: r for r in cmp["recommendations"]}
+    assert cmp["papers_stating_interventions"] == 3, "a paper silent on treatment is not in the denominator"
+    assert by["Methotrexate"]["papers"] == 1 and by["Methotrexate"]["paper_ids"] == ["PMC1"]
+    assert by["Short-term g"]["papers"] == 1
+    md = "\n".join(GL.markdown(ctx))
+    assert "## What guidelines recommend and what the studies report (computed)" in md
+    assert "1 of 3" in md and "never count as evidence" in md and "SoR A" in md
+
+    out = GL._search_tool(ctx, "glucocorticoids", "rheumatoid arthritis")
+    assert out["recommendations"][0]["cite_as"].startswith("EULAR 2022, RA management")
+    ctx.pg.execute("DELETE FROM guidelines WHERE id=%s", (res["guideline_id"],))
+
+
+def test_guideline_tables_are_read_from_pmc_xml():
+    """EULAR and ACR papers put their recommendations in a table with the grades; the paper reader drops
+    tables, so the guideline reader keeps them."""
+    import xml.etree.ElementTree as ET
+
+    from research_agent.tools import guidelines as GL
+
+    xml = ("<article><front><article-meta><title-group><article-title>EULAR recommendations for RA</article-title>"
+           "</title-group><pub-date><year>2022</year></pub-date></article-meta></front><body>"
+           "<sec><title>Methods</title><p>A task force met twice.</p></sec>"
+           "<table-wrap><caption><p>Table 1 Recommendations</p></caption><table><tr><th>Recommendation</th>"
+           "<th>LoE</th></tr><tr><td>Methotrexate should be part of the first treatment strategy.</td>"
+           "<td>1a</td></tr></table></table-wrap></body></article>")
+    meta, sections = GL._jats(ET.fromstring(xml))
+    assert meta["title"] == "EULAR recommendations for RA" and meta["year"] == 2022
+    table = next(s for s in sections if s["heading"].startswith("Table 1"))
+    assert "Methotrexate should be part of the first treatment strategy. | 1a" in table["text"]
+    chunks = GL.chunks_of(sections, size=80)
+    assert all(len(c) <= 200 for c in chunks) and any("Methotrexate" in c for c in chunks)
+
+
+def test_guidelines_are_cited_inside_reports_and_answers(loaded_db, monkeypatch, tmp_path):
+    """A report on a condition the library covers gets the relevant recommendations in its brief, writes
+    'According to ... [GLx.y]', and code checks the marker, renders it, flags a misquote, removes an unknown
+    one, appends the comparison and lists every recommendation cited word for word."""
+    from research_agent.agents.followup import audit_answer
+    from research_agent.agents.report import allowed_counts, finalize_report, get_brief
+    from research_agent.runstate import RunContext
+    from research_agent.tools import extraction as EX
+    from research_agent.tools import guidelines as GL
+
+    ctx = RunContext.create("How is rheumatoid arthritis treated in Kenya and Uganda?",
+                            llm_factory=lambda strong=False, step=None: FakeLLM())
+    doc = tmp_path / "eular.md"
+    doc.write_text("# Recommendations\nMethotrexate should be part of the first treatment strategy in patients "
+                   "with active rheumatoid arthritis. (SoR A)\n")
+    gid = None
+    try:
+        gid = GL.add_guideline(ctx.pg, lambda strong=False, step=None: FakeLLM(), "RA management", "EULAR", 2022,
+                               ["rheumatoid arthritis"], "international", GL.text_from_file(str(doc)),
+                               doc.name)["guideline_id"]
+        assert [g["id"] for g in GL.relevant_guidelines(ctx.pg, ctx.question)] == [gid]
+        assert GL.relevant_guidelines(ctx.pg, "malaria forecasting in Kenya") == []
+
+        rows = [{"paper_id": p, "source": "abstract", "corpus": "pmc", "year": 2021, "title": "t",
+                 "data": {"interventions": iv}} for p, iv in
+                (("PMC1", ["methotrexate"]), ("PMC2", ["prednisolone"]), ("PMC3", ["sulfasalazine"]))]
+        monkeypatch.setattr(EX, "_rows", lambda _ctx: rows)
+
+        brief = get_brief(ctx)
+        rec = brief["guidelines"]["recommendations"][0]
+        assert rec["cite"] == f"[GL{gid}.1]" and rec["studies_reporting_it"] == "1 of 3"
+        assert (1, 3) in allowed_counts(ctx), "the comparison's count may be quoted in the text"
+
+        body = ("## Current practice\n\nAccording to the 2022 EULAR recommendations, methotrexate should be part "
+                f"of the first treatment strategy [GL{gid}.1]; 1 of 3 studies that state their treatments report it. "
+                f"EULAR also says \"glucocorticoids must never be used\" [GL{gid}.1]. A made-up one [GL999.4].")
+        report, _audit = finalize_report(ctx, body)
+        assert "[EULAR 2022]" in report and "[GL" not in report
+        assert "[quote not found in the recommendation]" in report, "a misquote is flagged"
+        assert "[guideline citation removed: not in the library]" in report
+        assert "## Guidelines referred to" in report and "(SoR A)" in report
+        assert "Methotrexate should be part of the first treatment strategy" in report.split("## Guidelines referred to")[1]
+        assert "## What guidelines recommend and what the studies report (computed)" in report
+        assert "1 of 3 [unverified]" not in report
+
+        text, audit = audit_answer(ctx, f"According to EULAR, methotrexate comes first [GL{gid}.1].")
+        assert "[EULAR 2022]" in text and audit["guidelines_cited"][0]["issuer"] == "EULAR"
+    finally:
+        if gid:
+            ctx.pg.execute("DELETE FROM guidelines WHERE id=%s", (gid,))
+        ctx.close()

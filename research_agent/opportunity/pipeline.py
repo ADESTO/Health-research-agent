@@ -125,6 +125,14 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
             opp = opportunities.markdown(ctx)
         except Exception:
             opp = []
+        gl_refs: list[str] = []
+        try:
+            from research_agent.tools import guidelines
+
+            if guidelines.for_brief(ctx):            # relevant guidelines: compare the studies against them
+                opp += guidelines.markdown(ctx)
+        except Exception as exc:
+            ctx.emit("guidelines", "error", {"error": str(exc)[:300]})
         extra = _computed_sections(ctx) + opp
         extra += results_markdown(ctx) + citation_markdown(ctx) + burden_markdown(ctx) + prisma_markdown(ctx)
         if extra:
@@ -138,6 +146,15 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
         for g in reasoning.get("gaps", []):
             cited += [nm["paper_id"] for nm in g["near_misses"]]
         cited = list(dict.fromkeys(cited))
+        try:
+            from research_agent.tools import guidelines
+
+            md, gl_cited, _gone = guidelines.render_citations(ctx.pg, md)   # [GLx.y] checked and named
+            gl_refs = guidelines.references_markdown(gl_cited)
+        except Exception as exc:
+            ctx.emit("guidelines", "error", {"error": str(exc)[:300]})
+        if gl_refs:
+            md += "\n" + "\n".join(gl_refs)
         md += f"\n## References ({len(cited)} cited of {m['N']} analysed)\n\n" + "\n".join(references(ctx.pg, cited))
         ctx.finish(md)
         return {"run_id": ctx.run_id, "report": md, "map": m, "usage": ctx.token_usage(),

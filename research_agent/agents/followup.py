@@ -309,10 +309,21 @@ How to work:
   elsewhere, never unsupported.
 - Every "n of N" you write must come from a claim or a tool result. Cite claims as [C12] and papers as
   [PMC123] or [arXiv:2401.00001], only ids the tools gave you. Quote papers word for word when you quote.
+- When the researcher asks what is recommended, or how practice compares with guidance, use
+  guideline_recommendations. Name the guideline in the sentence ("According to the 2022 EULAR
+  recommendations, ...") and cite it with its marker exactly as the tool gives it, e.g. [GL1.3]. Quote
+  recommendations only word for word. A guideline is what is recommended, not a finding: never count it as a
+  study or as support.
 - Say plainly when something cannot be answered from this run's papers, and what would answer it.
 
 Write the answer in clear, measured prose: a direct answer first, then the evidence. Keep it as long as the
 question needs and no longer. Do not use em dashes."""
+
+def _guideline_tool():
+    from research_agent.tools.guidelines import GUIDELINE_TOOL
+
+    return GUIDELINE_TOOL
+
 
 FOLLOWUP = FollowupAgent(
     name="followup",
@@ -321,7 +332,8 @@ FOLLOWUP = FollowupAgent(
     tools=[OVERVIEW_TOOL, ITEM_TOOL, READ_TOOL, READ_IN_FULL_TOOL, TEST_TOOL, ADD_CLAIM_TOOL, RECHECK_TOOL,
            FIELDPASS_TOOL, CORROBORATION_TOOL]
     + [t for t in ANALYSIS_TOOLS if t.name in ("value_counts", "cross_tab", "list_extractions")] + RESULT_TOOLS
-    + [CITATION_INFO_TOOL, BURDEN_TOOL] + [t for t in CITATION_TOOLS if t.name == "citation_graph"],
+    + [CITATION_INFO_TOOL, BURDEN_TOOL] + [t for t in CITATION_TOOLS if t.name == "citation_graph"]
+    + [_guideline_tool()],
     finish_schema=obj({"answer": {**STR, "description": "The answer in Markdown, with citations"}}, ["answer"]),
     max_turns=12,
 )
@@ -346,9 +358,15 @@ def audit_answer(ctx, text: str) -> tuple[str, dict]:
     from research_agent.tools.citing import check_attributions
 
     text, attributions = check_attributions(ctx.pg, text)   # places, methods and numbers credited to a paper
+    from research_agent.tools import guidelines
+
+    text, gl_cited, gl_removed = guidelines.render_citations(ctx.pg, text)
     return text, {"removed_paper_citations": bad_papers, "flagged_claim_citations": bad_claims,
                   "unverified_numbers": unverified, "unverified_attributions": attributions,
-                  "claim_citation_fixes": fixes}
+                  "claim_citation_fixes": fixes, "guideline_citations_removed": gl_removed,
+                  "guidelines_cited": [{k: r[k] for k in ("guideline_id", "seq", "number", "text", "issuer",
+                                                          "year", "title", "source", "url", "strength_as_written",
+                                                          "evidence_as_written")} for r in gl_cited]}
 
 
 def history(run_id: str, limit: int = 50) -> list[dict]:

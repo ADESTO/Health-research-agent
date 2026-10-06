@@ -562,6 +562,13 @@ def _export_xlsx(ctx):
                                            "unit", "value_in_that_unit", "model", "baseline", "split",
                                            "setting", "horizon", "quote"], res_rows))
     sheets.insert(2, ("Associations", ["paper_id", "driver", "direction", "lag", "significant", "quote"], assoc_rows))
+    from research_agent.tools import meta
+
+    for key in [k for k in ctx.notes() if k.startswith("meta:") and not k.endswith(":result")]:
+        cond = (ctx.notes()[key] or {}).get("condition") or key.removeprefix("meta:")
+        header, rows = meta.export_rows(ctx, cond)
+        if rows:
+            sheets.append((f"Prevalence {cond}"[:31], header, rows))
     pc = prisma_counts(ctx)
     sheets.append(("PRISMA", ["stage", "papers"], [[k, json.dumps(v) if isinstance(v, dict) else v] for k, v in pc.items()]))
     wb.remove(wb.active)

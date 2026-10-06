@@ -298,6 +298,13 @@ Rules:
   in opposite directions").
 - Cite arXiv papers as [arXiv:ID] and PMC papers as [PMC1234567], using ids from the brief. Never invent
   ids or numbers. The reference list marks papers under non-commercial licences.
+- When the brief has `guidelines`, set the evidence against them where it matters (current practice, gaps,
+  priorities): name the guideline in the sentence and cite the recommendation with its marker, e.g.
+  "According to the 2022 EULAR recommendations, methotrexate should be part of the first treatment strategy
+  [GL1.3]; 4 of 14 studies that state their treatments report it." Use `studies_reporting_it` for such a
+  count. A guideline is what is recommended, not a finding: never count it as a study, never cite it as
+  support for a claim, and keep it in its own sentence apart from paper citations. Quote a recommendation
+  only word for word. Do not mention a guideline the brief does not list.
 - Do not write a references section or an evidence table — they are appended automatically.""",
     tools=REPORT_TOOLS,
     finish_schema=obj({"report_markdown": STR}, ["report_markdown"]),

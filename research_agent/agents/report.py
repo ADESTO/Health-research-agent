@@ -54,6 +54,16 @@ def get_brief(ctx) -> dict:
     out = {"question": ctx.question,
            "run_facts": {**facts, "note": "years = shortlist years; corpus_years = whole corpus"},
            "claims": compact, "papers": papers}
+    # Guidelines from the library that this run is about: a reference to set the findings against, each with
+    # its cite marker and how many of the run's papers report what it names (counted by code).
+    try:
+        from research_agent.tools import guidelines
+
+        gl = guidelines.for_brief(ctx)
+        if gl:
+            out["guidelines"] = gl
+    except Exception:
+        pass
     # What papers found, computed by code (older runs may lack it). Added before the notes are sized, so
     # the notes shrink to fit instead of the claims.
     try:
@@ -298,6 +308,14 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
     from research_agent.tools.citing import check_attributions
 
     body, unverified_attributions = check_attributions(ctx.pg, body)
+    guideline_refs: list[str] = []
+    try:
+        from research_agent.tools import guidelines
+
+        body, gl_cited, gl_removed = guidelines.render_citations(ctx.pg, body)
+        guideline_refs = guidelines.references_markdown(gl_cited)
+    except Exception:
+        gl_removed = 0
     cited = [pid for pid in dict.fromkeys(_cited_ids(body)) if pid in shortlist]
     papers = {r["paper_id"]: r for r in ctx.pg.execute(
         "SELECT paper_id, source, title, year, authors, license FROM papers WHERE paper_id = ANY(%s)",
@@ -343,6 +361,12 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
     except Exception:
         pass
     try:
+        from research_agent.tools import guidelines
+
+        computed += guidelines.markdown(ctx)       # practice in the studies against the guidelines (code)
+    except Exception:
+        pass
+    try:
         from research_agent.tools.citations import citation_markdown
 
         computed += citation_markdown(ctx)
@@ -378,7 +402,9 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
                 f"{number_check.get('removed', 0)} removed because they could not be measured"
                 + (f" ({number_check['refused']} proposed fixes refused by the checks)"
                    if number_check.get("refused") else "")] if number_check else []),
-             "", *review_record, "## Evidence table", "",
+             *([f"- Guideline citations removed because the recommendation is not in the library: {gl_removed}"]
+               if gl_removed else []),
+             "", *review_record, *guideline_refs, "## Evidence table", "",
              "| Claim | Statement | Verdict | Evidence |", "|---|---|---|---|"]
     for cid, c in claims.items():
         r = c["result"] or {}

@@ -229,6 +229,10 @@ _DESIGN_ITEM = {"type": "object", "properties": {
     "supporting": {"type": "array", "items": {"type": "object", "properties": {"paper_id": STR, "why": STR}}},
     "challenging": {"type": "array", "items": {"type": "object", "properties": {"paper_id": STR, "why": STR}}},
     "risks": STRS,
+    "guidance": {**STR, "description": "One or two sentences on how the design relates to current guideline "
+                                       "recommendations, naming the guideline and citing its marker, e.g. "
+                                       "'According to the 2022 EULAR recommendations ... [GL1.3]'. '' when the "
+                                       "guideline library has nothing relevant."},
 }, "required": ["title", "target", "validation_strategy", "addresses"]}
 
 _DESIGN_PLAN_ITEM = {"type": "object", "properties": {
@@ -238,6 +242,12 @@ _DESIGN_PLAN_ITEM = {"type": "object", "properties": {
     "rests_on": {**STRS, "description": "Tested hypothesis ids (H#) that justify the design"},
     "papers": {**STRS, "description": "Paper ids you found that bear on it, for or against"},
 }, "required": ["title", "idea", "addresses"]}
+
+def _guideline_tool():
+    from research_agent.tools.guidelines import GUIDELINE_TOOL
+
+    return GUIDELINE_TOOL
+
 
 _DESIGN_BRIEF = """Each design is a study a researcher could actually run, filling specific gaps (G#) or testing
 novel combinations (N#) from the map. Ground choices in the map's numbers and the tested hypotheses from gap
@@ -282,8 +292,12 @@ map items it addresses. Then:
   enough.
 Keep each text field to one or two sentences.
 
+If the design concerns treatment, management or care, look up what guidelines recommend with
+guideline_recommendations and fill `guidance`: name the guideline in the sentence and cite the recommendation
+with its marker exactly as the tool gives it. A guideline is what is recommended, not evidence for the design.
+
 """ + _DESIGN_BRIEF,
-    tools=MAP_TOOLS + [PASSAGE_TOOL] + _analysis("list_extractions"),
+    tools=MAP_TOOLS + [PASSAGE_TOOL] + _analysis("list_extractions") + [_guideline_tool()],
     finish_schema=_DESIGN_ITEM,
     max_turns=6,
     strong_model=True,
@@ -454,7 +468,7 @@ def check_designs(ctx, raw: dict) -> tuple[list[dict], list[str]]:
 
         designs.append({**{k2: d.get(k2) for k2 in ("title", "research_question", "target", "predictors",
                                                       "data_sources", "horizon", "spatial_unit",
-                                                      "validation_strategy", "baseline", "risks")},
+                                                      "validation_strategy", "baseline", "risks", "guidance")},
                         "id": did, "addresses": addresses,
                         "rests_on": [{"id": h, "verdict": hyps[h]["verdict"], "text": hyps[h]["text"],
                                       "restates_item": hyps[h].get("restates_item", False)} for h in rests_on],

@@ -137,6 +137,40 @@ and after and which papers changed. The conversation is saved with the run. In t
 and clicking any id in the report (C12, G2, N1, H4, D1) starts a question about it.
 API: `POST /runs/{id}/followups {"question": ..., "about": "C12"}`, then poll `GET /runs/{id}/followups`.
 
+Prevalence meta-analysis: `python -m research_agent.cli meta <run_id> "rheumatoid arthritis" --out results/`.
+Each of the run's counted papers is read for that condition alone: cases, sample size, setting, case
+definition and the ten Hoy et al. (2012) risk-of-bias items. Every number must appear in a quote and every
+quote is checked against the paper; a count that disagrees with its own percentage is listed, not pooled.
+Code then pools one overall estimate per study and condition (logit proportions, DerSimonian-Laird random
+effects, Hartung-Knapp-Sidik-Jonkman interval, I2, prediction interval), with subgroups by setting, case
+definition and country and a sensitivity analysis without high-risk studies. It writes a Markdown section, a
+CSV of every estimate with its quotes, and a forest plot; drafts made afterwards include the section, and the
+data export gets a sheet per condition. API: `POST /runs/{id}/meta {"condition": ...}`, then
+`GET /runs/{id}/meta?condition=...` and `GET /runs/{id}/meta/forest.png?condition=...`. It is a model-assisted
+analysis of the loaded corpus, not a registered systematic review, and says so.
+
+Guideline library: a reference that reports compare against, never evidence that is counted.
+
+    python -m research_agent.cli guideline-add --pmc PMC9876543 --issuer EULAR --condition "rheumatoid arthritis"
+    python -m research_agent.cli guideline-add --file kenya_ra.pdf --issuer "Kenya Ministry of Health" \
+        --condition "rheumatoid arthritis" --region Kenya --year 2021 --title "Rheumatology guidelines"
+    python -m research_agent.cli guidelines                 # the library; `guidelines <id>` lists its recommendations
+    python -m research_agent.cli guideline-compare <run_id> --condition "rheumatoid arthritis"
+
+Each recommendation is recorded word for word, with its strength and evidence grade as written, and checked
+against the guideline's text (tables included: EULAR and ACR put their recommendations in one). One not found
+in the text is dropped, and a grade not found is left out. `guideline-compare` sets each recommendation against
+the run's papers that state which treatments they used or studied (drug classes count their members), and drafts
+made afterwards include the table. The Ask tab can search the library. Guidelines never enter a count, a claim
+state or a pooled figure. API: `GET /guidelines`, `GET /guidelines/{id}`, `POST /runs/{id}/guidelines/compare`.
+
+Guidelines are used automatically when a run is about a condition the library covers (every word of a
+guideline's condition appears in the question or protocol). The report writer, the map's design writer, the
+draft writer and the Ask tab get the relevant recommendations with markers such as [GL1.3] and write "According
+to the 2022 EULAR recommendations, ... [GL1.3]". Code checks every marker against the library, flags a quote
+that is not in the recommendation, renders the marker as [EULAR 2022, rec. 3], appends the comparison table and
+lists every recommendation cited, word for word, under "Guidelines referred to".
+
 Filling one field on purpose: `python -m research_agent.cli fieldpass <run_id> q_validation_split`. A
 paper's record is written in one reading that must fill fifteen general fields and the run's
 question-specific ones at once, so a detail stated once in a methods section loses and the field comes back

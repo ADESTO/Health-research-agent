@@ -372,6 +372,101 @@ def post_precedent(run_id: str, body: dict | None = None):
         ctx.close()
 
 
+@app.get("/guidelines")
+def get_guidelines(condition: str | None = None):
+    """The guideline library (a reference, never counted as evidence)."""
+    from research_agent.tools import guidelines as GL
+
+    with get_conn() as pg:
+        return {"guidelines": GL.list_guidelines(pg, condition)}
+
+
+@app.get("/guidelines/{guideline_id}")
+def get_guideline(guideline_id: int):
+    from research_agent.tools import guidelines as GL
+
+    with get_conn() as pg:
+        recs = GL.recommendations(pg, [guideline_id])
+    if not recs:
+        raise HTTPException(404, "no such guideline, or it has no recommendations")
+    return {"recommendations": recs}
+
+
+@app.post("/runs/{run_id}/guidelines/compare")
+def compare_guidelines(run_id: str, body: dict):
+    """A finished run's studies against the library's recommendations for a condition (code only)."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools import guidelines as GL
+
+    ctx = RunContext.attach(run_id)
+    try:
+        res = GL.compare(ctx, (body or {}).get("condition"), (body or {}).get("guideline_ids"))
+        return {**res, "markdown": "\n".join(GL.markdown(ctx))}
+    finally:
+        ctx.close()
+
+
+class MetaRequest(BaseModel):
+    condition: str = Field(min_length=3, max_length=120)
+    limit: int | None = Field(default=None, ge=1, le=150)
+    provider: str | None = Field(default=None, pattern="^(anthropic|groq|deepseek)$")
+
+
+@app.post("/runs/{run_id}/meta", status_code=202)
+def start_meta(run_id: str, req: MetaRequest):
+    """Read a finished run's papers for the prevalence of one condition and pool them (a background job)."""
+    from research_agent.jobs import enqueue
+
+    with get_conn() as pg:
+        run = pg.execute("SELECT status FROM runs WHERE run_id=%s", (run_id,)).fetchone()
+    if not run:
+        raise HTTPException(404, "no such run")
+    if run["status"] != "done":
+        raise HTTPException(409, "A meta-analysis works on a finished run.")
+    job = enqueue("meta", {"run_id": run_id, "condition": req.condition.strip(), "limit": req.limit,
+                           "provider": req.provider})
+    return {"job_id": job, "poll": f"/runs/{run_id}/meta?condition={req.condition.strip()}"}
+
+
+@app.get("/runs/{run_id}/meta")
+def get_meta(run_id: str, condition: str):
+    """The pooled result for one condition, with every study row and its quotes (code only, no model call)."""
+    from research_agent.runstate import RunContext
+    from research_agent.tools import meta
+
+    ctx = RunContext.attach(run_id)
+    try:
+        if not ctx.notes().get(meta._note_key(condition)):
+            raise HTTPException(404, "no meta-analysis for this condition yet")
+        res = meta.pool_run(ctx, condition)
+        return {**res, "markdown": "\n".join(meta.markdown(ctx, condition))}
+    finally:
+        ctx.close()
+
+
+@app.get("/runs/{run_id}/meta/forest.png")
+def get_forest(run_id: str, condition: str):
+    import tempfile
+
+    from research_agent.runstate import RunContext
+    from research_agent.tools import meta
+
+    ctx = RunContext.attach(run_id)
+    try:
+        if not ctx.notes().get(meta._note_key(condition)):
+            raise HTTPException(404, "no meta-analysis for this condition yet")
+        path = meta.forest_plot(ctx, condition, tempfile.mktemp(suffix=".png"))
+    finally:
+        ctx.close()
+    if not path:
+        raise HTTPException(404, "no condition has two or more studies to pool")
+    from fastapi.responses import Response
+
+    data = Path(path).read_bytes()
+    Path(path).unlink(missing_ok=True)
+    return Response(data, media_type="image/png")
+
+
 @app.get("/runs/{run_id}/cohort")
 def get_cohort(run_id: str):
     """The scope this run's numbers are counted over, and how many papers it drops."""

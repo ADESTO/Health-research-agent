@@ -177,6 +177,8 @@ def render_map(question: str, protocol: dict, m: dict, reasoning: dict | None, d
                     line += f' From the paper: "{p["quotes"][0]}"'
                 L += [line]
             L += [""]
+        if d.get("guidance"):
+            L += [f"**Against current guidance:** {d['guidance']}", ""]
         if d.get("risks"):
             L += ["**Risks:** " + "; ".join(d["risks"]), ""]
 

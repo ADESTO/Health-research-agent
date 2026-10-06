@@ -177,6 +177,22 @@ class FakeLLM:
                 else:
                     records.append({"paper_id": pid, "decision": "include", "reason": "malaria study"})
             return self._resp([_call("record_screening", records=records)])
+        if force_tool == "record_recommendations":
+            # a reader that copies every sentence saying what "should" be done, with the grade after it
+            text = messages[0]["content"][0]["text"]
+            recs = []
+            for m in re.finditer(r"([A-Z][^.\n]*\bshould\b[^.\n]*\.)(?:\s*\((SoR [A-D])\))?", text):
+                low = m.group(1).lower()
+                terms = [t for t in ("methotrexate", "glucocorticoids", "nsaids", "exercise") if t in low]
+                recs.append({"text": m.group(1), "interventions": terms or ["something not in the text"],
+                             "action": "recommend_against" if "not" in low.split() else "recommend",
+                             "strength_as_written": m.group(2) or "Grade Z", "strength": "strong",
+                             "population": "adults"})
+            recs.append({"text": "Patients must always receive invented therapy daily.", "interventions": ["x"]})
+            return self._resp([_call("record_recommendations", recommendations=recs)])
+        if force_tool == "record_prevalence":
+            # the fixture corpus has no prevalence studies: a correct reader says so
+            return self._resp([_call("record_prevalence", reports_prevalence=False, estimates=[], risk_of_bias={})])
         if force_tool == "record_check":
             return self._resp([_call("record_check", **fake_recheck(messages[0]["content"][0]["text"], tools))])
         if not tools and "Draft writer" in system:

@@ -364,3 +364,35 @@ ALTER TABLE runs ADD COLUMN IF NOT EXISTS owner_id uuid REFERENCES users(id) ON 
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS shared boolean NOT NULL DEFAULT false;
 ALTER TABLE runs ADD COLUMN IF NOT EXISTS requested_mode text;   -- what was asked for: map counts twice in quotas
 CREATE INDEX IF NOT EXISTS runs_owner_idx ON runs (owner_id, created_at DESC);
+
+-- Guideline library: a reference that reports compare against, never evidence that is counted.
+CREATE TABLE IF NOT EXISTS guidelines (
+    id            bigserial PRIMARY KEY,
+    title         text NOT NULL,
+    issuer        text NOT NULL DEFAULT '',     -- EULAR, ACR, Kenya Ministry of Health...
+    year          int,
+    conditions    text[] NOT NULL DEFAULT '{}',
+    region        text NOT NULL DEFAULT '',     -- international, Kenya, East Africa...
+    source        text NOT NULL DEFAULT '',     -- PMC id or file name
+    licence       text NOT NULL DEFAULT '',
+    url           text NOT NULL DEFAULT '',
+    n_chars       int,
+    chunks_read   int,
+    chunks_failed int,
+    added_at      timestamptz DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS guideline_recommendations (
+    guideline_id        bigint NOT NULL REFERENCES guidelines(id) ON DELETE CASCADE,
+    seq                 int NOT NULL,
+    number              text NOT NULL DEFAULT '',
+    text                text NOT NULL,            -- word for word, checked against the guideline's text
+    population          text NOT NULL DEFAULT '',
+    interventions       text[] NOT NULL DEFAULT '{}',
+    action              text NOT NULL DEFAULT 'not_specified',
+    strength            text NOT NULL DEFAULT 'not_stated',
+    strength_as_written text NOT NULL DEFAULT '',
+    evidence_as_written text NOT NULL DEFAULT '',
+    tsv                 tsvector GENERATED ALWAYS AS (to_tsvector('english', text || ' ' || population)) STORED,
+    PRIMARY KEY (guideline_id, seq)
+);
+CREATE INDEX IF NOT EXISTS guideline_recs_tsv_idx ON guideline_recommendations USING gin (tsv);
