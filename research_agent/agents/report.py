@@ -12,7 +12,7 @@ from research_agent.tools.base import Tool, obj
 from research_agent.tools.extraction import extraction_coverage
 
 # Papers are cited as [arXiv:2401.00001] or [PMC1234567]; group 1 is the id either way.
-_CITE_PAPER = re.compile(r"\[(?:arXiv:([^\]\s]+)|(PMC\d+|UP\d+))\]")
+_CITE_PAPER = re.compile(r"\[(?:arXiv:([^\]\s]+)|(PMC\d+|UP\d+|PMID\d+))\]")
 
 
 def _cited_ids(body: str) -> list[str]:
@@ -20,7 +20,7 @@ def _cited_ids(body: str) -> list[str]:
 
 
 def _cite(pid: str) -> str:
-    return f"[{pid}]" if pid.startswith(("PMC", "UP")) else f"[arXiv:{pid}]"
+    return f"[{pid}]" if pid.startswith(("PMC", "UP", "PMID")) else f"[arXiv:{pid}]"
 _CITE_CLAIM = re.compile(r"\[C(\d+)\]")
 
 
@@ -198,8 +198,8 @@ def _clean_author(name: str) -> str:
 def normalise_citations(body: str) -> str:
     """Some models write citations with other bracket styles (e.g. 【C3】 or ［arXiv:…］). Convert
     them to [..] so the checks below see every citation."""
-    body = re.sub(r"[【［〔]\s*(C\d+|PMC\d+|UP\d+|arXiv:[^】］〕\s]+)\s*[】］〕]", r"[\1]", body)
-    body = re.sub(r"\[arXiv:((?:PMC|UP)\d+)\]", r"[\1]", body)  # a PMC or document id written in arXiv form
+    body = re.sub(r"[【［〔]\s*(C\d+|PMC\d+|UP\d+|PMID\d+|arXiv:[^】］〕\s]+)\s*[】］〕]", r"[\1]", body)
+    body = re.sub(r"\[arXiv:((?:PMC|UP|PMID)\d+)\]", r"[\1]", body)  # a PMC or document id written in arXiv form
     return re.sub(r"\[\s*(C\d+)\s*,\s*(C\d+)\s*\]", r"[\1] [\2]", body)
 
 
@@ -358,7 +358,9 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
         from research_agent.tools import cohort, systematic
 
         # before anything else that quotes a denominator: how the papers were found, and what is counted
-        computed = systematic.markdown(ctx) + cohort.markdown(ctx) + computed
+        from research_agent.tools import live
+
+        computed = systematic.markdown(ctx) + live.markdown(ctx) + cohort.markdown(ctx) + computed
     except Exception:
         pass
     try:
@@ -439,6 +441,9 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
                 nc = " *(licence: non-commercial)*" if licence_is_noncommercial(p.get("license") or "") else ""
                 lines.append(f"- **{pid}** — {p['title']} ({authors}{etal}, {p['year']}). "
                              f"https://pmc.ncbi.nlm.nih.gov/articles/{pid}/{nc}")
+            elif p.get("source") == "pubmed":
+                lines.append(f"- **{pid}** — {p['title']} ({authors}{etal}, {p['year']}). "
+                             f"https://pubmed.ncbi.nlm.nih.gov/{pid[4:]}/ *(read from the PubMed abstract)*")
             elif p.get("source") == "upload":
                 from research_agent.uploads import where
 

@@ -65,6 +65,12 @@ class Settings:
     # open-ended researchers spend tokens on their own for hours; on a hosted beta only admins start them
     researchers_admin_only: bool = os.getenv("RESEARCHERS_ADMIN_ONLY", "1").lower() in ("1", "true", "yes")
 
+    # Live PubMed search during a run, when the AI judges the loaded corpus too thin (tools/live.py).
+    # PubMed only; these caps hold whatever the model asks for. 0 switches it off.
+    live_search: bool = os.getenv("LIVE_SEARCH", "1").lower() in ("1", "true", "yes")
+    live_search_max_calls: int = int(os.getenv("LIVE_SEARCH_MAX_CALLS", "2"))
+    live_search_max_papers: int = int(os.getenv("LIVE_SEARCH_MAX_PAPERS", "200"))
+
     # Run limits (cost guards)
     max_shortlist: int = int(os.getenv("MAX_SHORTLIST", "60"))
     max_fulltext: int = int(os.getenv("MAX_FULLTEXT", "20"))

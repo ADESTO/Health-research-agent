@@ -182,6 +182,9 @@ def _computed_sections(ctx) -> list[str]:
         from research_agent.tools import systematic
 
         out += systematic.markdown(ctx)
+        from research_agent.tools import live
+
+        out += live.markdown(ctx)
     except Exception as exc:
         ctx.emit("search", "error", {"error": str(exc)[:300]})
     try:

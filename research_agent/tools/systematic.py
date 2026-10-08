@@ -197,6 +197,39 @@ def systematic_discovery(ctx, protocol: dict, max_analysed: int | None = None,
                          + (d.get("reason") or ""), criterion=criterion_label(d.get("criterion"), protocol))
         else:
             eligible.append(pid)
+    # The AI judges whether the eligible set can answer the question; if not, it searches PubMed and the
+    # papers found are screened by the same screener. Code holds the limits (tools/live.py).
+    live_added, live_eligible = [], []
+    from research_agent.tools import live
+
+    if settings.live_search and live.room(ctx)[0] > 0 and len(to_screen) < max_screened:
+        try:
+            check = live.sufficiency(ctx, protocol, eligible)
+        except Exception as exc:
+            check = {"enough": True, "reason": f"check failed: {str(exc)[:160]}", "query": ""}
+        state = ctx.notes().get(live.NOTE) or {"calls": 0, "papers": 0, "searches": []}
+        state.setdefault("checks", []).append(check)
+        ctx.save_note(live.NOTE, state)
+        if not check["enough"]:
+            res = live.run_search(ctx, check["query"] or query, check["reason"], by="sufficiency check after screening",
+                                  limit=max_screened - len(to_screen))
+            live_added = [p for p in res.get("paper_ids") or [] if p not in set(found)]
+            if live_added:
+                more = screen(ctx, live_added, protocol)
+                decisions.update(more)
+                to_screen = to_screen + live_added
+                found = found + live_added
+                for pid in live_added:
+                    d = more.get(pid)
+                    if d is None:
+                        continue
+                    if d["decision"] == "exclude":
+                        excluded.append(pid)
+                        log_decision(ctx, [pid], "excluded", (d.get("criterion") + ": " if d.get("criterion") else "")
+                                     + (d.get("reason") or ""), criterion=criterion_label(d.get("criterion"), protocol))
+                    else:
+                        eligible.append(pid)
+                        live_eligible.append(pid)
     unscreened = [p for p in to_screen if p not in decisions]
     if unscreened:
         log_decision(ctx, unscreened, "excluded", "could not be screened (no decision came back)",
@@ -217,6 +250,7 @@ def systematic_discovery(ctx, protocol: dict, max_analysed: int | None = None,
             "eligible": len(eligible), "excluded": len(excluded), "unscreened": len(unscreened),
             "analysed": len(analysed), "analysed_is_sample": len(eligible) > max_analysed,
             "missed_by_query": misses, "countries": protocol.get("countries") or [], "added_by_user": len(own),
+            "live_search_added": len(live_added), "live_search_eligible": len(live_eligible),
             "place_cohort_set": cohort_set}
     ctx.save_note("search", note)
     ctx.emit("discovery", "finish", {"output": {k: note[k] for k in ("identified", "screened", "eligible",
@@ -302,6 +336,8 @@ def markdown(ctx) -> list[str]:
          f"- Screened on title and abstract: {n['screened']}"
          + (f" (a random sample, seed {n['seed']}, because more were identified than can be screened)."
             if n.get("screened_is_sample") else "."),
+         *([f"- Live PubMed search during the run: {n['live_search_added']} more papers identified and screened, "
+            f"{n['live_search_eligible']} eligible (see Live PubMed searches)."] if n.get("live_search_added") else []),
          f"- Eligible: {n['eligible']}; excluded with a recorded reason: {n['excluded']}"
          + (f"; could not be screened: {n['unscreened']}" if n.get("unscreened") else "") + ".",
          f"- Analysed: {n['analysed']}"

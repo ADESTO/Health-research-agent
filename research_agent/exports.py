@@ -261,6 +261,8 @@ def _authors(s: str) -> list[str]:
 def _url(p: dict) -> str:
     if p["source"] == "upload":
         return ""                         # a user's own document has no public address
+    if p["source"] == "pubmed":
+        return f"https://pubmed.ncbi.nlm.nih.gov/{p['paper_id'][4:]}/"
     return (f"https://pmc.ncbi.nlm.nih.gov/articles/{p['paper_id']}/" if p["source"] == "pmc"
             else f"https://arxiv.org/abs/{p['paper_id']}")
 

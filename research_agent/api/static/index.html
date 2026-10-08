@@ -2124,7 +2124,8 @@ $("#ddown").onclick = () => openDraft && download(`/drafts/${openDraft}/export/$
 // ---------------------------------------------------------------- open-ended researcher
 let rsTimer = null, rsCurrent = null, rsNew = false;
 const paperUrl = id => id.startsWith("PMC") ? `https://pmc.ncbi.nlm.nih.gov/articles/${id}/`
-  : /^UP\d+$/.test(id) ? `/documents/${id.slice(2)}/file` : `https://arxiv.org/abs/${id}`;
+  : /^UP\d+$/.test(id) ? `/documents/${id.slice(2)}/file`
+  : /^PMID\d+$/.test(id) ? `https://pubmed.ncbi.nlm.nih.gov/${id.slice(4)}/` : `https://arxiv.org/abs/${id}`;
 const pct = x => x == null ? "–" : `${Math.round(x * 100)}%`;
 const fmtP = p => p == null || p === "" ? "" : (+p < 0.0001 ? "< 0.0001" : String(p));
 

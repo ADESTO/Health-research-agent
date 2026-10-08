@@ -18,19 +18,19 @@ import re
 
 STYLES = ("author-year", "numbered")
 _ID = r"(?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})"          # new and old arXiv ids
-_ONE = re.compile(rf"(?:arXiv[:\s]?\s*)?({_ID})(?:v\d+)?|(PMC)\s?(\d{{4,9}})|\b(UP\d{{1,9}})\b", re.I)
-_GROUP = re.compile(rf"[\[(]\s*((?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}|UP\d{{1,9}})"
-                    rf"(?:\s*[,;]\s*(?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}|UP\d{{1,9}}))*)\s*[\])]",
+_ONE = re.compile(rf"(?:arXiv[:\s]?\s*)?({_ID})(?:v\d+)?|(PMC)\s?(\d{{4,9}})|\b(UP\d{{1,9}}|PMID\d{{1,9}})\b", re.I)
+_GROUP = re.compile(rf"[\[(]\s*((?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}|UP\d{{1,9}}|PMID\d{{1,9}})"
+                    rf"(?:\s*[,;]\s*(?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}|UP\d{{1,9}}|PMID\d{{1,9}}))*)\s*[\])]",
                     re.I)
 _BARE = re.compile(rf"(?<![\[\w/.:])arXiv:\s?({_ID})(?:v\d+)?(?![\w\]])|(?<![\[\w])(PMC)(\d{{4,9}})(?![\w\]])"
-                   rf"|(?<![\[\w/])(UP\d{{1,9}})(?![\w\]])")
-CITE = re.compile(r"\[(?:arXiv:([^\]\s]+)|(PMC\d+|UP\d+))\]")
-_C1 = r"\[(?:arXiv:[^\]\s]+|PMC\d+|UP\d+)\]"
+                   rf"|(?<![\[\w/])(UP\d{{1,9}}|PMID\d{{1,9}})(?![\w\]])")
+CITE = re.compile(r"\[(?:arXiv:([^\]\s]+)|(PMC\d+|UP\d+|PMID\d+))\]")
+_C1 = r"\[(?:arXiv:[^\]\s]+|PMC\d+|UP\d+|PMID\d+)\]"
 _RUN = re.compile(rf"{_C1}(?:\s*[,;]?\s*{_C1})*")
 
 
 def _tag(pid: str) -> str:
-    return f"[{pid}]" if pid.startswith(("PMC", "UP")) else f"[arXiv:{pid}]"
+    return f"[{pid}]" if pid.startswith(("PMC", "UP", "PMID")) else f"[arXiv:{pid}]"
 
 
 def normalise(text: str, known: set[str]) -> str:
@@ -212,6 +212,12 @@ def _where(p: dict) -> str:
         from research_agent.uploads import where
 
         return where(p)
+    if p["source"] == "pubmed":
+        from research_agent.ingestion.pubmed import pubmed_url
+
+        bits = [f"*{p['journal_ref']}*" if p.get("journal_ref") else "", f"https://doi.org/{p['doi']}" if p.get("doi") else "",
+                f"PMID: {p['paper_id'][4:]}", pubmed_url(p["paper_id"])]
+        return ". ".join(b for b in bits if b)
     if p["source"] == "pmc":
         bits = [f"*{p['journal_ref']}*" if p.get("journal_ref") else "", f"https://doi.org/{p['doi']}" if p.get("doi") else "",
                 f"PMCID: {p['paper_id']}", f"https://pmc.ncbi.nlm.nih.gov/articles/{p['paper_id']}/"]

@@ -9,7 +9,7 @@ def _pct(x) -> str:
 
 
 def _cite(pid: str) -> str:
-    return f"[{pid}]" if pid.startswith(("PMC", "UP")) else f"[arXiv:{pid}]"
+    return f"[{pid}]" if pid.startswith(("PMC", "UP", "PMID")) else f"[arXiv:{pid}]"
 
 
 def _ids(pids, k=4) -> str:
@@ -255,6 +255,10 @@ def references(pg, pids: list[str]) -> list[str]:
         if not r:
             continue
         first = re.split(r",|\band\b", r["authors"] or "")[0].strip() or "Unknown"
+        if r["source"] == "pubmed":
+            out.append(f"- **{pid}**: {r['title']} ({first} et al., {r['year']}). "
+                       f"https://pubmed.ncbi.nlm.nih.gov/{pid[4:]}/")
+            continue
         if r["source"] == "upload":
             out.append(f"- **{pid}**: {r['title']} ({r['year']}). {r['journal_ref'] or 'Document supplied by the user'}")
             continue

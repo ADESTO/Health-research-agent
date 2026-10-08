@@ -4461,3 +4461,121 @@ def test_document_endpoints_keep_each_users_files_private(loaded_db, monkeypatch
     assert note["content"]["paper_ids"] == [doc["paper_id"]]
     assert a.post("/documents", json={"filename": "x.txt", "content_base64": base64.b64encode(b"short").decode()}).status_code == 422
     assert a.delete(f"/documents/{doc['id']}").status_code == 200
+
+
+# ---------------------------------------------------------------- live PubMed search
+def _pubmed_article(pmid, title, abstract, pmcid=""):
+    ids = f'<ArticleId IdType="pubmed">{pmid}</ArticleId>' + (f'<ArticleId IdType="pmc">{pmcid}</ArticleId>' if pmcid else "")
+    return (f"<PubmedArticle><MedlineCitation><PMID>{pmid}</PMID><Article><Journal><JournalIssue><PubDate>"
+            f"<Year>2020</Year></PubDate></JournalIssue><Title>East African Medical Journal</Title></Journal>"
+            f"<ArticleTitle>{title}</ArticleTitle><Abstract><AbstractText Label=\"RESULTS\">{abstract}</AbstractText>"
+            f"</Abstract><AuthorList><Author><LastName>Okello</LastName><ForeName>Grace</ForeName></Author></AuthorList>"
+            f"</Article></MedlineCitation><PubmedData><ArticleIdList>{ids}</ArticleIdList></PubmedData></PubmedArticle>")
+
+
+def _pubmed_transport(calls):
+    import httpx
+
+    long = "Among 1,204 adults in Gulu, arthritis prevalence was 9.8% and malaria co-infection was common across the district."
+    pubmed = {"91000001": _pubmed_article("91000001", "Arthritis and malaria in northern Uganda", long),
+              "91000002": _pubmed_article("91000002", "Malaria arthritis open access study", long, pmcid="PMC9100002"),
+              "91000003": _pubmed_article("91000003", "A letter without abstract", "")}
+    pmc_articles = {"9100002": _pmc_article("PMC9100002", "Malaria arthritis open access study", "by",
+                                            abstract=long)}
+
+    def handler(request):
+        params = dict(request.url.params) if request.method == "GET" else dict(
+            x.split("=", 1) for x in request.content.decode().split("&"))
+        from urllib.parse import unquote_plus
+        params = {k: unquote_plus(v) for k, v in params.items()}
+        calls.append(params)
+        if "/esearch.fcgi" in str(request.url):
+            ids = "".join(f"<Id>{i}</Id>" for i in pubmed)
+            return httpx.Response(200, text=f"<eSearchResult><Count>3</Count><IdList>{ids}</IdList></eSearchResult>")
+        if params.get("db") == "pubmed":
+            wanted = params.get("id", "").split(",")
+            return httpx.Response(200, text="<PubmedArticleSet>" + "".join(pubmed[i] for i in wanted if i in pubmed)
+                                            + "</PubmedArticleSet>")
+        wanted = [i.removeprefix("PMC") for i in params.get("id", "").split(",") if i]
+        return httpx.Response(200, text="<pmc-articleset>" + "".join(pmc_articles[i] for i in wanted if i in pmc_articles)
+                                        + "</pmc-articleset>")
+    return httpx.MockTransport(handler)
+
+
+_LIVE_IDS = ["PMID91000001", "PMC9100002", "PMID91000003"]
+
+
+def test_live_pubmed_search_loads_open_access_and_abstract_records(ctx):
+    from research_agent.ingestion import pmc, pubmed
+
+    calls = []
+    client = pmc.PMCClient(transport=_pubmed_transport(calls))
+    try:
+        res = pubmed.live_search(ctx.pg, "arthritis AND Uganda", client=client, from_year=2000)
+        assert res["paper_ids"] == ["PMID91000001", "PMC9100002"], "a record without an abstract is skipped"
+        assert res["loaded_open_access"] == 1 and res["loaded_abstract_only"] == 1
+        rows = {r["paper_id"]: r for r in ctx.pg.execute(
+            "SELECT paper_id, source, license, health_reason FROM papers WHERE paper_id = ANY(%s)",
+            (_LIVE_IDS,)).fetchall()}
+        assert rows["PMID91000001"]["source"] == "pubmed" and rows["PMC9100002"]["source"] == "pmc"
+        assert rows["PMID91000001"]["health_reason"].startswith("pubmed live:")
+        assert any(c.get("db") == "pubmed" for c in calls)
+        again = pubmed.live_search(ctx.pg, "arthritis AND Uganda", client=client, from_year=2000)
+        assert again["paper_ids"] == res["paper_ids"] and again["loaded_abstract_only"] == 0
+
+        from research_agent.agents.report import _cite
+        from research_agent.tools import citing
+
+        assert _cite("PMID91000001") == "[PMID91000001]"
+        assert citing.normalise("as found (PMID91000001)", {"PMID91000001"}) == "as found [PMID91000001]"
+        _t, refs, _o = citing.render(ctx.pg, "Prevalence was 9.8% [PMID91000001].")
+        assert "https://pubmed.ncbi.nlm.nih.gov/91000001/" in refs[0]
+        assert pmc.PMCClient  # noqa
+    finally:
+        ctx.pg.execute("DELETE FROM papers WHERE paper_id = ANY(%s)", (_LIVE_IDS,))
+
+
+def test_the_ai_decides_and_code_limits_live_searches(loaded_db, monkeypatch):
+    """A systematic run asks the model whether the eligible set is enough; when it is not, the model's PubMed
+    query is run within the run's limits and the papers found are screened like the rest."""
+    import dataclasses
+
+    from research_agent.ingestion import pmc
+    from research_agent.runstate import RunContext
+    from research_agent.tools import live as LV
+    from research_agent.tools import systematic as SY
+
+    calls = []
+    client = pmc.PMCClient(transport=_pubmed_transport(calls))
+    monkeypatch.setattr(pmc, "PMCClient", lambda *a, **k: client)
+    asked = {}
+
+    def thin(ctx, protocol, eligible):
+        asked["eligible"] = len(eligible)
+        return {"enough": False, "reason": "No study from Uganda.", "query": '"arthritis" AND Uganda'}
+    monkeypatch.setattr(LV, "sufficiency", thin)
+    ctx = RunContext.create("arthritis and malaria in Uganda", llm_factory=lambda strong=False, step=None: FakeLLM())
+    try:
+        note = SY.systematic_discovery(ctx, {"search_query": "malaria AND forecasting", "inclusion": ["malaria"],
+                                             "exclusion": [], "fields": []})
+        assert asked["eligible"] > 0
+        assert note["live_search_added"] == 2 and note["live_search_eligible"] == 2
+        assert {"PMID91000001", "PMC9100002"} <= set(ctx.shortlist_ids())
+        md = "\n".join(SY.markdown(ctx) + LV.markdown(ctx))
+        assert "Live PubMed search during the run: 2 more papers" in md
+        assert '`"arthritis" AND Uganda`' in md and "No study from Uganda." in md
+        # the limits hold whatever is asked
+        tight = dataclasses.replace(LV.settings, live_search_max_calls=1)
+        monkeypatch.setattr(LV, "settings", tight)
+        assert "used its live searches" in LV.run_search(ctx, "more arthritis", "still thin", by="test")["error"]
+        monkeypatch.setattr(LV, "settings", dataclasses.replace(tight, live_search=False))
+        assert "switched off" in LV.run_search(ctx, "more", "x", by="test")["error"]
+        # the discovery agent's tool returns the papers for it to add
+        monkeypatch.setattr(LV, "settings", dataclasses.replace(tight, live_search_max_calls=3))
+        out = LV._tool(ctx, "arthritis Uganda", "corpus has nothing from Uganda")
+        assert [r["paper_id"] for r in out["results"]] == ["PMID91000001", "PMC9100002"]
+    finally:
+        ctx.close()
+        with __import__("research_agent.db", fromlist=["get_conn"]).get_conn() as pg:
+            for table in ("run_papers", "screening", "extractions", "paper_fulltext", "papers"):
+                pg.execute(f"DELETE FROM {table} WHERE paper_id = ANY(%s)", (_LIVE_IDS,))

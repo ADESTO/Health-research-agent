@@ -125,6 +125,12 @@ def fetch_fulltext(pg, paper_ids: list[str]) -> dict[str, str]:
                 # so a later call retries them) and still fetch the arXiv ones, which come from local files
                 print(f"PMC full-text download failed, {len(pmc_ids)} papers skipped for now: {str(exc)[:160]}")
             todo = [pid for pid in todo if pid not in have and pid not in set(pmc_ids)]
+        # a PubMed record or a user's document has no other text source: it is read from what is stored
+        for pid in [p for p in todo if sources.get(p) in ("pubmed", "upload")]:
+            pg.execute("INSERT INTO paper_fulltext (paper_id, status) VALUES (%s,'missing') ON CONFLICT DO NOTHING",
+                       (pid,))
+            have[pid] = "missing"
+        todo = [p for p in todo if sources.get(p) not in ("pubmed", "upload")]
     if todo:
         from research_agent.ingestion.load import duck
 

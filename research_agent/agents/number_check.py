@@ -27,7 +27,7 @@ MAX_ITEMS = 40
 ROUNDS = 2
 _SENTENCE_END = re.compile(r"(?<=[.!?])\s+(?=[A-Z*_(\[])|\n")
 _LIST_MARK = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
-_CITES = re.compile(r"\[(?:C\d+|PMC\d+|UP\d+|arXiv:[^\]\s]+)\]")
+_CITES = re.compile(r"\[(?:C\d+|PMC\d+|UP\d+|PMID\d+|arXiv:[^\]\s]+)\]")
 _NUM = re.compile(r"\d+(?:\.\d+)?")
 _PCT_AFTER = re.compile(r"^((?:\s+(?:papers|studies|articles|records))?\s*\(?\s*)(\d{1,3}(?:\.\d)?)\s*%")
 # Words that say how many. A rewrite may not introduce one the original did not have: turning "3 of 16"

@@ -177,6 +177,9 @@ class FakeLLM:
                 else:
                     records.append({"paper_id": pid, "decision": "include", "reason": "malaria study"})
             return self._resp([_call("record_screening", records=records)])
+        if force_tool == "record_sufficiency":
+            # the fixture corpus answers its own questions: no live search unless a test says otherwise
+            return self._resp([_call("record_sufficiency", enough=True, reason="enough studies", query="")])
         if force_tool == "record_recommendations":
             # a reader that copies every sentence saying what "should" be done, with the grade after it
             text = messages[0]["content"][0]["text"]

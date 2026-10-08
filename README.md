@@ -149,6 +149,17 @@ data export gets a sheet per condition. API: `POST /runs/{id}/meta {"condition":
 `GET /runs/{id}/meta?condition=...` and `GET /runs/{id}/meta/forest.png?condition=...`. It is a model-assisted
 analysis of the loaded corpus, not a registered systematic review, and says so.
 
+Live PubMed search: when the AI judges the loaded corpus too thin, a run searches PubMed itself. In an
+agent-chosen run the discovery agent has a search_pubmed_live tool; in a systematic run a check after screening
+looks at the eligible studies against the question and, if they are not enough, writes a PubMed query whose
+results are screened like the rest. Papers open access in PMC come in with full text and a checked licence; the
+others as PubMed records (title and abstract), cited as [PMID12345]. Code holds the limits whatever the model
+asks: PubMed only, LIVE_SEARCH_MAX_CALLS searches (default 2) and LIVE_SEARCH_MAX_PAPERS papers (default 200)
+per run, within the run's own caps; LIVE_SEARCH=0 switches it off. Fetching costs no tokens; screening and
+reading the papers it brings in cost the same as any other paper. Reports and PRISMA show each live search
+with who asked for it, why, the exact query and what it added, and the papers stay in the corpus for later
+runs.
+
 Your own documents: under "Your documents" in the run form, add a file (PDF, Word .docx, text, Markdown or HTML,
 up to 20 MB) or a link, mark it as a paper or an unpublished report, and tick it for a run. A ticked document is
 treated like any study: screened against the protocol in a systematic run (and never sampled out), put on the
