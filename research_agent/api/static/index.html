@@ -88,6 +88,7 @@ main { padding-block: 26px 80px; padding-inline: 28px; min-width: 0; display: gr
 .btn.primary:hover { filter: brightness(1.08); }
 .btn:disabled { opacity: .5; cursor: default; filter: none; }
 .btn.small { padding: 5px 10px; font-size: 13px; }
+.prose .btn { font-family: var(--f-ui); }
 select.btn { padding-right: 10px; }
 .status { font-size: 13px; color: var(--muted); }
 .hint { font-size: 13px; color: var(--muted); margin: 0; }
@@ -948,6 +949,12 @@ async function poll() {
   } else if (run.status === "failed") {
     clearInterval(timer); timer = null;
     logLine(`✖ run failed: ${esc(run.error || "")}`, "err");
+    showFailed(run);
+  }
+}
+
+// a run that stopped: what happened, and the Resume button when resuming can help (opened live or from the list)
+function showFailed(run) {
     $("#report").innerHTML = `<p class="status">The run stopped: ${esc(run.error || "unknown error")}.</p>` +
       (run.resumable
         ? `<p class="status">Everything finished before it stopped is kept. Resuming carries on from the last finished
@@ -956,7 +963,6 @@ async function poll() {
         : `<p class="status">Resuming would stop in the same place. Start a new run with a wider question.</p>`);
     const b = $("#resumeRun");
     if (b) b.onclick = () => resumeRun(b);
-  }
 }
 
 async function resumeRun(btn) {
@@ -1153,7 +1159,8 @@ async function openRun(id) {
   if (data.run.status === "done") for (const [k] of STEP_NAMES[currentMode === "map" ? "map" : "report"]) if (!stepState[k]) stepState[k] = "skipped";
   renderSteps();
   if (data.run.has_report) showReport((await api(`/runs/${id}/report`)).report_markdown);
-  else if (data.run.status !== "failed") timer = setInterval(() => poll().catch(() => {}), 3000);
+  else if (data.run.status === "failed") showFailed(data.run);
+  else timer = setInterval(() => poll().catch(() => {}), 3000);
 }
 
 async function loadRuns() {
