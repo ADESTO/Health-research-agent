@@ -144,6 +144,77 @@ def fake_recheck(text: str, tools) -> dict:
     return {"uses": "unclear"}
 
 
+def fake_paper_analysis(text: str) -> dict:
+    """Plays the close reader: real sentences as passages, plus one invented passage that code must drop."""
+    body = text.split("Full text:", 1)[-1]
+    sents = [s.strip() for s in re.split(r"(?<=[.!?])\s+", body.replace("\n", " ")) if len(s.split()) >= 6]
+    title = text.split("\n")[0].removeprefix("Title: ")
+    numeric = [s for s in sents if re.search(r"\d", s)][:3] or sents[:1]
+    limits = [s for s in sents if any(w in s.lower() for w in ("limitation", "retrospective", "single-centre",
+                                                                "internal only"))][:2]
+    future = [s for s in sents if any(w in s.lower() for w in ("future", "further", "should"))][:1]
+    return {
+        "aim": f"To study {title[:80]}", "design": "A modelling study", "setting": "As described",
+        "data": "Surveillance and clinical data", "analysis": "Statistical and machine-learning models",
+        "methods_quotes": [" ".join(sents[0].split()[:30])] if sents else [],
+        "rationale": [{"statement": "Chosen to improve on earlier work", "quote": " ".join(sents[-1].split()[:30])}]
+        if sents else [],
+        "findings": [{"finding": s[:120], "quote": " ".join(s.split()[:30])} for s in numeric]
+        + [{"finding": "An invented result", "quote": "this sentence does not appear anywhere in the paper at all"}],
+        "prior_work": [],
+        "limitations": [{"limitation": s[:100], "quote": " ".join(s.split()[:30])} for s in limits]
+        or ([{"limitation": "Data limits", "quote": " ".join(sents[1].split()[:30])}] if len(sents) > 1 else []),
+        "future_work": [{"recommendation": s[:100], "quote": " ".join(s.split()[:30])} for s in future],
+        "interpretation": "The approach is promising.",
+    }
+
+
+def fake_content_synthesis(tool: str, text: str) -> dict:
+    """Plays the cross-study synthesis from the digest it is given, with a few errors the checks must catch."""
+    heads = re.findall(r"^=== (\S+) · (\d+) · ", text, flags=re.M)
+    years = {p: int(y) for p, y in heads}
+    ids = re.findall(r"^(\S+#[FMRPLW]\d+) \(", text, flags=re.M)
+    ids += [x for m in re.findall(r"^Methods passages: (.+)$", text, flags=re.M) for x in m.split(", ")]
+    fids = [i for i in ids if "#F" in i]
+    lw = [i for i in ids if "#L" in i or "#W" in i] or ids[:1]
+    papers = [p for p, _ in heads]
+
+    def c(pid):
+        return f"[{pid}]" if pid.startswith(("PMC", "UP", "PMID")) else f"[arXiv:{pid}]"
+    if tool == "record_findings":
+        return {"themes": [{"theme": "Model performance",
+                            "synthesis": f"Studies report gains {c(papers[0])}, unlike a paper never read [arXiv:9999.99999].",
+                            "evidence": fids[:3]},
+                           {"theme": "Unfounded", "synthesis": "No passages.", "evidence": ["NOPE#F1"]}],
+                "claims": [{"statement": f"Models improve on baselines {c(papers[0])}.", "supporting": fids[:2],
+                            "contradicting": fids[2:3], "why_they_differ": "Different settings."},
+                           {"statement": "An unsupported claim.", "supporting": ["NOPE#F9"]}]}
+    if tool == "record_method_evolution":
+        ys = sorted(set(years.values()))
+        mid = ys[len(ys) // 2 - 1] if len(ys) > 1 else ys[0]
+        early = [p for p in papers if years[p] <= mid]
+        late = [p for p in papers if years[p] > mid] or early
+        return {"overview": f"Methods moved from simple to complex models {c(papers[-1])}.",
+                "phases": [{"label": "Early", "from_year": ys[0], "to_year": mid,
+                            "description": "Regression on routine data.", "papers": early + late[:1],
+                            "evidence": [i for i in ids if i.split("#")[0] in early][:2]},
+                           {"label": "Recent", "from_year": mid + 1, "to_year": ys[-1],
+                            "description": "Deep learning and climate data.", "papers": late, "evidence": []}],
+                "shifts": [{"shift": "regression to deep learning", "description": "Authors cite better accuracy.",
+                            "before": early, "after": late, "evidence": fids[:1]},
+                           {"shift": "backwards in time", "description": "Wrong way round.", "before": late,
+                            "after": early, "evidence": []}],
+                "continuities": [{"statement": "Most work stays retrospective.", "evidence": lw[:1]}]}
+    return {"gaps": [{"gap": "External validation is rarely attempted", "kind": "methodological_weakness",
+                      "explanation": f"Authors note single-site data {c(papers[0])}.", "evidence": lw[:2]},
+                     {"gap": "A gap with no basis", "kind": "unanswered_question", "explanation": "None.",
+                      "evidence": []}],
+            "directions": [{"direction": "Multi-site validation", "rationale": "Closes CG1.",
+                            "design_sketch": "Leave-one-site-out evaluation.", "addresses": ["CG1"],
+                            "evidence": lw[:1]},
+                           {"direction": "Nowhere", "rationale": "No gap.", "addresses": ["CG9"]}]}
+
+
 class FakeLLM:
     provider = "fake"
     model = "fake-1"
@@ -196,6 +267,10 @@ class FakeLLM:
         if force_tool == "record_prevalence":
             # the fixture corpus has no prevalence studies: a correct reader says so
             return self._resp([_call("record_prevalence", reports_prevalence=False, estimates=[], risk_of_bias={})])
+        if force_tool == "record_paper_analysis":
+            return self._resp([_call("record_paper_analysis", **fake_paper_analysis(messages[0]["content"][0]["text"]))])
+        if force_tool in ("record_findings", "record_method_evolution", "record_gaps_directions"):
+            return self._resp([_call(force_tool, **fake_content_synthesis(force_tool, messages[0]["content"][0]["text"]))])
         if force_tool == "record_check":
             return self._resp([_call("record_check", **fake_recheck(messages[0]["content"][0]["text"], tools))])
         if not tools and "Draft writer" in system:

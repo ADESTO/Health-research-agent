@@ -171,6 +171,75 @@ def test_end_to_end_run(loaded_db, mode):
         len(set(re.findall(r"^- \*\*arXiv:([^*]+)\*\*", report, flags=re.M)))
 
 
+def test_content_analysis_reads_papers_and_checks_the_synthesis(loaded_db):
+    """The studies read in full are read closely and compared; code keeps only what rests on passages found
+    in the papers, keeps phases to their years and shifts forwards in time, and the report is built on it."""
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.db import get_conn
+    from research_agent.runstate import RunContext
+    from research_agent.tools import content
+
+    events = []
+    res = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM(), on_event=lambda a, k, p: events.append((a, k)))
+    ctx = RunContext.attach(res["run_id"], llm_factory=lambda strong=False: FakeLLM())
+    try:
+        a = content.of(ctx)
+        n_ft = len(content.fulltext_papers(ctx))
+        assert a["analysed"] and len(a["analysed"]) == n_ft
+        # an invented passage never survives: the reader's made-up finding was dropped in every paper
+        assert a["passages_dropped"] >= len(a["analysed"])
+        pas = content.passages_for(ctx)
+        assert pas and not any("does not appear anywhere" in p["quote"] for p in pas.values())
+        # claims, themes, gaps and directions rest on real passages; the unfounded ones were removed
+        assert [c["id"] for c in a["claims"]] == ["K1"] and all(x in pas for x in a["claims"][0]["supporting"])
+        assert [t["theme"] for t in a["themes"]] == ["Model performance"]
+        assert [g["id"] for g in a["gaps"]] == ["CG1"] and a["gaps"][0]["raised_in"] >= 1
+        assert [d["addresses"] for d in a["directions"]] == [["CG1"]]
+        # strength is counted by code from the passages
+        k1 = a["claims"][0]
+        assert k1["strength"].startswith(("consistent across", "reported by a single", "contested"))
+        # phases hold only papers published in their years; a backwards shift is refused
+        ev = a["evolution"]
+        years = {r["paper_id"]: r["year"] for r in content.fulltext_papers(ctx)}
+        for ph in ev["phases"]:
+            assert all(ph["from_year"] <= years[p] <= ph["to_year"] for p in ph["papers"])
+        assert [s["shift"] for s in ev["shifts"]] in ([], ["regression to deep learning"])
+        assert any("backwards in time" in d for d in a["dropped"])
+        # a citation of a paper that was not read in full is taken out of the prose
+        assert "9999.99999" not in a["themes"][0]["synthesis"]
+        assert any("9999.99999" in d for d in a["dropped"])
+        assert content.counts(ctx)
+    finally:
+        ctx.close()
+    report = res["report"]
+    assert "In-depth analysis of the" in report and "How the research methods have changed" in report
+    assert "Gaps the studies themselves point to" in report and "CD1" in report
+    with get_conn() as pg:
+        cached = pg.execute("SELECT count(*) n FROM paper_analyses WHERE paper_id = ANY(%s)",
+                            (a["analysed"],)).fetchone()["n"]
+    assert cached == len(a["analysed"])
+    assert ("content_synthesis", "finish") in events
+
+    # a second run over the same papers reuses the close readings instead of reading again
+    events2 = []
+    run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                 llm_factory=lambda strong=False: FakeLLM(), on_event=lambda a, k, p: events2.append((a, k)))
+    assert ("content_analysis", "start") not in events2
+
+
+def test_content_analysis_can_be_switched_off(loaded_db, monkeypatch):
+    import dataclasses
+
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.tools import content
+
+    monkeypatch.setattr(content, "settings", dataclasses.replace(content.settings, content_analysis=False))
+    res = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: FakeLLM())
+    assert "In-depth analysis of the" not in res["report"] and "## Evidence table" in res["report"]
+
+
 # ---------------------------------------------------------------- provider seam
 def test_groq_message_translation_roundtrip():
     from research_agent.llm.groq_client import _to_openai_messages
@@ -1279,6 +1348,10 @@ def test_research_opportunity_map_end_to_end(loaded_db):
                     "## Evidence strength at a glance", "## Potential novelty", "## Candidate research designs",
                     "## Protocol", "## Method", "## References"):
         assert section in md, section
+    # the map opens with what the studies read in full say, before the counts
+    assert md.index("## In-depth analysis of the") < md.index("## The numbers across all analysed papers") \
+        < md.index("## What is established")
+    assert "### How the research methods have changed" in md and "CG1" in md
 
     labels = {g["label"] for g in m["gaps"]}
     # desirable practices no fixture paper has: 3-6 month horizon, spatial holdout, probabilistic output

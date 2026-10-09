@@ -67,9 +67,17 @@ def run_specialist(ctx: RunContext, agent_name: str, task: str) -> dict:
                     child.emit("evidence_resolution", "error", {"error": str(exc)[:300]})
         if agent_name == "discovery":
             task += _probe_hint(child)
+        if agent_name == "synthesis":
+            # papers read in full since the literature step (evidence resolution) join the close reading
+            from research_agent.tools import content
+
+            content.ensure(child)
         out = agent.run(child, task)
         if agent_name == "literature" and "error" not in out:
             _extract_question_fields(child)
+            from research_agent.tools import content
+
+            content.ensure(child)   # close reading of the papers read in full, and the comparison across them
         if agent_name == "discovery" and settings.citations:
             from research_agent.tools.citations import ensure
 

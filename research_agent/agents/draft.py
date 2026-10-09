@@ -327,6 +327,14 @@ def evidence_pack(ctx, kind: str, outline: dict, about: list[str], captions: lis
                 for x in rb["countries"][:15]]}
     except Exception:
         pass
+    try:
+        from research_agent.tools import content
+
+        if content.of(ctx).get("analysed"):
+            # what the studies read in full say: the substance of the draft's findings, trends and gaps
+            pack["content_analysis"] = content.compact(ctx)
+    except Exception:
+        pass
     if about:
         pack["items_the_draft_builds_on"] = [get_item(ctx, i) for i in about]
     if kind == "review":
@@ -392,6 +400,10 @@ Citing the studies (the document will be read by people who cannot see this syst
   what that paper's record shows. Several at once: [arXiv:2401.00001] [PMC1234567]. Do not write author names or
   years: code turns the ids into formatted references.
 - A number you attribute to a paper (a score, a percentage, a sample size) must appear in that paper's record.
+- The pack's `content_analysis` is the close reading of the studies read in full, compared across them and
+  checked against the papers: themes of their findings, content claims, how methods changed over time and
+  why, and the gaps and directions the studies point to. Build results, discussion and rationale on it,
+  citing the papers it names; counts size what it describes.
 - Counts across the included studies come from SUPPORTED claims: quote the counted numbers ("31 of 58
   studies") and cite the claim as [C12], then name one to three of its example_papers as illustrations, e.g.
   "only 3 of 58 studies tested models on districts withheld from training [C12], among them a Kenyan study of

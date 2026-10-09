@@ -156,6 +156,12 @@ def _analysis(*names):
     return [t for t in ANALYSIS_TOOLS if t.name in names]
 
 
+def _content_tool():
+    from research_agent.tools.content import CONTENT_TOOL
+
+    return CONTENT_TOOL
+
+
 GAP_REASONING = Agent(
     name="gap_reasoning",
     role="Explains the computed research gaps: causes, artifacts, dependencies and near misses, each tested.",
@@ -187,8 +193,11 @@ Rules:
   texts were searched, gives the passages. Those papers were not read: name how many, and read the passages
   before calling the practice absent. A passage that says a study did NOT do it is evidence for the gap; one
   that says it did is evidence against.
-Start with get_map. Aim for 2-4 tested hypotheses per high or moderate confidence gap.""",
-    tools=MAP_TOOLS + [TEST_TOOL, HYPOTHESIS_TOOL, PASSAGE_TOOL, RECHECK_TOOL]
+- get_content_analysis(with_quotes=true) holds what the studies read in full say: their stated limitations,
+  the future work they call for, conflicts between their findings and how their methods changed. Use it for
+  candidate causes and near misses: an explanation the authors themselves give is a strong hypothesis to test.
+Start with get_map, then get_content_analysis. Aim for 2-4 tested hypotheses per high or moderate confidence gap.""",
+    tools=MAP_TOOLS + [TEST_TOOL, HYPOTHESIS_TOOL, PASSAGE_TOOL, RECHECK_TOOL, _content_tool()]
     + [t for t in RESULT_TOOLS if t.name == "contradictions"]
     + _analysis("value_counts", "cross_tab", "field_by_year")
           + [t for t in SEARCH_TOOLS if t.name == "corpus_count"],
@@ -223,7 +232,8 @@ _DESIGN_ITEM = {"type": "object", "properties": {
     "spatial_unit": STR,
     "validation_strategy": {**STR, "description": "How the evaluation is split, e.g. leave-one-district-out"},
     "baseline": STR,
-    "addresses": {**STRS, "description": "Map item ids this design targets (G#, N#, R#, E#) only"},
+    "addresses": {**STRS, "description": "Ids this design targets: map items (G#, N#, R#, E#) and gaps or "
+                                         "directions from the studies' content (CG#, CD#)"},
     "rests_on": {**STRS, "description": "Tested hypothesis ids (H#) that justify the design"},
     "builds_on": {**STRS, "description": "Paper ids whose data or methods it reuses"},
     "supporting": {"type": "array", "items": {"type": "object", "properties": {"paper_id": STR, "why": STR}}},
@@ -238,7 +248,8 @@ _DESIGN_ITEM = {"type": "object", "properties": {
 _DESIGN_PLAN_ITEM = {"type": "object", "properties": {
     "title": STR,
     "idea": {**STR, "description": "The study in one or two sentences: what it estimates and how it is tested"},
-    "addresses": {**STRS, "description": "Map item ids this design targets (G#, N#, R#, E#) only"},
+    "addresses": {**STRS, "description": "Ids this design targets: map items (G#, N#, R#, E#) and gaps or "
+                                         "directions from the studies' content (CG#, CD#)"},
     "rests_on": {**STRS, "description": "Tested hypothesis ids (H#) that justify the design"},
     "papers": {**STRS, "description": "Paper ids you found that bear on it, for or against"},
 }, "required": ["title", "idea", "addresses"]}
@@ -249,8 +260,10 @@ def _guideline_tool():
     return GUIDELINE_TOOL
 
 
-_DESIGN_BRIEF = """Each design is a study a researcher could actually run, filling specific gaps (G#) or testing
-novel combinations (N#) from the map. Ground choices in the map's numbers and the tested hypotheses from gap
+_DESIGN_BRIEF = """Each design is a study a researcher could actually run. Base it first on what the studies read in
+full say (get_content_analysis): the gaps they point to (CG#) and the directions drawn from them (CD#), with
+the limitations and future work their authors state; then on the counted gaps (G#) and novel combinations
+(N#) from the map, which show how widespread a problem is. Ground choices in the map's numbers and the tested hypotheses from gap
 reasoning (get_map includes them). Prefer designs that fix a high-confidence gap with data the field already
 uses, and designs resting on supported hypotheses; one resting on a hypothesis that was not supported must
 say why it is still worth doing. Use only paper ids that tools returned."""
@@ -269,7 +282,7 @@ hypotheses it rests on and the paper ids that bear on it. Each design is written
 time, so keep the outline short.
 
 """ + _DESIGN_BRIEF,
-    tools=MAP_TOOLS + [PASSAGE_TOOL] + _analysis("value_counts", "cross_tab", "list_extractions"),
+    tools=MAP_TOOLS + [PASSAGE_TOOL, _content_tool()] + _analysis("value_counts", "cross_tab", "list_extractions"),
     finish_schema=obj({"designs": {"type": "array", "items": _DESIGN_PLAN_ITEM}}, ["designs"]),
     max_turns=12,
     strong_model=True,
@@ -297,7 +310,7 @@ guideline_recommendations and fill `guidance`: name the guideline in the sentenc
 with its marker exactly as the tool gives it. A guideline is what is recommended, not evidence for the design.
 
 """ + _DESIGN_BRIEF,
-    tools=MAP_TOOLS + [PASSAGE_TOOL] + _analysis("list_extractions") + [_guideline_tool()],
+    tools=MAP_TOOLS + [PASSAGE_TOOL, _content_tool()] + _analysis("list_extractions") + [_guideline_tool()],
     finish_schema=_DESIGN_ITEM,
     max_turns=6,
     strong_model=True,
@@ -442,6 +455,10 @@ def _paper_card(ctx, pid: str, rows_by_id: dict) -> dict:
 def check_designs(ctx, raw: dict) -> tuple[list[dict], list[str]]:
     m = _map(ctx)
     ids = {x["id"] for s in ("gaps", "novelty", "emerging", "watch", "established") for x in m.get(s, [])}
+    from research_agent.tools import content
+
+    a = content.of(ctx)
+    ids |= {g["id"] for g in a.get("gaps") or []} | {d["id"] for d in a.get("directions") or []}
     hyps = {h["id"]: h for h in ((ctx.notes().get("hypotheses") or {}).get("items") or [])}
     rows_by_id = {r["paper_id"]: r for r in _rows(ctx)}
     dropped: list[str] = []

@@ -28,6 +28,20 @@ SCOPE_NOTE = (
 
 ARR = {"type": "array", "items": {"type": "object"}}
 
+def _content_tool():
+    from research_agent.tools.content import CONTENT_TOOL
+
+    return CONTENT_TOOL
+
+
+CONTENT_NOTE = (
+    "The studies read in full have been read closely and compared (get_content_analysis): what they found, how "
+    "their methods changed over time and why, and the gaps and directions their authors point to, each resting "
+    "on passages code found in the papers. That is the substance; counts and corpus trends size it and test "
+    "whether a pattern holds beyond the studies read in full."
+)
+
+
 def _live_tool():
     from research_agent.tools.live import LIVE_TOOL
 
@@ -100,7 +114,9 @@ METHODS = Agent(
     role="Characterises methods, data modalities, datasets and validation practice across the shortlist.",
     system=f"""You are the Methods agent. {SCOPE_NOTE}
 
-Use value_counts, cross_tab and list_extractions over the extracted records to describe:
+{CONTENT_NOTE} Start with get_content_analysis, so the methods you describe are the ones the studies
+actually used, in their own terms. Then use value_counts, cross_tab and list_extractions over the extracted
+records to size them across every analysed paper and describe:
 - method families (group synonyms: ResNet/DenseNet/VGG -> CNNs; GPT/LLaMA/BERT-based -> language models)
 - data modalities and named datasets (concentration on a few datasets matters)
 - validation practice (validation_level) and code/data availability
@@ -131,7 +147,7 @@ a number into a claim before you have measured it. Examples:
 - bad: text "Most papers use deep learning" written first, then the test returns 6 of 46.
 - good: test_claim says x5.32; text "In PMC, ML malaria papers rose about 5-fold (x5.3) between 2015-2017
   and 2023-2025". bad: "roughly 9-fold", written before measuring.""",
-    tools=ANALYSIS_TOOLS + RESULT_TOOLS + [TEST_TOOL, PROPOSE_TOOL, RECHECK_TOOL],
+    tools=ANALYSIS_TOOLS + RESULT_TOOLS + [TEST_TOOL, PROPOSE_TOOL, RECHECK_TOOL, _content_tool()],
     finish_schema=obj({
         "method_families": {**ARR, "description": "[{family, members:[...], n_papers, example_ids:[...]}]"},
         "data_landscape": {**STR, "description": "modalities and datasets, with counts"},
@@ -146,7 +162,14 @@ TRENDS = Agent(
     role="Measures how topics and methods change over time across the whole health corpus (normalised).",
     system=f"""You are the Trend agent. {SCOPE_NOTE}
 
-Use topic_trend and compare_topics on the whole health corpus for the question's topic and for competing
+{CONTENT_NOTE}
+Start with get_content_analysis. Its method_evolution describes, from the studies themselves, how designs,
+data, case definitions and analysis changed from phase to phase and the reasons authors give. Your job is to
+test and size that account: for each shift it describes, measure whether the newer practice really rises
+across the analysed papers (field_by_year) and across the whole corpus (topic_trend), and say where the
+counts agree with the close reading and where they do not. Report each shift with what the studies say and
+the numbers that size it, never the numbers alone.
+Then use topic_trend and compare_topics on the whole health corpus for the question's topic and for competing
 methods (e.g. CNN vs transformer vs foundation model). Always reason with per_10k_arxiv (normalised for
 arXiv growth), never raw counts, and ignore the partial final year.
 For practice WITHIN a topic ("ML in malaria papers", "bed nets in malaria models") set within to the topic
@@ -161,9 +184,11 @@ a number into a claim before you have measured it. Examples:
 - bad: text "Most papers use deep learning" written first, then the test returns 6 of 46.
 - good: test_claim says x5.32; text "In PMC, ML malaria papers rose about 5-fold (x5.3) between 2015-2017
   and 2023-2025". bad: "roughly 9-fold", written before measuring.""",
-    tools=TREND_TOOLS + [TEST_TOOL, PROPOSE_TOOL],
+    tools=TREND_TOOLS + [TEST_TOOL, PROPOSE_TOOL, _content_tool()]
+          + [t for t in ANALYSIS_TOOLS if t.name in ("field_by_year", "value_counts")],
     finish_schema=obj({
         "trends": {**ARR, "description": "[{topic, keywords, direction, early_mean, late_mean, ratio}]"},
+        "method_shifts": {**ARR, "description": "[{shift, what_the_studies_say, sized_by, agrees_with_counts}]"},
         "claim_ids": {"type": "array", "items": {"type": "integer"}},
         "observations": STRS,
     }, ["trends", "observations"]),
@@ -174,6 +199,11 @@ GAPS = Agent(
     role="Identifies evidence-grounded research gaps from the other agents' findings.",
     system=f"""You are the Research Gap agent. {SCOPE_NOTE}
 
+{CONTENT_NOTE}
+Start with get_content_analysis(with_quotes=true). Its content_gaps are the open questions the studies
+themselves point to (stated limitations, future work, unresolved conflicts, recurring weaknesses): build your
+gaps on them first, keep their ids (CG1...), and use counts to show how widespread each is across all the
+analysed papers and the corpus. Then add gaps that only the counts reveal.
 A gap is an OBSERVATION from the literature, not an opinion: e.g. "few studies use data from East Africa",
 "most models are validated only internally", "almost all work is classification, little is forecasting".
 Look at under-represented geographies, populations, modalities, tasks, validation levels, dataset
@@ -208,9 +238,10 @@ a number into a claim before you have measured it. Examples:
     tools=ANALYSIS_TOOLS + [RECHECK_TOOL, FIELDPASS_TOOL, BURDEN_TOOL]
           + [t for t in RESULT_TOOLS if t.name == "contradictions"]
           + [t for t in SEARCH_TOOLS if t.name == "corpus_count"]
-          + [t for t in TREND_TOOLS if t.name == "topic_trend"] + [TEST_TOOL, PROPOSE_TOOL],
+          + [t for t in TREND_TOOLS if t.name == "topic_trend"] + [TEST_TOOL, PROPOSE_TOOL, _content_tool()],
     finish_schema=obj({
-        "gaps": {**ARR, "description": "[{gap, why_it_matters, claim_ids:[...], confidence:'high'|'medium'|'low', caveats}]"},
+        "gaps": {**ARR, "description": "[{gap, content_gap_id, what_the_studies_say, why_it_matters, claim_ids:[...], "
+                                       "confidence:'high'|'medium'|'low', caveats}]"},
         "research_directions": STRS,
     }, ["gaps"]),
 )
@@ -239,7 +270,14 @@ SYNTHESIS = Agent(
     role="Writes the final research intelligence report from verified claims only.",
     system=f"""You are the Synthesis agent. {SCOPE_NOTE}
 
-Call get_brief first, then write the report body in Markdown.
+Call get_brief and get_content_analysis(with_quotes=true) first, then write the report body in Markdown.
+
+THE BASIS OF THE REPORT is what the studies say. get_content_analysis holds the close reading of every study
+read in full, compared across studies and checked by code: themes of their findings, content claims with how
+many studies support or contradict each, how methods changed over time and why, and the gaps and directions
+the studies point to. Build the findings, trends, gaps and priorities on it: compare studies, explain
+differences and draw out implications. Counts and corpus trends ([Cn] claims) are supporting evidence that
+size a pattern across all analysed papers; never let a section be only a list of counts.
 
 WHO YOU ARE WRITING FOR: an educated professional reader (a public-health researcher or practitioner, a data
 scientist from an adjacent field, a programme lead or a funder). Write in the register of the discussion
@@ -273,10 +311,19 @@ Style:
 Sections (headings in this order):
 ## Summary (two or three short paragraphs that answer the question directly; no bullets)
 ## Scope and approach (studies analysed, how many read in full, sources, in two or three sentences)
-## Current practice (the established approaches, data and evaluation practice, as a synthesis of the field)
-## Temporal trends (what is changing, with the strength of evidence for each trend)
-## Evidence gaps and their implications (each gap and its consequence for validity or use)
-## Research priorities (suggested studies, clearly labelled as suggestions, each tied to a gap)
+## What the studies found (a thematic synthesis: set the studies' results side by side, say where they agree
+   and where they conflict, and what about the studies explains the differences; use the content claims and
+   their strength, e.g. "consistent across four studies read in full")
+## How the research has changed over time (the longest section: describe phase by phase how study designs,
+   settings and populations, case definitions, data collection, sample sizes, analysis and validation have
+   changed, which studies show it, and the reasons authors give; then what has not changed. Use corpus trend
+   claims only to say how widespread a shift is)
+## Current practice and its quality (the approaches, data and evaluation practice in use now, with their
+   strengths and the weaknesses the studies themselves acknowledge)
+## Evidence gaps and their implications (built on the gaps the studies point to: each gap, what the studies
+   say about it, why it matters, and counts that show how widespread it is)
+## Research priorities (built on the directions: each one tied to a gap, with a sketch of the study that
+   would close it, clearly labelled as suggestions)
 ## Limitations (what was not measured, what rests on few studies, and how that bounds the conclusions)
 
 Rules:
@@ -314,6 +361,11 @@ Rules:
   count. A guideline is what is recommended, not a finding: never count it as a study, never cite it as
   support for a claim, and keep it in its own sentence apart from paper citations. Quote a recommendation
   only word for word. Do not mention a guideline the brief does not list.
+- When you say what a study found or did, cite that study in the same sentence; details credited to a paper
+  are checked against it. Cite papers, not the analysis ids (K1, CG2, CD1). A count of studies from the
+  content analysis is written as code gave it ("3 of the 14 studies read in full").
+- The detailed analysis, with quoted passages, is appended by code after your text: synthesise and interpret
+  rather than repeating it item by item.
 - Do not write a references section or an evidence table — they are appended automatically.""",
     tools=REPORT_TOOLS,
     finish_schema=obj({"report_markdown": STR}, ["report_markdown"]),

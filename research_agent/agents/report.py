@@ -85,7 +85,8 @@ def get_brief(ctx) -> dict:
                 for p in g["most_cited_within_set"][:6]]
     except Exception:
         pass
-    notes_src = {k: v for k, v in ctx.notes().items() if k not in ("synthesis", "orchestrator", "mode", "usage")}
+    notes_src = {k: v for k, v in ctx.notes().items()
+                 if k not in ("synthesis", "orchestrator", "mode", "usage", "content_analysis")}
     room = BRIEF_CHARS - len(json.dumps(out, default=str, ensure_ascii=False)) - 200
     per_note = max(300, room // max(1, len(notes_src)))
     notes = {}
@@ -96,9 +97,15 @@ def get_brief(ctx) -> dict:
     return out
 
 
+def _content_tool():
+    from research_agent.tools.content import CONTENT_TOOL
+
+    return CONTENT_TOOL
+
+
 REPORT_TOOLS = [Tool("get_brief", "Everything you need: every claim (its id is the `claim` field), verdict and numbers, run facts, "
                      "the shortlist (ids, titles), and agent outputs.", obj({}), get_brief,
-                     max_chars=BRIEF_CHARS)]
+                     max_chars=BRIEF_CHARS), _content_tool()]
 
 
 # "n of N" counts, including written-out numbers and "of the": "two of 39", "12 of the 49", "none of the 49"
@@ -269,6 +276,12 @@ def allowed_counts(ctx, claims: dict | None = None, facts: dict | None = None) -
     statuses = [c["status"] for c in claims.values()]
     for st in ("supported", "rejected", "unsupported"):
         allowed.add((statuses.count(st), len(statuses)))
+    try:
+        from research_agent.tools import content
+
+        allowed |= content.counts(ctx)        # "n of the N studies read in full", counted from passages
+    except Exception:
+        pass
     for e in ctx.pg.execute("SELECT payload FROM run_events WHERE run_id=%s AND kind='count'",
                             (ctx.run_id,)).fetchall():
         allowed.add((int(e["payload"]["n"]), int(e["payload"]["total"])))  # corpus_count, value_counts, test_claim
@@ -387,6 +400,12 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
         review_record = prisma_markdown(ctx)
     except Exception:
         review_record = []
+    try:
+        from research_agent.tools import content
+
+        computed = content.markdown(ctx) + computed    # what the studies read in full say, first
+    except Exception:
+        pass
     lines = [body.strip(), "", *computed, "## Run facts (computed by code)", "",
              f"- Papers analysed: {facts['shortlist']} "
              f"(read in full: {facts['fulltext']}, abstract only: {facts['abstract_only']})",

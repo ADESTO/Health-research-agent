@@ -854,9 +854,11 @@ $("#go").onclick = async () => {
 
 // ---------------------------------------------------------------- the run view
 const STEP_NAMES = {
-  report: [["discovery", "Finding papers"], ["literature", "Reading"], ["methods", "Methods"], ["trends", "Trends"],
+  report: [["discovery", "Finding papers"], ["literature", "Reading"], ["content_synthesis", "Comparing studies"],
+           ["methods", "Methods"], ["trends", "Trends"],
            ["gaps", "Gaps"], ["evidence", "Checking claims"], ["synthesis", "Writing"]],
-  map: [["protocol", "Protocol"], ["discovery", "Finding papers"], ["literature", "Reading"], ["protocol_extraction", "Coding papers"],
+  map: [["protocol", "Protocol"], ["discovery", "Finding papers"], ["literature", "Reading"], ["content_synthesis", "Comparing studies"],
+        ["protocol_extraction", "Coding papers"],
         ["map", "Mapping"], ["gap_reasoning", "Explaining gaps"], ["design", "Designs"]],
 };
 let stepState = {};

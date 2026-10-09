@@ -469,6 +469,35 @@ python -m research_agent.cli fieldpass <run_id> q_study_system --values "human,a
     --definition "What the study was done in: human participants, animals, or cells or tissue outside a body."
 ```
 
+### What the studies say: close reading of the papers read in full
+
+Counting shows how often something appears. It cannot say what the studies found, how a field's methods moved
+from one approach to another and why, or which questions the authors themselves leave open. So every paper
+read in full is also read closely, once (cached across runs, table `paper_analyses`):
+
+- its aim, design, setting, data and analysis in the reviewer's own words;
+- passages copied from the paper for its methods, its findings (with their numbers), why the authors chose
+  their approach, how they set their work against earlier studies, the limitations they state and the
+  further work they recommend. Code finds every passage in the text read and drops any item whose passage
+  is not there, exactly as for extraction.
+
+A stronger model then compares all the studies, oldest first, in three steps: **what they found** (themes and
+content claims, each tied to the passages that support or contradict it), **how the methods changed over
+time** (phases with their typical designs, case definitions, data, analysis and validation, the shifts between
+phases and the reasons authors give, and what has not changed), and **gaps and directions** grounded in the
+studies' own limitations, future work and unresolved conflicts. Code checks the result: every passage id must
+exist, every paper cited in the prose must have been read in full, a phase holds only papers published in its
+years, a shift must run forwards in time, every direction must address a gap that survived, and how many
+studies support or contradict a claim is counted by code from the passages.
+
+Reports and maps are built on this. The report's findings, its section on how the research has changed, its
+gaps and its priorities are written from it, with counts and corpus trends sizing what it describes, and the
+full analysis with quoted passages is appended. A map opens with it, before the counted sections, and research
+designs may address its gaps (CG#) and directions (CD#). The trend, gap and methods agents, gap reasoning,
+drafts and the Ask tab all read it with `get_content_analysis`. It costs one extra read per paper read in
+full (reused by later runs) and three calls of the strong model per run; `CONTENT_ANALYSIS=0` turns it off.
+More papers read in full (`MAX_FULLTEXT`) makes it more thorough.
+
 ### What papers found, and how the literature fits together
 
 - **Reported results and associations.** Every paper's performance numbers (RMSE, AUC, accuracy...) and the

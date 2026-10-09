@@ -60,7 +60,7 @@ def _corpus_lines(c: dict) -> list[str]:
 
 
 def render_map(question: str, protocol: dict, m: dict, reasoning: dict | None, designs: list[dict],
-               notes: dict) -> str:
+               notes: dict, content: list[str] | None = None) -> str:
     L: list[str] = [f"# Research Opportunity Map", "", f"**Question:** {question}", ""]
     corp = ", ".join(f"{n} {c}" for c, n in (m.get("corpora") or {}).items())
     L += [f"Based on **{m['N']} papers** ({corp}), **{m.get('N_fulltext', 0)} read in full**, published "
@@ -69,10 +69,18 @@ def render_map(question: str, protocol: dict, m: dict, reasoning: dict | None, d
         L += [f"**Setting:** {protocol['setting']}", ""]
 
     L += ["## How to read this map", "",
-          "Every section is computed by code from evidence-checked extractions of the papers above. Grades "
-          "list the reasons that produced them. Explanations of gaps are hypotheses that were each tested "
+          ("The map opens with what the studies read in full actually say: their findings, how their methods "
+           "changed over time, and the gaps and directions they point to, each resting on passages found word "
+           "for word in the papers. The sections after it count across every analysed paper. " if content else "")
+          + "The counted sections are computed by code from evidence-checked extractions of the papers above. "
+          "Grades list the reasons that produced them. Explanations of gaps are hypotheses that were each tested "
           "against the papers, and their verdicts come from the counts, not from the model. Paper ids after "
           "an item are examples, not the full list.", ""]
+    if content:
+        L += content
+        L += ["## The numbers across all analysed papers", "",
+              f"What follows counts across all {m['N']} analysed papers, including those read from their abstract "
+              "only. It shows how widespread the patterns above are.", ""]
 
     L += ["## What is established", ""]
     if not m["established"]:

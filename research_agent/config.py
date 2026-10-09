@@ -71,6 +71,14 @@ class Settings:
     live_search_max_calls: int = int(os.getenv("LIVE_SEARCH_MAX_CALLS", "2"))
     live_search_max_papers: int = int(os.getenv("LIVE_SEARCH_MAX_PAPERS", "200"))
 
+    # Content analysis (tools/content.py): every paper read in full is also read closely for its design, data,
+    # analysis, findings, limitations and future work (cached across runs), and a stronger model then compares
+    # the studies: findings, how methods changed over time, gaps and directions. 0 turns it off.
+    content_analysis: bool = os.getenv("CONTENT_ANALYSIS", "1").lower() in ("1", "true", "yes")
+    # characters of each full text the close reading gets (more than extraction: the whole argument matters)
+    analysis_read_chars: int = int(os.getenv("ANALYSIS_READ_CHARS", "24000"))
+    analysis_max_papers: int = int(os.getenv("ANALYSIS_MAX_PAPERS", "80"))
+
     # Run limits (cost guards)
     max_shortlist: int = int(os.getenv("MAX_SHORTLIST", "60"))
     max_fulltext: int = int(os.getenv("MAX_FULLTEXT", "20"))

@@ -412,3 +412,14 @@ CREATE TABLE IF NOT EXISTS user_documents (
     created_at    timestamptz DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS user_documents_owner_idx ON user_documents (owner_id);
+
+-- Close readings of papers read in full (tools/content.py): design, data, analysis, findings, limitations and
+-- future work, each with passages verified against the text. Public literature, so shared across runs.
+CREATE TABLE IF NOT EXISTS paper_analyses (
+    paper_id    text NOT NULL REFERENCES papers(paper_id) ON DELETE CASCADE,
+    version     text NOT NULL,
+    data        jsonb NOT NULL,
+    model       text NOT NULL DEFAULT '',
+    created_at  timestamptz DEFAULT now(),
+    PRIMARY KEY (paper_id, version)
+);

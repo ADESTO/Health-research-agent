@@ -5,6 +5,8 @@
 services:
   db:
     image: pgvector/pgvector:pg17
+    # building the vector index in parallel needs about 1 GB of shared memory; Docker gives 64 MB by default
+    shm_size: 2gb
     restart: unless-stopped
     environment:
       POSTGRES_USER: research

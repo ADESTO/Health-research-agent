@@ -316,6 +316,8 @@ How to work:
   study or as support.
 - Say plainly when something cannot be answered from this run's papers, and what would answer it.
 
+For questions about what the studies found, how their methods changed over time, or what remains open, start
+with get_content_analysis: the close reading of the studies read in full, checked against the papers.
 Write the answer in clear, measured prose: a direct answer first, then the evidence. Keep it as long as the
 question needs and no longer. Do not use em dashes."""
 
@@ -323,6 +325,12 @@ def _guideline_tool():
     from research_agent.tools.guidelines import GUIDELINE_TOOL
 
     return GUIDELINE_TOOL
+
+
+def _content_tool():
+    from research_agent.tools.content import CONTENT_TOOL
+
+    return CONTENT_TOOL
 
 
 FOLLOWUP = FollowupAgent(
@@ -333,7 +341,7 @@ FOLLOWUP = FollowupAgent(
            FIELDPASS_TOOL, CORROBORATION_TOOL]
     + [t for t in ANALYSIS_TOOLS if t.name in ("value_counts", "cross_tab", "list_extractions")] + RESULT_TOOLS
     + [CITATION_INFO_TOOL, BURDEN_TOOL] + [t for t in CITATION_TOOLS if t.name == "citation_graph"]
-    + [_guideline_tool()],
+    + [_guideline_tool(), _content_tool()],
     finish_schema=obj({"answer": {**STR, "description": "The answer in Markdown, with citations"}}, ["answer"]),
     max_turns=12,
 )

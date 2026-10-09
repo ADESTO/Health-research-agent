@@ -91,6 +91,11 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
             ctx.save_note("protocol_extraction", stats)
             ctx.emit("protocol_extraction", "finish", {"output": stats})
 
+        # 4b. close reading of the papers read in full, and the comparison across them (LLM, checked by code)
+        from research_agent.tools import content
+
+        content.ensure(ctx)
+
         # 5. the map itself (code) ---------------------------------------------------------------
         m = compute_map(ctx, protocol)
         ctx.save_note("map", {"map": m})
@@ -114,7 +119,8 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
         designs = (ctx.notes().get("design") or {}).get("designs") or []
 
         # 8. render ------------------------------------------------------------------------------
-        md = render_map(question, protocol, m, reasoning, designs, {"dropped": dropped})
+        md = render_map(question, protocol, m, reasoning, designs, {"dropped": dropped},
+                        content=content.markdown(ctx))
         from research_agent.tools.results import results_markdown
 
         from research_agent.tools.review import prisma_markdown
@@ -150,6 +156,7 @@ def run_map(question: str | None = None, provider: str | None = None, llm_factor
             cited += d["builds_on"] + [p["paper_id"] for p in d["supporting"] + d["challenging"]]
         for g in reasoning.get("gaps", []):
             cited += [nm["paper_id"] for nm in g["near_misses"]]
+        cited += content.of(ctx).get("analysed") or []
         cited = list(dict.fromkeys(cited))
         try:
             from research_agent.tools import guidelines
