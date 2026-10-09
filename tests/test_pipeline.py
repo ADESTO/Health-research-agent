@@ -228,6 +228,57 @@ def test_content_analysis_reads_papers_and_checks_the_synthesis(loaded_db):
     assert ("content_analysis", "start") not in events2
 
 
+def test_failed_run_resumes_from_the_web(loaded_db, monkeypatch):
+    """Credits run out while the report is written: the run fails, keeps its work, and the Resume button's
+    endpoint carries it on from the last finished step without starting over."""
+    from fastapi.testclient import TestClient
+
+    from research_agent import jobs
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.api import main as api
+    from research_agent.db import get_conn
+
+    class OutOfCredit(FakeLLM):
+        def chat(self, system, messages, **kw):
+            if "Synthesis agent" in system:
+                raise RuntimeError("Your credit balance is too low to access the Anthropic API.")
+            return super().chat(system, messages, **kw)
+
+    res = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                       llm_factory=lambda strong=False: OutOfCredit())
+    rid = res["run_id"]
+    client = TestClient(api.app)
+    run = client.get(f"/runs/{rid}").json()["run"]
+    assert run["status"] == "failed" and run["resumable"]
+    with get_conn() as pg:
+        pg.execute("UPDATE runs SET requested_mode='pipeline' WHERE run_id=%s", (rid,))
+        n_short = pg.execute("SELECT count(*) n FROM run_papers WHERE run_id=%s", (rid,)).fetchone()["n"]
+    assert n_short > 0                                       # the work done before the failure is kept
+
+    r = client.post(f"/runs/{rid}/resume")
+    assert r.status_code == 200, r.text
+    assert client.get(f"/runs/{rid}").json()["run"]["status"] == "queued"
+    assert client.post(f"/runs/{rid}/resume").status_code == 409     # already queued: not twice
+    with get_conn() as pg:
+        job = pg.execute("SELECT kind, payload FROM jobs WHERE id=%s", (r.json()["job_id"],)).fetchone()
+    assert job["payload"]["resume"] is True
+
+    events = []
+    monkeypatch.setattr(jobs, "_llm_factory", lambda strong=False: FakeLLM())
+    jobs.execute(job["kind"], job["payload"], attempt=1)      # what the worker does with it
+    with get_conn() as pg:
+        pg.execute("UPDATE jobs SET status='done', finished_at=now() WHERE id=%s", (r.json()["job_id"],))
+        after = pg.execute("SELECT status, report_md FROM runs WHERE run_id=%s", (rid,)).fetchone()
+        skipped = pg.execute("SELECT count(*) n FROM run_events WHERE run_id=%s AND agent='discovery' "
+                             "AND kind='skipped'", (rid,)).fetchone()["n"]
+    assert after["status"] == "done" and "## Evidence table" in after["report_md"]
+    assert skipped >= 1                                      # finished steps were not run again
+    assert client.post(f"/runs/{rid}/resume").status_code == 409     # a finished run has nothing to resume
+
+    # a run that found nothing cannot be fixed by resuming, so it is not offered
+    assert not api.resumable("the systematic search found no eligible papers; widen the question")
+
+
 def test_content_analysis_can_be_switched_off(loaded_db, monkeypatch):
     import dataclasses
 

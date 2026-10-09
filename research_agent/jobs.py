@@ -83,7 +83,7 @@ def execute(kind: str, payload: dict, attempt: int) -> None:
     if kind == "run":
         from research_agent.agents.orchestrator import run_research
 
-        if attempt > 1:
+        if attempt > 1 or payload.get("resume"):
             run_research(resume=payload["run_id"], mode=payload.get("mode", "orchestrated"),
                          provider=payload.get("provider"), llm_factory=factory)
         else:
@@ -92,7 +92,7 @@ def execute(kind: str, payload: dict, attempt: int) -> None:
     elif kind == "map":
         from research_agent.opportunity.pipeline import run_map
 
-        if attempt > 1:
+        if attempt > 1 or payload.get("resume"):
             run_map(resume=payload["run_id"], provider=payload.get("provider"), llm_factory=factory)
         else:
             run_map(payload["question"], provider=payload.get("provider"), run_id=payload["run_id"], llm_factory=factory,

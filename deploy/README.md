@@ -116,6 +116,15 @@ docker compose --profile hosted up -d --build
 Database changes are applied automatically when the app starts. A run in progress when you restart is
 picked up again by the worker and resumes from its last finished step.
 
+## When a run stops
+
+If a run fails partway (the model provider's credits ran out, a rate limit, a timeout), its page shows a
+**Resume run** button to its owner and to you. Everything finished before the failure is kept: resuming carries on
+from the last finished step and does not count against the daily allowance. Top up the credits first, or it will
+stop again in the same place. A run that found no papers to analyse is not offered a resume; start a new one
+with a wider question. From the terminal, `hra ask --resume <run_id>` (or `hra map --resume <run_id>`) does the
+same.
+
 ## What testers can and cannot do
 
 | | Tester | Admin (you) |

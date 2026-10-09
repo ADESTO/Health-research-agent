@@ -219,6 +219,42 @@ def start_run(req: RunRequest, request: Request):
     return {"run_id": run_id, "mode": req.mode, "search": req.search, "job_id": job, "poll": f"/runs/{run_id}"}
 
 
+# Failures that resuming cannot fix: the question itself found nothing to analyse. Anything else (credits ran out,
+# a rate limit, a timeout, the server restarting) is worth another try from the last finished step.
+_NOT_RESUMABLE = ("found no eligible papers", "found no relevant papers", "no usable question-specific fields",
+                  "needs the protocol", "the map needs a shortlist")
+
+
+def resumable(error: str | None) -> bool:
+    return not any(x in (error or "") for x in _NOT_RESUMABLE)
+
+
+@app.post("/runs/{run_id}/resume")
+def resume_run(run_id: str):
+    """Carry on a failed run from its last finished step. The run's owner and admins may (see _access); a resume
+    does not count against the daily allowance, since the run was already counted when it started."""
+    from research_agent.jobs import enqueue
+
+    with get_conn() as pg:
+        run = pg.execute("SELECT status, error, requested_mode FROM runs WHERE run_id=%s", (run_id,)).fetchone()
+        if not run:
+            raise HTTPException(404, "no such run")
+        if run["status"] != "failed":
+            raise HTTPException(409, "Only a run that stopped can be resumed.")
+        if not resumable(run["error"]):
+            raise HTTPException(409, "This run found nothing to analyse, so resuming would stop in the same place. "
+                                     "Start a new run with a wider question.")
+        job = pg.execute("SELECT kind, payload, status FROM jobs WHERE payload->>'run_id' = %s AND kind IN ('run','map') "
+                         "ORDER BY id DESC LIMIT 1", (run_id,)).fetchone()
+        if job and job["status"] in ("queued", "running"):
+            raise HTTPException(409, "This run is already being resumed.")
+        pg.execute("UPDATE runs SET status='queued', error=NULL, finished_at=NULL WHERE run_id=%s", (run_id,))
+    kind = job["kind"] if job else ("map" if run["requested_mode"] == "map" else "run")
+    payload = dict(job["payload"]) if job else {"run_id": run_id, "mode": run["requested_mode"] or "orchestrated"}
+    jid = enqueue(kind, {**payload, "resume": True})
+    return {"run_id": run_id, "job_id": jid, "resumed": True}
+
+
 @app.get("/runs/{run_id}")
 def get_run(run_id: str, after_event: int = 0):
     with get_conn() as pg:
@@ -232,7 +268,8 @@ def get_run(run_id: str, after_event: int = 0):
         n_short = pg.execute("SELECT count(*) n FROM run_papers WHERE run_id=%s", (run_id,)).fetchone()["n"]
     from research_agent.jobs import job_for_run
 
-    return {"run": run, "shortlist_size": n_short, "events": events, "job": job_for_run(run_id)}
+    return {"run": {**run, "resumable": run["status"] == "failed" and resumable(run["error"])},
+            "shortlist_size": n_short, "events": events, "job": job_for_run(run_id)}
 
 
 @app.get("/runs/{run_id}/report")

@@ -948,7 +948,29 @@ async function poll() {
   } else if (run.status === "failed") {
     clearInterval(timer); timer = null;
     logLine(`✖ run failed: ${esc(run.error || "")}`, "err");
-    $("#report").innerHTML = `<p class="status">The run stopped: ${esc(run.error || "unknown error")}. Resume it from the terminal with <code>ask --resume ${esc(currentRun)}</code>.</p>`;
+    $("#report").innerHTML = `<p class="status">The run stopped: ${esc(run.error || "unknown error")}.</p>` +
+      (run.resumable
+        ? `<p class="status">Everything finished before it stopped is kept. Resuming carries on from the last finished
+           step (for example once the model provider's credits are topped up) and does not count as a new run.</p>
+           <p><button class="btn primary small" id="resumeRun">Resume run</button> <span class="status" id="resumeNote"></span></p>`
+        : `<p class="status">Resuming would stop in the same place. Start a new run with a wider question.</p>`);
+    const b = $("#resumeRun");
+    if (b) b.onclick = () => resumeRun(b);
+  }
+}
+
+async function resumeRun(btn) {
+  btn.disabled = true;
+  $("#resumeNote").textContent = "Resuming…";
+  try {
+    await api(`/runs/${currentRun}/resume`, { method: "POST" });
+    logLine("▶ resumed from the last finished step");
+    $("#report").innerHTML = '<p class="status">Resumed. The report appears here when the agents finish.</p>';
+    if (!timer) timer = setInterval(() => poll().catch(e => logLine(esc(e.message), "err")), 3000);
+    loadRuns();
+  } catch (e) {
+    $("#resumeNote").textContent = e.message;
+    btn.disabled = false;
   }
 }
 
