@@ -361,6 +361,13 @@ Rules:
   count. A guideline is what is recommended, not a finding: never count it as a study, never cite it as
   support for a claim, and keep it in its own sentence apart from paper citations. Quote a recommendation
   only word for word. Do not mention a guideline the brief does not list.
+- Absence must say where it was looked for. "No study shows X" is about the studies analysed. The brief's
+  evidence_check says which kinds of evidence the question needs, whether the studies held them, and what a
+  PubMed search for each missing kind found: when you report that evidence is absent, say so in those terms
+  ("none of the studies analysed, and a PubMed search for trials of ... found none eligible"). Never say it is
+  absent from "the literature", "what has been published" or "the field".
+- Quote counted numbers plainly. Never copy checking notes into the prose ("unsupported:", "the text
+  asserted", "the check counted"): if a count differs from what you expected, use the counted number.
 - When you say what a study found or did, cite that study in the same sentence; details credited to a paper
   are checked against it. Cite papers, not the analysis ids (K1, CG2, CD1). A count of studies from the
   content analysis is written as code gave it ("3 of the 14 studies read in full").

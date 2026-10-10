@@ -75,7 +75,12 @@ def run_specialist(ctx: RunContext, agent_name: str, task: str) -> dict:
         out = agent.run(child, task)
         if agent_name == "literature" and "error" not in out:
             _extract_question_fields(child)
-            from research_agent.tools import content
+            from research_agent.tools import content, live
+
+            # does the run hold the kinds of evidence the question needs (trials, surveys...)? If not, PubMed is
+            # searched for them and what is relevant is added and read, before anything is concluded
+            if live.evidence_check(child).get("added"):
+                _extract_question_fields(child)
 
             content.ensure(child)   # close reading of the papers read in full, and the comparison across them
         if agent_name == "discovery" and settings.citations:

@@ -267,6 +267,10 @@ class FakeLLM:
         if force_tool == "record_prevalence":
             # the fixture corpus has no prevalence studies: a correct reader says so
             return self._resp([_call("record_prevalence", reports_prevalence=False, estimates=[], risk_of_bias={})])
+        if force_tool == "record_evidence_check":
+            # the fixture corpus holds what its questions need: nothing to search for unless a test says otherwise
+            return self._resp([_call("record_evidence_check", needed=[
+                {"evidence": "forecasting studies", "held": "many", "missing": False, "query": ""}], reason="adequate")])
         if force_tool == "record_paper_analysis":
             return self._resp([_call("record_paper_analysis", **fake_paper_analysis(messages[0]["content"][0]["text"]))])
         if force_tool in ("record_findings", "record_method_evolution", "record_gaps_directions"):

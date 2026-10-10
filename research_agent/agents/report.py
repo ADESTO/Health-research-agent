@@ -64,6 +64,11 @@ def get_brief(ctx) -> dict:
             out["guidelines"] = gl
     except Exception:
         pass
+    ev = ctx.notes().get("evidence_check") or {}
+    if ev.get("checked"):
+        out["evidence_check"] = {"needed": ev.get("needed"), "papers_added": len(ev.get("added") or []),
+                                 "note": "What the question needs, whether the studies held it, and what a PubMed "
+                                         "search for each missing kind found."}
     # What papers found, computed by code (older runs may lack it). Added before the notes are sized, so
     # the notes shrink to fit instead of the claims.
     try:
@@ -86,7 +91,7 @@ def get_brief(ctx) -> dict:
     except Exception:
         pass
     notes_src = {k: v for k, v in ctx.notes().items()
-                 if k not in ("synthesis", "orchestrator", "mode", "usage", "content_analysis")}
+                 if k not in ("synthesis", "orchestrator", "mode", "usage", "content_analysis", "evidence_check")}
     room = BRIEF_CHARS - len(json.dumps(out, default=str, ensure_ascii=False)) - 200
     per_note = max(300, room // max(1, len(notes_src)))
     notes = {}
@@ -302,6 +307,9 @@ def depth_warning(facts: dict) -> str | None:
 def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[str, dict]:
     """Validate citations and numbers, then append code-generated run facts, evidence table and references."""
     body = normalise_citations(body)
+    from research_agent.tools.content import collapse_repeats
+
+    body = collapse_repeats(body)
     shortlist = set(ctx.shortlist_ids())
     claims = {c["id"]: c for c in ctx.pg.execute(
         "SELECT id, text, status, claim_type, result FROM claims WHERE run_id=%s ORDER BY id",
@@ -373,7 +381,8 @@ def finalize_report(ctx, body: str, number_check: dict | None = None) -> tuple[s
         # before anything else that quotes a denominator: how the papers were found, and what is counted
         from research_agent.tools import live
 
-        computed = systematic.markdown(ctx) + live.markdown(ctx) + cohort.markdown(ctx) + computed
+        computed = (systematic.markdown(ctx) + live.evidence_markdown(ctx) + live.markdown(ctx)
+                    + cohort.markdown(ctx) + computed)
     except Exception:
         pass
     try:

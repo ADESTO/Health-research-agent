@@ -4659,6 +4659,58 @@ def test_live_pubmed_search_loads_open_access_and_abstract_records(ctx):
         ctx.pg.execute("DELETE FROM papers WHERE paper_id = ANY(%s)", (_LIVE_IDS,))
 
 
+def test_evidence_check_searches_for_the_kind_of_evidence_the_question_needs(loaded_db, monkeypatch):
+    """After reading, the run is checked for the kinds of evidence its question needs. A missing kind (here, trials)
+    is searched for in PubMed; relevant papers are screened, added past the shortlist cap, read, and the report
+    says what was looked for, so absence is never concluded from the first papers alone."""
+    from research_agent.agents.orchestrator import run_research
+    from research_agent.ingestion import pmc
+    from research_agent.runstate import RunContext
+    from research_agent.tools import live as LV
+
+    calls = []
+    client = pmc.PMCClient(transport=_pubmed_transport(calls))
+    monkeypatch.setattr(pmc, "PMCClient", lambda *a, **k: client)
+
+    class NeedsTrials(FakeLLM):
+        def chat(self, system, messages, tools=None, force_tool=None, **kw):
+            if force_tool == "record_evidence_check":
+                assert "Stated designs" in messages[0]["content"][0]["text"]
+                return self._resp([__import__("tests.fake_llm", fromlist=["_call"])._call(
+                    "record_evidence_check", reason="No trial among the studies.", needed=[
+                        {"evidence": "trials with patient outcomes", "held": "none", "missing": True,
+                         "query": 'malaria AND ("Randomized Controlled Trial"[pt])'},
+                        {"evidence": "forecasting studies", "held": "many", "missing": False, "query": ""}])])
+            return super().chat(system, messages, tools=tools, force_tool=force_tool, **kw)
+    try:
+        res = run_research("What ML methods are used for malaria forecasting?", mode="pipeline",
+                           llm_factory=lambda strong=False: NeedsTrials())
+        ctx = RunContext.attach(res["run_id"], llm_factory=lambda strong=False: FakeLLM())
+        try:
+            note = ctx.notes()["evidence_check"]
+            short = set(ctx.shortlist_ids())
+            added = ctx.pg.execute("SELECT paper_id FROM run_papers WHERE run_id=%s AND added_by='evidence_check'",
+                                   (ctx.run_id,)).fetchall()
+            n_ex = ctx.pg.execute("SELECT count(*) n FROM extractions WHERE paper_id = ANY(%s)",
+                                  (list(short),)).fetchone()["n"]
+        finally:
+            ctx.close()
+        assert note["checked"] and note["needed"][0]["missing"]
+        assert {r["paper_id"] for r in added} == {"PMID91000001", "PMC9100002"} <= short
+        assert n_ex >= len(short) - 1                         # the new papers were read like the rest
+        assert any('"Randomized Controlled Trial"[pt]' in c.get("term", "") for c in calls)
+        md = res["report"]
+        assert "## Was the right kind of evidence looked for? (computed)" in md
+        assert "trials with patient outcomes" in md and "relevant added" in md
+        # done once per run: a second call reuses the note
+        assert LV.evidence_check.__doc__
+    finally:
+        with __import__("research_agent.db", fromlist=["get_conn"]).get_conn() as pg:
+            for table in ("run_papers", "screening", "extractions", "protocol_extractions", "paper_analyses",
+                          "paper_fulltext", "papers"):
+                pg.execute(f"DELETE FROM {table} WHERE paper_id = ANY(%s)", (_LIVE_IDS,))
+
+
 def test_the_ai_decides_and_code_limits_live_searches(loaded_db, monkeypatch):
     """A systematic run asks the model whether the eligible set is enough; when it is not, the model's PubMed
     query is run within the run's limits and the papers found are screened like the rest."""

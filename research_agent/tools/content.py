@@ -242,6 +242,7 @@ Rules:
 - In prose, cite papers as [PMC1234567], [arXiv:2401.00001], [PMID123] or [UP12] exactly as they appear in
   the list. Never cite a paper that is not listed, and never invent ids, numbers or details.
 - Do not write counts of studies ("5 of 12 studies"): code counts the passages you cite and adds the numbers.
+- Refer to a study by what it is ("the Malawian pneumonia model"), with its citation; never by a bare id.
 - Write in measured scientific prose, with no em dashes."""
 
 FINDINGS_SYSTEM = _SYNTH_BASE + """
@@ -327,6 +328,11 @@ GAPS_TOOL = {"name": "record_gaps_directions", "description": "Record the gaps a
                      "evidence": {"type": "array", "items": _STR}}, ["direction", "rationale", "addresses"])},
              }, ["gaps", "directions"])}
 
+def collapse_repeats(text: str) -> str:
+    """'[PMC1] [PMC1] [PMC1]' -> '[PMC1]': one citation of a paper per place is enough."""
+    return re.sub(r"(\[[^\]\[]+\])(?:\s*\1)+", r"\1", text)
+
+
 _ID = re.compile(r"(?:arXiv:)?(?:(?:PMC|UP|PMID)\d+|\d{4}\.\d{4,5}(?:v\d+)?|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(?:#[A-Z]\d+)?")
 _PAPER_CITE = re.compile(r"\[(?:arXiv:)?((?:PMC|UP|PMID)\d+|\d{4}\.\d{4,5}(?:v\d+)?|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})\]")
 
@@ -390,7 +396,11 @@ class _Checker:
                 return cite(pid)
             self.dropped.append(f"{where}: citation of {pid} removed (not read in full)")
             return ""
-        return re.sub(r"\s+([.,;:])", r"\1", _PAPER_CITE.sub(fix, text)).strip()
+        text = _PAPER_CITE.sub(fix, text)
+        # a bare id in prose ("2003.09208 is a review") becomes that paper's citation
+        for pid in self.years:
+            text = re.sub(rf"(?<![\[\w:./#]){re.escape(pid)}(?![\w\]#])", cite(pid), text)
+        return re.sub(r"\s+([.,;:])", r"\1", collapse_repeats(text)).strip()
 
     def papers_of(self, pids) -> list[str]:
         return list(dict.fromkeys(self.passages[p]["paper_id"] for p in pids))

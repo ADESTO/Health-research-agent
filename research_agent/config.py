@@ -68,8 +68,8 @@ class Settings:
     # Live PubMed search during a run, when the AI judges the loaded corpus too thin (tools/live.py).
     # PubMed only; these caps hold whatever the model asks for. 0 switches it off.
     live_search: bool = os.getenv("LIVE_SEARCH", "1").lower() in ("1", "true", "yes")
-    live_search_max_calls: int = int(os.getenv("LIVE_SEARCH_MAX_CALLS", "2"))
-    live_search_max_papers: int = int(os.getenv("LIVE_SEARCH_MAX_PAPERS", "200"))
+    live_search_max_calls: int = int(os.getenv("LIVE_SEARCH_MAX_CALLS", "4"))
+    live_search_max_papers: int = int(os.getenv("LIVE_SEARCH_MAX_PAPERS", "300"))
 
     # Content analysis (tools/content.py): every paper read in full is also read closely for its design, data,
     # analysis, findings, limitations and future work (cached across runs), and a stronger model then compares

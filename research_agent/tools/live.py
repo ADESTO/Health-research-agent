@@ -13,6 +13,8 @@ nothing at all with LIVE_SEARCH=0. See ingestion/pubmed.py for what a search loa
 """
 from __future__ import annotations
 
+import json
+
 from research_agent.config import settings
 from research_agent.tools.base import INT, STR, Tool, obj
 
@@ -129,6 +131,155 @@ def sufficiency(ctx, protocol: dict, eligible: list[str]) -> dict:
     args = (resp.tool_calls[0].input if resp.tool_calls else {}) or {}
     return {"enough": bool(args.get("enough", True)), "reason": str(args.get("reason") or "")[:500],
             "query": " ".join(str(args.get("query") or "").split())[:500]}
+
+
+# ---------------------------------------------------------------- evidence check after reading (every run)
+EVIDENCE_SYSTEM = """You check whether the studies collected for a literature review contain the KINDS of evidence its
+question needs, before the review is written. A review that concludes "no study has shown X" when the studies
+were never searched for X is not a finding; it is a gap in the search.
+
+First decide what evidence would answer the question. For example: effects of an intervention or a tool on
+outcomes need randomised, quasi-experimental or before-after evaluations reporting those outcomes; prevalence
+needs population-based or facility-based surveys; diagnostic accuracy needs accuracy studies against a
+reference standard; management practice needs audits, cohorts or guideline-adherence studies; trends need
+studies spread across the period. Then look at the studies you are given (titles, years and stated designs)
+and name each kind of evidence the question needs that is missing or thin.
+
+For each, write a PubMed query that would find it: the question's concepts joined with AND, synonyms with OR,
+and the design as publication types or design words (e.g. ("artificial intelligence" OR "machine learning")
+AND (Kenya OR Uganda OR Africa) AND ("Randomized Controlled Trial"[pt] OR "Clinical Trial"[pt] OR
+"randomised" OR "stepped-wedge" OR "before-after")). Stay inside the question. List the most important first.
+If the studies already hold what the question needs, say so and list nothing."""
+
+EVIDENCE_TOOL = {"name": "record_evidence_check", "description": "Record which kinds of evidence are missing.",
+                 "input_schema": obj({
+                     "needed": {"type": "array", "items": {"type": "object", "properties": {
+                         "evidence": {**STR, "description": "The kind of evidence, e.g. 'trials of AI tools with patient outcomes'"},
+                         "held": {**STR, "description": "What the collected studies hold of it"},
+                         "missing": {"type": "boolean"},
+                         "query": {**STR, "description": "PubMed query that would find it, or '' when not missing"}},
+                         "required": ["evidence", "missing"]}},
+                     "reason": STR}, ["needed"])}
+
+EVIDENCE_NOTE = "evidence_check"
+EVIDENCE_ADD_MAX = 25      # papers one search may add to the run, whatever the shortlist cap
+
+
+def _designs(rows: list[dict]) -> dict[str, int]:
+    out: dict[str, int] = {}
+    for r in rows:
+        for d in {x.lower() for x in (r["data"].get("study_designs") or [])}:
+            out[d] = out.get(d, 0) + 1
+    return dict(sorted(out.items(), key=lambda kv: -kv[1])[:25])
+
+
+def evidence_check(ctx) -> dict:
+    """After the papers are read: does the run hold the kinds of evidence its question needs? For each kind that
+    is missing, search PubMed for it (within the run's live-search limits), screen what comes back against the
+    protocol when there is one, add the relevant papers and read them. Returns what was done (also saved as a
+    note, and shown in the report). Never raises."""
+    from research_agent.tools.extraction import _rows, extract_papers, protocol_of
+
+    done = ctx.notes().get(EVIDENCE_NOTE)
+    if done:
+        return done
+    out = {"checked": False, "needed": [], "searches": [], "added": []}
+    if not settings.live_search:
+        out["note"] = "live search is switched off on this server"
+        ctx.save_note(EVIDENCE_NOTE, out)
+        return out
+    try:
+        rows = _rows(ctx)
+        protocol = protocol_of(ctx) or {}
+        listing = "\n".join(f"- {r['title'][:150]} ({r['year']}; {', '.join((r['data'].get('study_designs') or [])[:2]) or 'design not stated'})"
+                            for r in sorted(rows, key=lambda r: -(r['year'] or 0))[:120])
+        text = (f"Research question: {ctx.question}\n\n"
+                + (f"Include: {'; '.join(protocol.get('inclusion') or [])}\n" if protocol.get("inclusion") else "")
+                + (f"Countries: {', '.join(protocol.get('countries') or [])}\n" if protocol.get("countries") else "")
+                + f"\nStudies collected: {len(rows)}. Stated designs (studies per design): "
+                + json.dumps(_designs(rows)) + f"\n\n{listing}")
+        ctx.emit("evidence_check", "start", {"task": "does the run hold the kinds of evidence the question needs?"})
+        llm = ctx.llm_factory(step="live_search")
+        setattr(llm, "_step", "live_search")
+        resp = llm.chat(EVIDENCE_SYSTEM, [{"role": "user", "content": [{"type": "text", "text": text}]}],
+                        tools=[EVIDENCE_TOOL], force_tool="record_evidence_check", max_tokens=1500)
+        args = (resp.tool_calls[0].input if resp.tool_calls else {}) or {}
+        out["checked"] = True
+        out["reason"] = " ".join(str(args.get("reason") or "").split())[:500]
+        out["needed"] = [{"evidence": " ".join(str(n.get("evidence") or "").split())[:200],
+                          "held": " ".join(str(n.get("held") or "").split())[:300],
+                          "missing": bool(n.get("missing")), "query": " ".join(str(n.get("query") or "").split())[:500]}
+                         for n in args.get("needed") or [] if isinstance(n, dict) and n.get("evidence")][:6]
+        new_ids: list[str] = []
+        have = set(ctx.shortlist_ids())
+        for n in [x for x in out["needed"] if x["missing"] and x["query"]]:
+            if room(ctx)[0] <= 0:
+                n["searched"] = "not searched: the run's live searches were used up"
+                continue
+            res = run_search(ctx, n["query"], f"the studies lack {n['evidence']}", by="evidence check after reading",
+                             limit=60)
+            if "error" in res:
+                n["searched"] = res["error"]
+                continue
+            found = [p for p in res["paper_ids"] if p not in have and p not in new_ids]
+            keep = found
+            if protocol.get("inclusion") or protocol.get("exclusion"):
+                from research_agent.tools.review import log_decision
+                from research_agent.tools.systematic import screen
+
+                decisions = screen(ctx, found, protocol)
+                keep = [p for p in found if (decisions.get(p) or {}).get("decision") in ("include", "unclear")]
+                gone = [p for p in found if p not in keep]
+                if gone:
+                    log_decision(ctx, gone, "excluded", "evidence check: not eligible at screening")
+            keep = keep[:EVIDENCE_ADD_MAX]
+            n["searched"] = f"PubMed matched {res['matched']}; {len(found)} new to the run; {len(keep)} relevant added"
+            n["added"] = keep
+            new_ids += keep
+        if new_ids:
+            from research_agent.tools.review import log_decision
+
+            for pid in new_ids:      # past the shortlist cap on purpose: this is the evidence the question needs
+                ctx.pg.execute("INSERT INTO run_papers (run_id, paper_id, added_by, reason, score) VALUES "
+                               "(%s,%s,'evidence_check',%s,%s) ON CONFLICT (run_id, paper_id) DO NOTHING",
+                               (ctx.run_id, pid, "found by the evidence check: a kind of evidence the question needs", 0.9))
+            log_decision(ctx, new_ids, "included", "evidence check: the kind of evidence the question needs")
+            extract_papers(ctx, new_ids, depth="abstract")
+            open_access = [p for p in new_ids if p.startswith("PMC")]
+            if open_access:
+                extract_papers(ctx, open_access, depth="fulltext", limit=len(open_access))
+        out["added"] = new_ids
+        ctx.emit("evidence_check", "finish", {"output": {"missing": sum(1 for n in out["needed"] if n["missing"]),
+                                                         "papers_added": len(new_ids)}})
+    except Exception as exc:          # the check improves a run; it must never cost one
+        out["error"] = str(exc)[:300]
+        ctx.emit("evidence_check", "error", {"error": str(exc)[:300]})
+    ctx.save_note(EVIDENCE_NOTE, out)
+    return out
+
+
+def evidence_markdown(ctx) -> list[str]:
+    e = ctx.notes().get(EVIDENCE_NOTE) or {}
+    if not e.get("checked"):
+        return []
+    L = ["## Was the right kind of evidence looked for? (computed)", "",
+         "After the papers were read, the AI listed the kinds of evidence the question needs and checked whether "
+         "the collected studies hold them. Each kind that was missing was searched for in PubMed, and relevant "
+         "papers were added and read. A conclusion that evidence is absent rests on this search, not only on "
+         "the papers first collected.", ""]
+    for n in e.get("needed") or []:
+        state = "missing from the studies first collected" if n["missing"] else "present"
+        line = f"- **{n['evidence']}**: {state}."
+        if n.get("held"):
+            line += f" {n['held']}"
+        if n.get("query"):
+            line += f" Searched: `{n['query']}`."
+        if n.get("searched"):
+            line += f" {n['searched']}."
+        L.append(line)
+    if e.get("reason"):
+        L += ["", e["reason"]]
+    return L + [""]
 
 
 def markdown(ctx) -> list[str]:
