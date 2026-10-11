@@ -337,7 +337,7 @@ def markdown(ctx) -> list[str]:
          + (f" (a random sample, seed {n['seed']}, because more were identified than can be screened)."
             if n.get("screened_is_sample") else "."),
          *([f"- Live PubMed search during the run: {n['live_search_added']} more papers identified and screened, "
-            f"{n['live_search_eligible']} eligible (see Live PubMed searches)."] if n.get("live_search_added") else []),
+            f"{n['live_search_eligible']} eligible (see Live searches beyond the loaded corpus)."] if n.get("live_search_added") else []),
          f"- Eligible: {n['eligible']}; excluded with a recorded reason: {n['excluded']}"
          + (f"; could not be screened: {n['unscreened']}" if n.get("unscreened") else "") + ".",
          f"- Analysed: {n['analysed']}"

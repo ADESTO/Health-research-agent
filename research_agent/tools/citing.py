@@ -18,19 +18,19 @@ import re
 
 STYLES = ("author-year", "numbered")
 _ID = r"(?:\d{4}\.\d{4,5}|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})"          # new and old arXiv ids
-_ONE = re.compile(rf"(?:arXiv[:\s]?\s*)?({_ID})(?:v\d+)?|(PMC)\s?(\d{{4,9}})|\b(UP\d{{1,9}}|PMID\d{{1,9}})\b", re.I)
-_GROUP = re.compile(rf"[\[(]\s*((?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}|UP\d{{1,9}}|PMID\d{{1,9}})"
-                    rf"(?:\s*[,;]\s*(?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}|UP\d{{1,9}}|PMID\d{{1,9}}))*)\s*[\])]",
+_ONE = re.compile(rf"(?:arXiv[:\s]?\s*)?({_ID})(?:v\d+)?|(PMC)\s?(\d{{4,9}})|\b(UP\d{{1,9}}|PMID\d{{1,9}}|S2\d{{1,12}})\b", re.I)
+_GROUP = re.compile(rf"[\[(]\s*((?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}|UP\d{{1,9}}|PMID\d{{1,9}}|S2\d{{1,12}})"
+                    rf"(?:\s*[,;]\s*(?:(?:arXiv[:\s]?\s*)?{_ID}(?:v\d+)?|PMC\s?\d{{4,9}}|UP\d{{1,9}}|PMID\d{{1,9}}|S2\d{{1,12}}))*)\s*[\])]",
                     re.I)
 _BARE = re.compile(rf"(?<![\[\w/.:])arXiv:\s?({_ID})(?:v\d+)?(?![\w\]])|(?<![\[\w])(PMC)(\d{{4,9}})(?![\w\]])"
-                   rf"|(?<![\[\w/])(UP\d{{1,9}}|PMID\d{{1,9}})(?![\w\]])")
-CITE = re.compile(r"\[(?:arXiv:([^\]\s]+)|(PMC\d+|UP\d+|PMID\d+))\]")
-_C1 = r"\[(?:arXiv:[^\]\s]+|PMC\d+|UP\d+|PMID\d+)\]"
+                   rf"|(?<![\[\w/])(UP\d{{1,9}}|PMID\d{{1,9}}|S2\d{{1,12}})(?![\w\]])")
+CITE = re.compile(r"\[(?:arXiv:([^\]\s]+)|(PMC\d+|UP\d+|PMID\d+|S2\d+))\]")
+_C1 = r"\[(?:arXiv:[^\]\s]+|PMC\d+|UP\d+|PMID\d+|S2\d+)\]"
 _RUN = re.compile(rf"{_C1}(?:\s*[,;]?\s*{_C1})*")
 
 
 def _tag(pid: str) -> str:
-    return f"[{pid}]" if pid.startswith(("PMC", "UP", "PMID")) else f"[arXiv:{pid}]"
+    return f"[{pid}]" if pid.startswith(("PMC", "UP", "PMID", "S2")) else f"[arXiv:{pid}]"
 
 
 def normalise(text: str, known: set[str]) -> str:
@@ -217,6 +217,10 @@ def _where(p: dict) -> str:
 
         bits = [f"*{p['journal_ref']}*" if p.get("journal_ref") else "", f"https://doi.org/{p['doi']}" if p.get("doi") else "",
                 f"PMID: {p['paper_id'][4:]}", pubmed_url(p["paper_id"])]
+        return ". ".join(b for b in bits if b)
+    if p["source"] == "s2":
+        bits = [f"*{p['journal_ref']}*" if p.get("journal_ref") else "", f"https://doi.org/{p['doi']}" if p.get("doi") else "",
+                f"https://api.semanticscholar.org/CorpusID:{p['paper_id'][2:]}"]
         return ". ".join(b for b in bits if b)
     if p["source"] == "pmc":
         bits = [f"*{p['journal_ref']}*" if p.get("journal_ref") else "", f"https://doi.org/{p['doi']}" if p.get("doi") else "",

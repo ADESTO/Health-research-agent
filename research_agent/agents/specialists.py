@@ -73,8 +73,9 @@ Rules:
 - You MUST call add_to_shortlist for every relevant paper you find, then view_shortlist before finishing.
 - Be efficient: aim to finish within about 6-8 tool rounds. Never repeat a search you have already run;
   several searches can go in one round.
-If the corpus has little on the topic, you may search PubMed itself with search_pubmed_live (limited per run):
-  use it only after the corpus searches have come up short, or when a country, population or period the question
+If the corpus has little on the topic, you may search beyond it with search_live (limited per run): PubMed for
+  clinical and public-health studies, arXiv for recent AI and modelling preprints, Semantic Scholar for other
+  journals. Use it only after the corpus searches have come up short, or when a country, population or period the question
   names is missing, and say why. Add the relevant results with add_to_shortlist like any other. If even that
   finds little, keep the shortlist small and say so: that is a finding, not a failure.""",
     tools=SEARCH_TOOLS + SHORTLIST_TOOLS + [t for t in CITATION_TOOLS if t.name == "snowball"] + [_live_tool()],

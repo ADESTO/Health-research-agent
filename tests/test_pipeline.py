@@ -4711,6 +4711,148 @@ def test_evidence_check_searches_for_the_kind_of_evidence_the_question_needs(loa
                 pg.execute(f"DELETE FROM {table} WHERE paper_id = ANY(%s)", (_LIVE_IDS,))
 
 
+_ATOM = """<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:arxiv="http://arxiv.org/schemas/atom">
+<entry><id>http://arxiv.org/abs/2609.01234v2</id><published>2026-09-03T00:00:00Z</published>
+<title>Deep learning for knee osteoarthritis grading in Kenyan radiographs</title>
+<summary>We trained a convolutional network on 3,100 knee radiographs from Nairobi to grade osteoarthritis severity
+and validated it on a second hospital.</summary><author><name>Achieng Otieno</name></author>
+<arxiv:doi>10.1234/knee.2026</arxiv:doi><arxiv:primary_category term="eess.IV"/><category term="eess.IV"/></entry>
+<entry><id>http://arxiv.org/abs/2609.09999v1</id><published>2026-09-04T00:00:00Z</published><title>Too short</title>
+<summary>Short.</summary></entry></feed>"""
+
+
+def test_live_arxiv_and_semantic_scholar_searches(loaded_db, monkeypatch):
+    """Live search can go to arXiv (preprints past the loaded snapshot) and Semantic Scholar (all publishers).
+    Each paper is stored under the most useful id it has, and is cited and linked like any other."""
+    import httpx
+
+    from research_agent.ingestion import arxiv_live, pmc, s2
+    from research_agent.runstate import RunContext
+    from research_agent.tools import live as LV
+    from research_agent.tools.citing import CITE
+
+    seen = []
+
+    def handler(request):
+        seen.append(str(request.url))
+        if "export.arxiv.org" in str(request.url):
+            return httpx.Response(200, text=_ATOM)
+        return httpx.Response(200, json={"data": [
+            {"title": "Malaria arthritis open access study", "abstract": "A" * 120, "year": 2021,
+             "externalIds": {"PubMedCentral": "9100002", "PubMed": "91000002", "CorpusId": 11}},
+            {"title": "Arthritis and malaria in northern Uganda", "abstract": "B" * 120, "year": 2020,
+             "externalIds": {"PubMed": "91000001", "CorpusId": 12}},
+            {"title": "Gout in Kampala outpatients", "abstract": "Gout was diagnosed in 4.1% of 2,000 adults " * 3,
+             "year": 2022, "externalIds": {"CorpusId": 987654321, "DOI": "10.4314/ahs.v22i1.5"},
+             "journal": {"name": "African Health Sciences"}, "authors": [{"name": "J. Mugisha"}]},
+            {"title": "No abstract here", "abstract": None, "year": 2022, "externalIds": {"CorpusId": 13}}]})
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(arxiv_live, "_last", [0.0])
+    monkeypatch.setattr(arxiv_live.time, "sleep", lambda s: None)
+    calls = []
+    real_pmc = pmc.PMCClient
+    ids = ["2609.01234", "2609.09999", "S2987654321", "PMID91000001", "PMC9100002", "S213"]
+    ctx = RunContext.create("knee osteoarthritis and gout in East Africa", llm_factory=lambda strong=False: FakeLLM())
+    try:
+        assert arxiv_live.arxiv_query('"deep learning" AND knee') == 'all:"deep learning" AND all:knee'
+        res = LV.run_search(ctx, '"deep learning" AND knee', "no recent preprints", by="test", client=client,
+                            source="arxiv")
+        assert res["paper_ids"] == ["2609.01234"], "an entry without a usable abstract is skipped"
+        row = ctx.pg.execute("SELECT source, doi, year, health_reason FROM papers WHERE paper_id='2609.01234'").fetchone()
+        assert row["source"] == "arxiv" and row["doi"] == "10.1234/knee.2026" and row["year"] == 2026
+        assert row["health_reason"].startswith("arxiv live:")
+        assert any("search_query=all" in u for u in seen)
+
+        monkeypatch.setattr(pmc, "PMCClient", lambda *a, **k: real_pmc(transport=_pubmed_transport(calls)))
+        res = LV.run_search(ctx, "gout Kampala", "nothing on gout", by="test", client=client,
+                            source="semantic_scholar")
+        assert set(res["paper_ids"]) == {"PMC9100002", "PMID91000001", "S2987654321"}
+        got = {r["paper_id"]: r for r in ctx.pg.execute(
+            "SELECT paper_id, source, journal_ref, doi FROM papers WHERE paper_id = ANY(%s)", (ids,)).fetchall()}
+        assert got["S2987654321"]["source"] == "s2" and got["S2987654321"]["journal_ref"] == "African Health Sciences"
+        assert got["PMC9100002"]["source"] == "pmc" and got["PMID91000001"]["source"] == "pubmed"
+        assert "S213" not in got
+        note = ctx.notes()["live_search"]
+        assert [x["source"] for x in note["searches"]] == ["arXiv", "Semantic Scholar"]
+        md = "\n".join(LV.markdown(ctx))
+        assert "Searched Semantic Scholar by the test" in md and "Searched arXiv by the test" in md
+        # an S2 paper is cited and linked like any other
+        assert CITE.findall("as reported [S2987654321].")
+        from research_agent.agents.report import _cite
+        assert _cite("S2987654321") == "[S2987654321]"
+    finally:
+        ctx.close()
+        with __import__("research_agent.db", fromlist=["get_conn"]).get_conn() as pg:
+            for table in ("run_papers", "screening", "paper_fulltext", "papers"):
+                pg.execute(f"DELETE FROM {table} WHERE paper_id = ANY(%s)", (ids,))
+
+
+def test_open_access_copy_is_found_for_a_paper_without_full_text(loaded_db, monkeypatch):
+    """A paper chosen to be read in full that PMC lacks gets a legal copy through Unpaywall; a wrong document or
+    no copy at all leaves it to its abstract, and it is not looked up again."""
+    import dataclasses
+
+    import httpx
+
+    from research_agent.db import get_conn
+    from research_agent.ingestion import fulltext, openaccess as OA
+
+    body = ("<html><body><h1>Gout in Kampala outpatients</h1><h2>Methods</h2><p>" + "We enrolled adults attending "
+            "Mulago outpatient clinics and diagnosed gout by the 2015 ACR/EULAR criteria. " * 40 + "</p><h2>Results"
+            "</h2><p>" + "Gout was diagnosed in 4.1% of 2,000 adults. " * 30 + "</p></body></html>")
+
+    def handler(request):
+        u = str(request.url)
+        if "api.unpaywall.org" in u:
+            if "10.1/good" in u:
+                return httpx.Response(200, json={"best_oa_location": {"url": "https://repo.example/gout.html",
+                                                                     "license": "cc-by", "host_type": "repository",
+                                                                     "version": "acceptedVersion"}})
+            if "10.1/wrong" in u:
+                return httpx.Response(200, json={"best_oa_location": {"url": "https://repo.example/other.html"}})
+            return httpx.Response(200, json={"best_oa_location": None})
+        if u.endswith("gout.html"):
+            return httpx.Response(200, text=body, headers={"content-type": "text/html"})
+        if u.endswith("other.html"):
+            return httpx.Response(200, text=body.replace("Gout in Kampala outpatients", "Cardiology annual report")
+                                  .replace("Gout", "Stroke").replace("gout", "stroke"),
+                                  headers={"content-type": "text/html"})
+        return httpx.Response(404, json={})
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    monkeypatch.setattr(OA, "settings", dataclasses.replace(OA.settings, open_access_lookup=True))
+    monkeypatch.setattr(OA, "_http", lambda: client)
+    monkeypatch.setenv("UNPAYWALL_EMAIL", "test@example.org")
+    ids = ["PMID92000001", "PMID92000002", "PMID92000003"]
+    try:
+        with get_conn() as pg:
+            for pid, doi, title in (("PMID92000001", "10.1/good", "Gout in Kampala outpatients"),
+                                    ("PMID92000002", "10.1/wrong", "Gout in Gulu outpatients"),
+                                    ("PMID92000003", "10.1/none", "Gout in Mbarara outpatients")):
+                pg.execute("INSERT INTO papers (paper_id, source, title, abstract, categories, primary_category, year, "
+                           "doi, health_reason) VALUES (%s,'pubmed',%s,'An abstract.',%s,'pubmed',2022,%s,'test')",
+                           (pid, title, ["pubmed"], doi))
+            status = fulltext.fetch_fulltext(pg, ids)
+            rows = {r["paper_id"]: r for r in pg.execute(
+                "SELECT paper_id, status, resolution, sections FROM paper_fulltext WHERE paper_id = ANY(%s)",
+                (ids,)).fetchall()}
+        assert status["PMID92000001"] == "ok" and rows["PMID92000001"]["status"] == "ok"
+        assert "repository, acceptedVersion; cc-by; https://repo.example/gout.html" in rows["PMID92000001"]["resolution"]
+        assert any(s["heading"].lower().startswith("methods") for s in rows["PMID92000001"]["sections"])
+        assert rows["PMID92000002"]["status"] == "missing", "a copy that is not the paper is refused"
+        assert rows["PMID92000003"]["status"] == "missing" and rows["PMID92000003"]["resolution"] == OA.LOOKED
+        # looked for once: not again
+        with get_conn() as pg:
+            assert OA.fill_missing(pg, ids, client=client) == {}
+        sec = OA.to_sections([{"heading": "Page 1", "text": "Title\nIntroduction\nWhy.\n2. Methods\nHow.\n"
+                                                            "Results\nWhat.\nReferences\n1. A ref."}])
+        assert [s["heading"] for s in sec] == ["Front matter", "Introduction", "Methods", "Results"]
+    finally:
+        with get_conn() as pg:
+            pg.execute("DELETE FROM paper_fulltext WHERE paper_id = ANY(%s)", (ids,))
+            pg.execute("DELETE FROM papers WHERE paper_id = ANY(%s)", (ids,))
+
+
 def test_the_ai_decides_and_code_limits_live_searches(loaded_db, monkeypatch):
     """A systematic run asks the model whether the eligible set is enough; when it is not, the model's PubMed
     query is run within the run's limits and the papers found are screened like the rest."""

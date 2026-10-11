@@ -79,6 +79,10 @@ class Settings:
     analysis_read_chars: int = int(os.getenv("ANALYSIS_READ_CHARS", "24000"))
     analysis_max_papers: int = int(os.getenv("ANALYSIS_MAX_PAPERS", "80"))
 
+    # Full texts the corpus lacks are looked for as legal open-access copies (arXiv PDFs, Unpaywall with
+    # UNPAYWALL_EMAIL or PMC_EMAIL, Semantic Scholar links); see ingestion/openaccess.py. 0 turns it off.
+    open_access_lookup: bool = os.getenv("OPEN_ACCESS_LOOKUP", "1").lower() in ("1", "true", "yes")
+
     # Run limits (cost guards)
     max_shortlist: int = int(os.getenv("MAX_SHORTLIST", "60"))
     max_fulltext: int = int(os.getenv("MAX_FULLTEXT", "20"))

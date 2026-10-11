@@ -126,11 +126,11 @@ def fetch_fulltext(pg, paper_ids: list[str]) -> dict[str, str]:
                 print(f"PMC full-text download failed, {len(pmc_ids)} papers skipped for now: {str(exc)[:160]}")
             todo = [pid for pid in todo if pid not in have and pid not in set(pmc_ids)]
         # a PubMed record or a user's document has no other text source: it is read from what is stored
-        for pid in [p for p in todo if sources.get(p) in ("pubmed", "upload")]:
+        for pid in [p for p in todo if sources.get(p) in ("pubmed", "upload", "s2")]:
             pg.execute("INSERT INTO paper_fulltext (paper_id, status) VALUES (%s,'missing') ON CONFLICT DO NOTHING",
                        (pid,))
             have[pid] = "missing"
-        todo = [p for p in todo if sources.get(p) not in ("pubmed", "upload")]
+        todo = [p for p in todo if sources.get(p) not in ("pubmed", "upload", "s2")]
     if todo:
         from research_agent.ingestion.load import duck
 
@@ -155,6 +155,15 @@ def fetch_fulltext(pg, paper_ids: list[str]) -> dict[str, str]:
             pg.execute("INSERT INTO paper_fulltext (paper_id, status) VALUES (%s,'missing') "
                        "ON CONFLICT DO NOTHING", (pid,))
             have[pid] = "missing"
+    # no text in PMC or the arXiv dataset: look for a legal open-access copy before settling for the abstract
+    missing = [p for p, s in have.items() if s == "missing"]
+    if missing:
+        try:
+            from research_agent.ingestion import openaccess
+
+            have.update(openaccess.fill_missing(pg, missing))
+        except Exception as exc:
+            print(f"open-access lookup failed: {str(exc)[:160]}")
     return have
 
 

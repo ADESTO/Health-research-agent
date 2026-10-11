@@ -469,6 +469,21 @@ python -m research_agent.cli fieldpass <run_id> q_study_system --values "human,a
     --definition "What the study was done in: human participants, animals, or cells or tissue outside a body."
 ```
 
+### Beyond the loaded corpus: live search and open-access copies
+
+A run can search three sources during the run, each through its official API: **PubMed** (clinical and
+public-health studies), **arXiv** (recent AI and modelling preprints, including those posted after the loaded
+snapshot) and **Semantic Scholar** (all publishers, including journals neither PMC nor arXiv holds). The
+discovery agent and the evidence check choose the source for each search; code holds the limits
+(`LIVE_SEARCH_MAX_CALLS`, `LIVE_SEARCH_MAX_PAPERS`). A Semantic Scholar paper with no PubMed, PMC or arXiv id
+is cited as `[S2<corpus id>]`. A free `SEMANTIC_SCHOLAR_API_KEY` raises its allowance.
+
+When a paper chosen to be read in full has no text in PMC or the arXiv dataset, a legal open-access copy is
+looked for before it is read from its abstract: the arXiv PDF, then Unpaywall by DOI (the publisher's free
+copy or an accepted manuscript in a university repository; set `UNPAYWALL_EMAIL`, or `PMC_EMAIL` is used),
+then Semantic Scholar's open-access link. A copy that does not contain the paper's title is refused; where the
+copy came from and its licence are recorded with the text. `OPEN_ACCESS_LOOKUP=0` turns it off.
+
 ### What the studies say: close reading of the papers read in full
 
 Counting shows how often something appears. It cannot say what the studies found, how a field's methods moved

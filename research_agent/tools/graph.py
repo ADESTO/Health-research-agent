@@ -69,6 +69,8 @@ def _short(title: str, n: int = 48) -> str:
 def _url(pid: str, corpus: str | None) -> str:
     if corpus == "upload" or pid.startswith("UP"):
         return f"/documents/{pid[2:]}/file"
+    if corpus == "s2" or pid.startswith("S2"):
+        return f"https://api.semanticscholar.org/CorpusID:{pid[2:]}"
     if corpus == "pubmed" or pid.startswith("PMID"):
         return f"https://pubmed.ncbi.nlm.nih.gov/{pid[4:]}/"
     return f"https://pmc.ncbi.nlm.nih.gov/articles/{pid}/" if (corpus == "pmc" or pid.startswith("PMC")) \

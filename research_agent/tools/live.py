@@ -1,4 +1,8 @@
-"""The AI decides, code limits: searching PubMed during a run when the loaded corpus looks too thin.
+"""The AI decides, code limits: searching beyond the loaded corpus during a run when it looks too thin.
+
+Three sources, each through its official API (never the open web): PubMed (clinical and public-health
+literature), arXiv (preprints: AI, modelling, data science) and Semantic Scholar (all disciplines and
+publishers, including journals neither PMC nor arXiv holds). The AI picks the source for each search.
 
 Two places can decide:
   - the discovery agent of an agent-chosen run, through the search_pubmed_live tool, as one more search;
@@ -45,10 +49,31 @@ def room(ctx) -> tuple[int, int]:
             max(0, settings.live_search_max_papers - s["papers"]))
 
 
-def run_search(ctx, query: str, why: str, by: str, limit: int | None = None, client=None) -> dict:
-    """One live search, within the run's limits, recorded on the run. Returns the result or {"error"}."""
+SOURCES = {"pubmed": "PubMed", "arxiv": "arXiv", "semantic_scholar": "Semantic Scholar"}
+SOURCE_HELP = ('pubmed: PubMed syntax, e.g. "arthritis"[MeSH Terms] AND (Kenya OR Uganda), with publication types '
+               'like "Randomized Controlled Trial"[pt]; arxiv: arXiv syntax, e.g. all:"deep learning" AND all:malaria '
+               '(preprints in AI, modelling and data science); semantic_scholar: plain keywords, e.g. arthritis '
+               'prevalence Uganda community survey (all publishers, including African journals outside PubMed)')
+
+
+def _searcher(source: str):
+    if source == "arxiv":
+        from research_agent.ingestion import arxiv_live
+        return arxiv_live.live_search
+    if source == "semantic_scholar":
+        from research_agent.ingestion import s2
+        return s2.live_search
     from research_agent.ingestion import pubmed
+    return pubmed.live_search
+
+
+def run_search(ctx, query: str, why: str, by: str, limit: int | None = None, client=None,
+               source: str = "pubmed") -> dict:
+    """One live search, within the run's limits, recorded on the run. Returns the result or {"error"}."""
     from research_agent.tools.review import log_identified
+
+    source = source if source in SOURCES else "pubmed"
+    label = SOURCES[source]
 
     if not settings.live_search:
         return {"error": "live search is switched off on this server (LIVE_SEARCH=0)"}
@@ -58,19 +83,19 @@ def run_search(ctx, query: str, why: str, by: str, limit: int | None = None, cli
                          f"{settings.live_search_max_papers} papers); work with what is loaded"}
     query = " ".join((query or "").split())[:500]
     if len(query) < 3:
-        return {"error": "give a PubMed query"}
+        return {"error": f"give a {label} query"}
     n = max(1, min(int(limit or papers_left), papers_left, 200))
-    ctx.emit("live_search", "start", {"task": f"searching PubMed: {query[:160]}"})
+    ctx.emit("live_search", "start", {"task": f"searching {label}: {query[:160]}"})
     try:
-        res = pubmed.live_search(ctx.pg, query, limit=n, client=client, label=query)
+        res = _searcher(source)(ctx.pg, query, limit=n, client=client, label=query)
     except Exception as exc:
         ctx.emit("live_search", "error", {"error": str(exc)[:300]})
-        return {"error": f"PubMed could not be reached: {str(exc)[:200]}"}
-    log_identified(ctx, res["paper_ids"], f"live PubMed search: {query}"[:200])
+        return {"error": f"{label} could not be reached: {str(exc)[:200]}"}
+    log_identified(ctx, res["paper_ids"], f"live {label} search: {query}"[:200])
     s = _state(ctx)
     s["calls"] += 1
     s["papers"] += len(res["paper_ids"])
-    s["searches"].append({"by": by, "why": " ".join((why or "").split())[:500], "query": query,
+    s["searches"].append({"source": label, "by": by, "why": " ".join((why or "").split())[:500], "query": query,
                           "matched": res["matched"], "brought_in": len(res["paper_ids"]),
                           "open_access": res["loaded_open_access"], "abstract_only": res["loaded_abstract_only"]})
     ctx.save_note(NOTE, s)
@@ -79,8 +104,8 @@ def run_search(ctx, query: str, why: str, by: str, limit: int | None = None, cli
 
 
 # ---------------------------------------------------------------- the discovery agent's tool
-def _tool(ctx, query: str, why: str, limit: int | None = None) -> dict:
-    res = run_search(ctx, query, why, by="discovery agent", limit=limit)
+def _tool(ctx, query: str, why: str, limit: int | None = None, source: str = "pubmed") -> dict:
+    res = run_search(ctx, query, why, by="discovery agent", limit=limit, source=source)
     if "error" in res:
         return res
     rows = {r["paper_id"]: r for r in ctx.pg.execute(
@@ -89,16 +114,20 @@ def _tool(ctx, query: str, why: str, limit: int | None = None) -> dict:
     return {"query": query, "found_in_pubmed": res["matched"],
             "results": [rows[p] for p in res["paper_ids"] if p in rows][:60],
             "note": "These papers are now in the corpus. Add the ones that answer the question with "
-                    "add_to_shortlist, as with any search. Papers with source 'pubmed' have an abstract only."}
+                    "add_to_shortlist, as with any search. Papers with source 'pubmed' or 's2' are records "
+                    "(title and abstract); a legal full text is looked for when one is read in full."}
 
 
 LIVE_TOOL = Tool(
-    "search_pubmed_live",
-    "Search PubMed itself when the loaded corpus clearly lacks studies the question needs (few results, a "
-    "country, population or period the question names is missing). Fetches the matching papers into the corpus "
-    "and returns them; then add the relevant ones to the shortlist. Limited per run, so use it only when the "
-    "corpus searches have come up short, and say why.",
-    obj({"query": {**STR, "description": 'PubMed syntax, e.g. "arthritis"[MeSH Terms] AND (Kenya OR Uganda)'},
+    "search_live",
+    "Search beyond the loaded corpus when it clearly lacks studies the question needs (few results, a country, "
+    "population, period or kind of study the question names is missing). source: pubmed for clinical and "
+    "public-health studies, arxiv for recent AI and modelling preprints, semantic_scholar for other publishers "
+    "and journals PubMed does not index. Fetches the matching papers into the corpus and returns them; then add "
+    "the relevant ones to the shortlist. Limited per run, so use it only when the corpus searches have come up "
+    "short, and say why.",
+    obj({"query": {**STR, "description": SOURCE_HELP},
+         "source": {"type": "string", "enum": list(SOURCES), "description": "Where to search (default pubmed)"},
          "why": {**STR, "description": "What the loaded corpus is missing"},
          "limit": {**INT, "description": "Papers to fetch (at most 200)"}}, ["query", "why"]),
     _tool)
@@ -145,7 +174,9 @@ reference standard; management practice needs audits, cohorts or guideline-adher
 studies spread across the period. Then look at the studies you are given (titles, years and stated designs)
 and name each kind of evidence the question needs that is missing or thin.
 
-For each, write a PubMed query that would find it: the question's concepts joined with AND, synonyms with OR,
+For each, choose where to search (pubmed for clinical and public-health studies, which is the usual choice;
+arxiv for AI and modelling preprints; semantic_scholar for journals PubMed does not index, such as many
+regional and engineering journals) and write a query in that source's syntax. For PubMed: the question's concepts joined with AND, synonyms with OR,
 and the design as publication types or design words (e.g. ("artificial intelligence" OR "machine learning")
 AND (Kenya OR Uganda OR Africa) AND ("Randomized Controlled Trial"[pt] OR "Clinical Trial"[pt] OR
 "randomised" OR "stepped-wedge" OR "before-after")). Stay inside the question. List the most important first.
@@ -157,7 +188,9 @@ EVIDENCE_TOOL = {"name": "record_evidence_check", "description": "Record which k
                          "evidence": {**STR, "description": "The kind of evidence, e.g. 'trials of AI tools with patient outcomes'"},
                          "held": {**STR, "description": "What the collected studies hold of it"},
                          "missing": {"type": "boolean"},
-                         "query": {**STR, "description": "PubMed query that would find it, or '' when not missing"}},
+                         "source": {"type": "string", "enum": list(SOURCES)},
+                         "query": {**STR, "description": "Query in the chosen source's syntax, or '' when not missing. "
+                                                          + SOURCE_HELP}},
                          "required": ["evidence", "missing"]}},
                      "reason": STR}, ["needed"])}
 
@@ -208,7 +241,8 @@ def evidence_check(ctx) -> dict:
         out["reason"] = " ".join(str(args.get("reason") or "").split())[:500]
         out["needed"] = [{"evidence": " ".join(str(n.get("evidence") or "").split())[:200],
                           "held": " ".join(str(n.get("held") or "").split())[:300],
-                          "missing": bool(n.get("missing")), "query": " ".join(str(n.get("query") or "").split())[:500]}
+                          "missing": bool(n.get("missing")), "query": " ".join(str(n.get("query") or "").split())[:500],
+                          "source": n.get("source") if n.get("source") in SOURCES else "pubmed"}
                          for n in args.get("needed") or [] if isinstance(n, dict) and n.get("evidence")][:6]
         new_ids: list[str] = []
         have = set(ctx.shortlist_ids())
@@ -217,7 +251,7 @@ def evidence_check(ctx) -> dict:
                 n["searched"] = "not searched: the run's live searches were used up"
                 continue
             res = run_search(ctx, n["query"], f"the studies lack {n['evidence']}", by="evidence check after reading",
-                             limit=60)
+                             limit=60, source=n["source"])
             if "error" in res:
                 n["searched"] = res["error"]
                 continue
@@ -233,7 +267,7 @@ def evidence_check(ctx) -> dict:
                 if gone:
                     log_decision(ctx, gone, "excluded", "evidence check: not eligible at screening")
             keep = keep[:EVIDENCE_ADD_MAX]
-            n["searched"] = f"PubMed matched {res['matched']}; {len(found)} new to the run; {len(keep)} relevant added"
+            n["searched"] = f"{SOURCES[n['source']]} matched {res['matched']}; {len(found)} new to the run; {len(keep)} relevant added"
             n["added"] = keep
             new_ids += keep
         if new_ids:
@@ -245,9 +279,9 @@ def evidence_check(ctx) -> dict:
                                (ctx.run_id, pid, "found by the evidence check: a kind of evidence the question needs", 0.9))
             log_decision(ctx, new_ids, "included", "evidence check: the kind of evidence the question needs")
             extract_papers(ctx, new_ids, depth="abstract")
-            open_access = [p for p in new_ids if p.startswith("PMC")]
-            if open_access:
-                extract_papers(ctx, open_access, depth="fulltext", limit=len(open_access))
+            # read in full where a text exists: PMC, arXiv, or a legal open-access copy found by DOI
+            first = new_ids[:15]
+            extract_papers(ctx, first, depth="fulltext", limit=len(first))
         out["added"] = new_ids
         ctx.emit("evidence_check", "finish", {"output": {"missing": sum(1 for n in out["needed"] if n["missing"]),
                                                          "papers_added": len(new_ids)}})
@@ -264,7 +298,8 @@ def evidence_markdown(ctx) -> list[str]:
         return []
     L = ["## Was the right kind of evidence looked for? (computed)", "",
          "After the papers were read, the AI listed the kinds of evidence the question needs and checked whether "
-         "the collected studies hold them. Each kind that was missing was searched for in PubMed, and relevant "
+         "the collected studies hold them. Each kind that was missing was searched for (in PubMed, arXiv or Semantic "
+         "Scholar, whichever suits it), and relevant "
          "papers were added and read. A conclusion that evidence is absent rests on this search, not only on "
          "the papers first collected.", ""]
     for n in e.get("needed") or []:
@@ -273,7 +308,7 @@ def evidence_markdown(ctx) -> list[str]:
         if n.get("held"):
             line += f" {n['held']}"
         if n.get("query"):
-            line += f" Searched: `{n['query']}`."
+            line += f" Searched {SOURCES.get(n.get('source') or 'pubmed', 'PubMed')}: `{n['query']}`."
         if n.get("searched"):
             line += f" {n['searched']}."
         L.append(line)
@@ -287,16 +322,16 @@ def markdown(ctx) -> list[str]:
     checks = s.get("checks") or []
     if not s.get("searches") and not checks:
         return []
-    L = ["## Live PubMed searches (computed)", "",
-         "The loaded corpus was searched first. These searches of PubMed were made during the run because the AI "
-         "judged the studies found so far insufficient; code limited them to PubMed and to "
+    L = ["## Live searches beyond the loaded corpus (computed)", "",
+         "The loaded corpus was searched first. These searches were made during the run because the AI "
+         "judged the studies found so far insufficient; code limited them to PubMed, arXiv and Semantic Scholar and to "
          f"{settings.live_search_max_papers} papers. Papers open access in PMC were read with their full text; "
-         "the others from their PubMed abstract.", ""]
+         "the others from their abstract unless a legal open-access copy was found.", ""]
     for c in checks:
         if c.get("enough"):
             L.append(f"- Check after screening: the eligible studies were judged sufficient. {c.get('reason', '')}")
     for x in s.get("searches") or []:
-        L.append(f"- Searched by the {x['by']}: `{x['query']}`. Why: {x['why'] or 'not stated'} "
-                 f"PubMed matched {x['matched']}; {x['brought_in']} brought into the run "
+        L.append(f"- Searched {x.get('source', 'PubMed')} by the {x['by']}: `{x['query']}`. Why: {x['why'] or 'not stated'} "
+                 f"{x.get('source', 'PubMed')} matched {x['matched']}; {x['brought_in']} brought into the run "
                  f"({x['open_access']} new open-access, {x['abstract_only']} new abstract-only).")
     return L + [""]

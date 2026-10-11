@@ -17,6 +17,7 @@ os.environ["MIN_YEAR"] = "2015"
 os.environ["MAX_FULLTEXT"] = "5"
 os.environ["RA_ENV_FILE"] = "/nonexistent"
 os.environ["CITATIONS"] = "0"
+os.environ["OPEN_ACCESS_LOOKUP"] = "0"   # no network in tests; the open-access lookup has its own mocked test
 os.environ["EMBEDDED_WORKERS"] = "0"   # tests run queued jobs themselves   # no calls to the real OpenAlex; citation tests use a mock server
 
 import psycopg  # noqa: E402

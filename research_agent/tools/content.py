@@ -203,7 +203,7 @@ def passages(cards: dict[str, dict]) -> dict[str, dict]:
 
 
 def cite(pid: str) -> str:
-    return f"[{pid}]" if pid.startswith(("PMC", "UP", "PMID")) else f"[arXiv:{pid}]"
+    return f"[{pid}]" if pid.startswith(("PMC", "UP", "PMID", "S2")) else f"[arXiv:{pid}]"
 
 
 def digest(papers: list[dict], cards: dict[str, dict], per_paper: int = 2600) -> str:
@@ -333,8 +333,8 @@ def collapse_repeats(text: str) -> str:
     return re.sub(r"(\[[^\]\[]+\])(?:\s*\1)+", r"\1", text)
 
 
-_ID = re.compile(r"(?:arXiv:)?(?:(?:PMC|UP|PMID)\d+|\d{4}\.\d{4,5}(?:v\d+)?|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(?:#[A-Z]\d+)?")
-_PAPER_CITE = re.compile(r"\[(?:arXiv:)?((?:PMC|UP|PMID)\d+|\d{4}\.\d{4,5}(?:v\d+)?|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})\]")
+_ID = re.compile(r"(?:arXiv:)?(?:(?:PMC|UP|PMID|S2)\d+|\d{4}\.\d{4,5}(?:v\d+)?|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})(?:#[A-Z]\d+)?")
+_PAPER_CITE = re.compile(r"\[(?:arXiv:)?((?:PMC|UP|PMID|S2)\d+|\d{4}\.\d{4,5}(?:v\d+)?|[a-z\-]+(?:\.[A-Z]{2})?/\d{7})\]")
 
 
 def _call(ctx, system: str, tool: dict, user: str) -> dict:
