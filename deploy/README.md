@@ -125,6 +125,39 @@ stop again in the same place. A run that found no papers to analyse is not offer
 with a wider question. From the terminal, `hra ask --resume <run_id>` (or `hra map --resume <run_id>`) does the
 same.
 
+## Other apps on the same server
+
+Caddy answers on ports 80 and 443 for every app on this server. Each other app runs in its own folder with its own
+`docker compose`, joins the shared `web` network (created by this app's compose file; only Caddy and public-facing
+apps are on it, so this app's database stays private), and gets its own address from a small file in
+`deploy/sites/`:
+
+```
+# deploy/sites/geoagent.caddy
+geo.169-58-108-91.sslip.io {
+	encode gzip
+	reverse_proxy geoagent:8080
+}
+```
+
+In the other app's `docker-compose.yml`, put its service on the `web` network (and publish no ports):
+
+```yaml
+services:
+  geoagent:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    networks: [web]
+networks:
+  web:
+    external: true
+```
+
+Then `docker compose up -d --build` in that app's folder, and reload Caddy here with
+`docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile`. Files in `deploy/sites/` are not in git,
+so updating this app never touches them.
+
 ## What testers can and cannot do
 
 | | Tester | Admin (you) |

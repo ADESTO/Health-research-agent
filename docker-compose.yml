@@ -52,7 +52,15 @@ services:
       - "443:443"
     volumes:
       - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./deploy/sites:/etc/caddy/sites:ro     # other apps' addresses (deploy/README.md)
       - caddy-data:/data
+    # default: reaches this app; web: reaches other apps on the server, which join only `web`, so they never
+    # see this app's database
+    networks: [default, web]
+
+networks:
+  web:
+    name: web
 
 volumes:
   pgdata:

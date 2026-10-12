@@ -3,3 +3,7 @@
 	encode gzip
 	reverse_proxy api:8000
 }
+
+# Other apps on this server: one file per app in deploy/sites/ (kept out of git, so updates never clash with it),
+# e.g. deploy/sites/geoagent.caddy. See deploy/README.md, "Other apps on the same server".
+import /etc/caddy/sites/*.caddy
